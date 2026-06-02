@@ -33,7 +33,16 @@ extern SLSConnectionID CGSMainConnectionID(void);
 // apart. Pair with CGWindowList (which only reports the rendered tab) and the
 // AXTabbedWindows attribute for tab-group heads.
 //
-// `options` 0x2 lists on-screen windows; `setTags`/`clearTags` may be NULL.
+// All spaces, across every display — the way to reach windows that aren't on
+// the current Mission Control space (CGWindowList's on-screen list can't).
+// Returns an array of per-display dictionaries; each has a "Spaces" array of
+// space dictionaries keyed by "id64" (int64 space id), "ManagedSpaceID", and
+// "type". Feed those space ids to SLSCopyWindowsWithOptionsAndTags.
+extern CFArrayRef SLSCopyManagedDisplaySpaces(SLSConnectionID cid);
+
+// Window ids in the given spaces. `owner` 0 = any process; `options` 0x2 is the
+// usual "all windows in these spaces"; `setTags`/`clearTags` may point to 0.
+// Returns a CFArray of CFNumber window ids.
 extern CFArrayRef SLSCopyWindowsWithOptionsAndTags(SLSConnectionID cid, uint32_t owner,
                                                    CFArrayRef spaces, uint32_t options,
                                                    uint64_t *setTags, uint64_t *clearTags);

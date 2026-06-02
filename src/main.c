@@ -2,10 +2,9 @@
 //   #include "extern/ax_private.h"
 //   #include "extern/skylight.h"
 
-int main(void) {
-    // Main loop
-    while (1) {
-    }
+void enumerate_windows(void);
 
+int main(void) {
+    enumerate_windows();
     return 0;
 }

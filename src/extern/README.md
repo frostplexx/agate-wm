@@ -12,7 +12,7 @@ Background and live-measured behaviour: `../../skylight-snapping-report.md`.
 | File | Framework | Lang | What |
 |------|-----------|------|------|
 | `ax_private.h` | ApplicationServices (HIServices) | C | `_AXUIElementGetWindow` (AX element → `CGWindowID`) and the undocumented `kAXTabbedWindowsAttribute` key. |
-| `skylight.h` | SkyLight | C | Window enumeration/iteration (`SLSWindowQueryWindows`, `SLSWindowIterator*`), snap-zone detection (`SLSSnappingInfo*`), native tile spaces (`SLSSpaceCreateTile`, …). |
+| `skylight.h` | SkyLight | C | Spaces (`SLSCopyManagedDisplaySpaces`, `SLSCopyWindowsWithOptionsAndTags`), window iteration (`SLSWindowQueryWindows`, `SLSWindowIterator*`), snap-zone detection (`SLSSnappingInfo*`), native tile spaces (`SLSSpaceCreateTile`, …). |
 | `nswindow_spi.h` | AppKit | ObjC | `NSWindow` tiling SPI: `_zoomToScreenEdge:`, `_divideFrameForEdge:`, tile-state queries. For windows you own. |
 | `window_management.h` | WindowManagement | ObjC | Tier-3 daemon path (`WMWindowTilingPosition`, transaction classes). Reference only — see below. |
 
@@ -56,6 +56,21 @@ windows and sheets/drawers as windows too. Combine sources instead:
    non-zero `SLSWindowIteratorGetParentID` as a child window.
 
 Only steps 2's key and step 4 are non-public; the rest is plain AX + CoreGraphics.
+
+## Windows on other spaces
+
+`CGWindowListCopyWindowInfo(..., kCGWindowListOptionOnScreenOnly, ...)` only
+reports the current Mission Control space. To see every window:
+
+1. `SLSCopyManagedDisplaySpaces` — list all spaces (walk each display's
+   `"Spaces"` array, read each space's `"id64"`).
+2. `SLSCopyWindowsWithOptionsAndTags(cid, 0, [spaceID], 0x2, …)` — the window
+   ids in a space (a CFArray of CFNumbers).
+3. `CGWindowListCreateDescriptionFromArray` — owner / title / bounds / layer for
+   those ids. Note its input array stores ids as raw integer pointer values, not
+   CFNumbers, so convert what SkyLight returns.
+
+`src/enumerate.c` is a worked example of exactly this.
 
 ## Notes
 
