@@ -19,13 +19,13 @@ static bool resolve_config_path(char *buf, size_t n) {
 
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (xdg && xdg[0]) {
-        snprintf(buf, n, "%s/wm/init.lua", xdg);
+        snprintf(buf, n, "%s/agate/init.lua", xdg);
         if (access(buf, R_OK) == 0) return true;
     }
 
     const char *home = getenv("HOME");
     if (home && home[0]) {
-        snprintf(buf, n, "%s/.config/wm/init.lua", home);
+        snprintf(buf, n, "%s/.config/agate/init.lua", home);
         if (access(buf, R_OK) == 0) return true;
     }
 
@@ -38,7 +38,7 @@ bool config_load(void) {
     char path[1024];
     if (!resolve_config_path(path, sizeof(path))) {
         fprintf(stderr, "config: no init.lua found "
-                        "(set $WM_CONFIG or create ~/.config/wm/init.lua)\n");
+                        "(set $WM_CONFIG or create ~/.config/agate/init.lua)\n");
         return false;
     }
 

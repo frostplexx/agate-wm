@@ -1,3 +1,4 @@
+# agate-wm
 - Instant space switching 
 - Moving windows between spaces
 - Correctly detect native tabs
@@ -5,7 +6,7 @@
 - built-in global shortcuts daemon
 - Built-in hyper key functionality
 
-# Getting Started
+## Getting Started
 
 Disable macOS's own space-switch-on-activate:
 

@@ -1,7 +1,7 @@
 # Window Manager build recipes
 
 build_dir := "build"
-binary := build_dir / "wm"
+binary := build_dir / "agate"
 
 cc := "clang"
 cflags := "-g -O3 -Wall -Wextra -fobjc-arc"
