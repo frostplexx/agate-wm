@@ -5,6 +5,7 @@
 #include "accessibility/enumerate.h"
 #include "accessibility/observers.h"
 #include "config/config.h"
+#include "utils/verify_perms.h"
 
 static void on_wm_event(WMEventType event, pid_t pid, CGWindowID wid, void *userdata) {
     (void)userdata;
@@ -22,8 +23,7 @@ static void on_wm_event(WMEventType event, pid_t pid, CGWindowID wid, void *user
 int main(void) {
     platform_init();
 
-    if (!AXIsProcessTrusted()) {
-        fprintf(stderr, "error: accessibility permissions required — grant access in System Settings → Privacy → Accessibility\n");
+    if (!verify_perms()) {
         return 1;
     }
 
