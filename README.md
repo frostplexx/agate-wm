@@ -5,7 +5,7 @@
 - built-in global shortcuts daemon
 - Built-in hyper key functionality
 
-
+# Getting Started
 
 Disable macOS's own space-switch-on-activate:
 
