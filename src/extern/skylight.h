@@ -24,6 +24,19 @@ typedef void    *SLSSnappingInfoRef;
 // Window-server connection for this process.
 extern SLSConnectionID CGSMainConnectionID(void);
 
+// --- Active space identity --------------------------------------------------
+// Read the *current* active space id, regardless of how the space change was
+// triggered. NSWorkspaceActiveSpaceDidChangeNotification only fires for
+// explicit space navigation (swipe, Ctrl+arrow, Mission Control) — it is NOT
+// posted when Cmd+Tab "auto-swooshes" to an app whose window is on another
+// space. Re-reading the active space on app activation closes that gap.
+//
+// SLSCopyActiveMenuBarDisplayIdentifier returns the UUID of the display owning
+// the active menu bar (i.e. the focused display); feed it to
+// SLSManagedDisplayGetCurrentSpace to get that display's current space id.
+extern CFStringRef SLSCopyActiveMenuBarDisplayIdentifier(SLSConnectionID cid);
+extern uint64_t    SLSManagedDisplayGetCurrentSpace(SLSConnectionID cid, CFStringRef uuid);
+
 // --- Window enumeration / iteration ----------------------------------------
 // The window server's own window query — the robust way (used by yabai) to
 // enumerate real windows and read their parent id, level, tags and attributes
@@ -46,6 +59,12 @@ extern CFArrayRef SLSCopyManagedDisplaySpaces(SLSConnectionID cid);
 extern CFArrayRef SLSCopyWindowsWithOptionsAndTags(SLSConnectionID cid, uint32_t owner,
                                                    CFArrayRef spaces, uint32_t options,
                                                    uint64_t *setTags, uint64_t *clearTags);
+
+// The managed-space ids a set of windows belong to. `mask` is a space-selector
+// bitmask; 0xFFFFFFFFFFFFFFFF means "all spaces". Returns a CFArray of CFNumber
+// space ids — even for windows that live on a non-visible space. Use to find
+// which space the window you just activated (e.g. via Cmd+Tab) is sitting on.
+extern CFArrayRef SLSCopySpacesForWindows(SLSConnectionID cid, uint64_t mask, CFArrayRef windows);
 
 // Build a query over an array of CGWindowIDs, then iterate the result.
 extern CFTypeRef SLSWindowQueryWindows(SLSConnectionID cid, CFArrayRef windows, int count);
@@ -119,6 +138,16 @@ extern CFStringRef _SLWindowDisallowSnappingKey;       // opt this window out of
 extern CFStringRef _SLWindowDisallowSnappingTargetKey; // stop others snapping to this window
 // Posted when a tiled pair is live-resized.
 extern CFStringRef _kSLSCoordinatedTileResizeNotificationName;
+
+// --- Window-server event notifications (CoreGraphicsServices) --------------
+// CGSRegisterNotifyProc registers a C callback for low-level window-server
+// events. It resolves via CoreGraphics.framework (no extra -framework needed).
+// The proc is called on the main thread while the run loop is running.
+typedef void (*CGSNotifyProcPtr)(uint32_t type, void *data, size_t dataLength, void *userdata);
+extern CGError CGSRegisterNotifyProc(CGSNotifyProcPtr proc, uint32_t type, void *userdata);
+
+// Window-server event type for Mission Control space changes.
+#define kCGSNotificationSpaceChanged 1401
 
 #ifdef __cplusplus
 }

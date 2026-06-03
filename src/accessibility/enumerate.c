@@ -1,14 +1,4 @@
-// enumerate.c — minimal window enumeration across ALL spaces, built on the
-// src/extern bridges.
-//
-// CGWindowList's on-screen list only covers the current Mission Control space,
-// so we drive it from SkyLight instead:
-//   SLSCopyManagedDisplaySpaces      -> every space on every display
-//   SLSCopyWindowsWithOptionsAndTags -> the window ids living in each space
-//   CGWindowListCreateDescriptionFromArray -> owner / title / bounds / layer
-//   SLSWindowIteratorGetParentID     -> drop sheets / child windows
-
-#include "extern/skylight.h"
+#include "../extern/skylight.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -16,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-// SkyLight parent id of a window: 0 for a top-level window, non-zero for a
+// SkyLight parent id of a window: 0 for a top-level window, nonzero for a
 // sheet / drawer / child.
 static uint32_t window_parent_id(SLSConnectionID cid, uint32_t wid) {
     CFNumberRef widRef = CFNumberCreate(NULL, kCFNumberSInt32Type, &wid);
