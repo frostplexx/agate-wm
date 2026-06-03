@@ -164,9 +164,11 @@ bool platform_focus_space(uint64_t sid) {
     return true;
 }
 
-// Monotonic timestamp (seconds) of the most recent Cmd+Tab, so we only follow
-// space on activations the user actually triggered via the app switcher.
-static NSTimeInterval g_last_cmd_tab;
+// Monotonic timestamp (seconds) of the most recent explicit user action that
+// can cause an app to activate — a Cmd+Tab or a mouse click. We only follow
+// space on activations shortly after one of these, which excludes background
+// activations and the ones our own space switch provokes (no preceding input).
+static NSTimeInterval g_last_user_input;
 
 // Managed space id of a window. Mask 0x7 (user + fullscreen + system spaces);
 // ~0ULL wrongly returns the active space for any window. The array is empty for
@@ -273,10 +275,11 @@ static uint64_t app_front_window_space(pid_t pid) {
 static void switch_to_app_space(pid_t pid) {
     if (pid <= 0 || pid == getpid()) return;
 
-    // Only follow space for activations the user drove via Cmd+Tab in the last
-    // ~1.5s. This excludes background activations, Dock clicks, and the
-    // activations our own space switch provokes (which would ping-pong).
-    if (NSProcessInfo.processInfo.systemUptime - g_last_cmd_tab > 1.5) return;
+    // Only follow space for activations the user drove via Cmd+Tab or a click
+    // (e.g. a Dock icon) in the last ~1.5s. This excludes background
+    // activations and the ones our own space switch provokes (no preceding
+    // input → no ping-pong).
+    if (NSProcessInfo.processInfo.systemUptime - g_last_user_input > 1.5) return;
 
     uint64_t sid = app_front_window_space(pid);
     uint64_t cur = platform_active_space();
@@ -315,17 +318,22 @@ static CGEventRef alt_tab_tap_cb(CGEventTapProxy proxy, CGEventType type,
         return event;
     }
 
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+
     if (type == kCGEventKeyDown) {
-        CGKeyCode key    = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+        CGKeyCode key     = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
         CGEventFlags flag = CGEventGetFlags(event);
         if (key == kVK_Tab && (flag & kCGEventFlagMaskCommand)) {
-            NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-            // Always refresh the gate so it stays valid through a held Cmd+Tab,
-            // but coalesce the emitted event (Tab auto-repeats while Cmd is held).
-            bool fresh = now - g_last_cmd_tab > 0.3;
-            g_last_cmd_tab = now;
-            if (fresh && g_alt_cb) g_alt_cb(WM_EVENT_ALT_TAB, 0, 0, g_alt_ud);
+            g_last_user_input = now;  // gate the space-follow
+            // Coalesce the emitted event (Tab auto-repeats while Cmd is held).
+            static NSTimeInterval last_emit;
+            if (now - last_emit > 0.3) {
+                last_emit = now;
+                if (g_alt_cb) g_alt_cb(WM_EVENT_ALT_TAB, 0, 0, g_alt_ud);
+            }
         }
+    } else if (type == kCGEventLeftMouseDown) {
+        g_last_user_input = now;  // e.g. a Dock-icon click
     }
     return event;
 }
@@ -334,8 +342,8 @@ void platform_enable_alt_tab_space_switch(WMEventCallback cb, void *userdata) {
     g_alt_cb = cb;
     g_alt_ud = userdata;
 
-    // Detect Cmd+Tab via a listen-only session event tap.
-    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown);
+    // Detect Cmd+Tab and clicks (Dock icons) via a listen-only session tap.
+    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventLeftMouseDown);
     g_alt_tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
                                  kCGEventTapOptionListenOnly, mask, alt_tab_tap_cb, NULL);
     if (!g_alt_tap) {
