@@ -1,9 +1,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
 
-#include "platform.h"
+#include "platform/platform.h"
 #include "accessibility/enumerate.h"
 #include "accessibility/observers.h"
+#include "config/config.h"
 
 static void on_wm_event(WMEventType event, pid_t pid, CGWindowID wid, void *userdata) {
     (void)userdata;
@@ -25,6 +26,8 @@ int main(void) {
         fprintf(stderr, "error: accessibility permissions required — grant access in System Settings → Privacy → Accessibility\n");
         return 1;
     }
+
+    config_load();
 
     enumerate_windows();
 

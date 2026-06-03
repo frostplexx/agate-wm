@@ -5,7 +5,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "accessibility/observers.h"
+#include "../accessibility/observers.h"
+
+// Implementation is split across this folder:
+//   app.m     — NSApplication/NSWorkspace lifecycle and event observation
+//   space.m   — space queries, switching, and moving windows between spaces
+//   follow.m  — instant "follow focus to its space" on Cmd+Tab / Dock click
 
 // Must be called first. Initialises NSApplication as an accessory background
 // process (no Dock icon, no menu bar) while keeping the full per-session
@@ -45,13 +50,13 @@ bool platform_move_window_to_active_space(CGWindowID wid);
 // is not a space on the focused display.
 bool platform_focus_space(uint64_t sid);
 
-// Enable instant, no-SIP space following on app activation (Cmd+Tab / Dock).
-// When an app is activated whose front window lives on a non-visible space,
-// jump to that space instantly via platform_focus_space (skipping macOS's
-// auto-swoosh animation). Also registers the window-server Cmd+Tab signal and
-// emits WM_EVENT_ALT_TAB through `cb` when it fires. For the snappiest result,
-// disable System Settings → Desktop & Dock → "When switching to an application,
-// switch to a Space with open windows for the application".
+// Enable instant, no-SIP space following on app activation. When an app is
+// raised via Cmd+Tab or a Dock-icon click and its front window lives on a
+// non-visible space, jump to that space instantly via platform_focus_space
+// (skipping macOS's auto-swoosh animation). Emits WM_EVENT_ALT_TAB through `cb`
+// on each Cmd+Tab. For the snappiest result, disable System Settings →
+// Desktop & Dock → "When switching to an application, switch to a Space with
+// open windows for the application".
 void platform_enable_alt_tab_space_switch(WMEventCallback cb, void *userdata);
 
 #endif // PLATFORM_H
