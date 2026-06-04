@@ -12,4 +12,8 @@
 // Returns true if a config file was found and ran without error.
 bool config_load(void);
 
+// Close the config Lua state. Call on shutdown (optional; the daemon normally
+// runs until killed).
+void config_shutdown(void);
+
 #endif // CONFIG_H

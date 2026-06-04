@@ -25,6 +25,12 @@ void platform_watch_spaces(WMEventCallback cb, void *userdata);
 // (apps with a Dock presence, including Finder — even when it has no windows).
 void platform_watch_running_apps(WMEventCallback cb, void *userdata);
 
+// Keep observers in sync with app lifecycle: register AX observers (and announce
+// any already-open windows via WM_EVENT_WINDOW_APPEARED) when a regular app
+// launches, and unregister + emit WM_EVENT_APP_TERMINATED when one quits. Call
+// once after platform_watch_running_apps so newly launched apps auto-tile too.
+void platform_watch_app_lifecycle(WMEventCallback cb, void *userdata);
+
 // Current active (visible) space id of the focused display, or 0 if it can't
 // be read.
 uint64_t platform_active_space(void);

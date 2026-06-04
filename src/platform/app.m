@@ -1,5 +1,6 @@
 #import "platform.h"
 #import "../accessibility/observers.h"
+#import "../extern/ax_private.h"
 #import <AppKit/AppKit.h>
 
 void platform_init(void) {
@@ -58,4 +59,60 @@ void platform_watch_running_apps(WMEventCallback cb, void *userdata) {
         if (app.processIdentifier == getpid()) continue;
         observers_register_app((pid_t)app.processIdentifier, cb, userdata);
     }
+}
+
+// Announce the windows an app already has open as WM_EVENT_WINDOW_APPEARED.
+// observers_register_app subscribes to existing windows silently (to avoid
+// re-announcing startup windows); a freshly launched app may already own a
+// window by the time its launch notification fires, so we announce those here.
+// Re-announcing a window already in a tree is a no-op (the manager dedupes).
+static void announce_existing_windows(pid_t pid, WMEventCallback cb, void *userdata) {
+    if (!cb) return;
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    if (!app) return;
+    CFArrayRef wins = NULL;
+    if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&wins) == kAXErrorSuccess && wins) {
+        for (CFIndex i = 0; i < CFArrayGetCount(wins); i++) {
+            AXUIElementRef w = (AXUIElementRef)CFArrayGetValueAtIndex(wins, i);
+            CGWindowID wid = 0;
+            if (_AXUIElementGetWindow(w, &wid) == kAXErrorSuccess && wid) {
+                cb(WM_EVENT_WINDOW_APPEARED, pid, wid, userdata);
+            }
+        }
+        CFRelease(wins);
+    }
+    CFRelease(app);
+}
+
+void platform_watch_app_lifecycle(WMEventCallback cb, void *userdata) {
+    static id launch_token;    (void)launch_token;
+    static id terminate_token; (void)terminate_token;
+
+    NSNotificationCenter *wc = NSWorkspace.sharedWorkspace.notificationCenter;
+
+    launch_token = [wc
+        addObserverForName:NSWorkspaceDidLaunchApplicationNotification
+        object:nil
+        queue:NSOperationQueue.mainQueue
+        usingBlock:^(NSNotification *note) {
+            NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
+            if (!app || app.activationPolicy != NSApplicationActivationPolicyRegular) return;
+            if (app.processIdentifier == getpid()) return;
+            pid_t pid = (pid_t)app.processIdentifier;
+            if (observers_register_app(pid, cb, userdata)) {
+                announce_existing_windows(pid, cb, userdata);
+            }
+        }];
+
+    terminate_token = [wc
+        addObserverForName:NSWorkspaceDidTerminateApplicationNotification
+        object:nil
+        queue:NSOperationQueue.mainQueue
+        usingBlock:^(NSNotification *note) {
+            NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
+            if (!app) return;
+            pid_t pid = (pid_t)app.processIdentifier;
+            observers_unregister_app(pid);
+            if (cb) cb(WM_EVENT_APP_TERMINATED, pid, 0, userdata);
+        }];
 }

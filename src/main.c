@@ -5,20 +5,10 @@
 #include "accessibility/enumerate.h"
 #include "accessibility/observers.h"
 #include "config/config.h"
+#include "input/keybind.h"
+#include "input/mouse.h"
+#include "tree/manager.h"
 #include "utils/verify_perms.h"
-
-static void on_wm_event(WMEventType event, pid_t pid, CGWindowID wid, void *userdata) {
-    (void)userdata;
-    static const char *names[] = {
-        [WM_EVENT_WINDOW_MOVED]       = "window_moved",
-        [WM_EVENT_WINDOW_APPEARED]    = "window_appeared",
-        [WM_EVENT_WINDOW_RESIZED]     = "window_resized",
-        [WM_EVENT_WINDOW_DISAPPEARED] = "window_disappeared",
-        [WM_EVENT_SPACE_CHANGED]      = "space_changed",
-        [WM_EVENT_ALT_TAB]            = "alt_tab",
-    };
-    printf("[event] %-20s  pid=%-6d  wid=%u\n", names[event], pid, wid);
-}
 
 int main(void) {
     platform_init();
@@ -27,15 +17,26 @@ int main(void) {
         return 1;
     }
 
+    // Load config first: it registers the agate Lua API and the user's
+    // keybindings, and sets gaps/normalization options used below.
     config_load();
 
-    enumerate_windows();
+    // Adopt windows that are already open into their Space trees and tile.
+    enumerate_adopt_windows();
 
-    platform_watch_spaces(on_wm_event, NULL);
-    platform_watch_running_apps(on_wm_event, NULL);
-    platform_enable_alt_tab_space_switch(on_wm_event, NULL);
+    // Route all window/space events into the tiling manager.
+    platform_watch_spaces(manager_handle_event, NULL);
+    platform_watch_running_apps(manager_handle_event, NULL);
+    platform_watch_app_lifecycle(manager_handle_event, NULL);
+    platform_enable_alt_tab_space_switch(manager_handle_event, NULL);
 
-    printf("observing...\n");
+    // Interactive window drags: snap-back on move, weight recompute on resize.
+    mouse_watch(manager_handle_event, NULL);
+
+    // Start intercepting the configured global hotkeys.
+    keybind_start();
+
+    printf("agate: tiling\n");
     CFRunLoopRun();
     return 0;
 }

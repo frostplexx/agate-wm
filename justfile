@@ -22,6 +22,10 @@ build:
 run *args: build
     ./{{binary}} {{args}}
 
+# Build then run with debug logging (AGATE_DEBUG) enabled
+debug *args: build
+    AGATE_DEBUG=1 ./{{binary}} {{args}}
+
 # Remove build artifacts
 clean:
     rm -rf {{build_dir}}

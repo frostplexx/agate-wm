@@ -1,4 +1,5 @@
 #include "config.h"
+#include "lua_api.h"
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -8,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+// The config Lua state is kept alive for the daemon's lifetime: hotkey
+// callbacks registered from init.lua run stored Lua functions long after
+// config_load() returns.
+static lua_State *g_config_lua;
 
 // Write the resolved init.lua path into `buf`, or return false if none exists.
 static bool resolve_config_path(char *buf, size_t n) {
@@ -46,11 +52,22 @@ bool config_load(void) {
     if (!L) return false;
     luaL_openlibs(L);
 
+    // Expose the agate API before running the user's config so binds/commands
+    // are available. The state is intentionally NOT closed here.
+    lua_api_register(L);
+    g_config_lua = L;
+
     bool ok = luaL_dofile(L, path) == LUA_OK;
     if (!ok) {
         fprintf(stderr, "config error: %s\n", lua_tostring(L, -1));
     }
 
-    lua_close(L);
     return ok;
+}
+
+void config_shutdown(void) {
+    if (g_config_lua) {
+        lua_close(g_config_lua);
+        g_config_lua = NULL;
+    }
 }

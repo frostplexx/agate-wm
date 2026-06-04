@@ -1,4 +1,9 @@
+#include "enumerate.h"
 #include "../extern/skylight.h"
+#include "../platform/platform.h"
+#include "../tree/manager.h"
+#include "../window/ax_window.h"
+#include "../utils/log.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -127,4 +132,91 @@ void enumerate_windows(void) {
     printf("%d window(s) across all spaces\n", total);
 
     CFRelease(displays);
+}
+
+// Managed space id (ManagedSpaceID, else id64) of a SkyLight space dictionary.
+static uint64_t space_managed_id(CFDictionaryRef space) {
+    uint64_t v = 0;
+    CFNumberRef m = CFDictionaryGetValue(space, CFSTR("ManagedSpaceID"));
+    if (!m) m = CFDictionaryGetValue(space, CFSTR("id64"));
+    if (m) CFNumberGetValue(m, kCFNumberSInt64Type, &v);
+    return v;
+}
+
+void enumerate_adopt_windows(void) {
+    SLSConnectionID cid = CGSMainConnectionID();
+    CFArrayRef displays = SLSCopyManagedDisplaySpaces(cid);
+    if (!displays) return;
+
+    for (CFIndex i = 0; i < CFArrayGetCount(displays); i++) {
+        CFDictionaryRef disp = CFArrayGetValueAtIndex(displays, i);
+        CFArrayRef spaces = CFDictionaryGetValue(disp, CFSTR("Spaces"));
+        for (CFIndex j = 0; spaces && j < CFArrayGetCount(spaces); j++) {
+            CFDictionaryRef space = CFArrayGetValueAtIndex(spaces, j);
+            uint64_t sid = space_managed_id(space);
+            CFNumberRef id64 = CFDictionaryGetValue(space, CFSTR("id64"));
+            if (!sid || !id64) continue;
+
+            const void *v[1] = { id64 };
+            CFArrayRef spaceArr = CFArrayCreate(NULL, v, 1, &kCFTypeArrayCallBacks);
+            uint64_t setTags = 0, clearTags = 0;
+            CFArrayRef wids = SLSCopyWindowsWithOptionsAndTags(cid, 0, spaceArr, 0x2, &setTags, &clearTags);
+
+            if (wids) {
+                CFArrayRef descs = describe(wids);
+                for (CFIndex k = 0; descs && k < CFArrayGetCount(descs); k++) {
+                    CFDictionaryRef d = CFArrayGetValueAtIndex(descs, k);
+                    if (dict_int(d, kCGWindowLayer) != 0) continue;
+
+                    CGRect bounds = CGRectZero;
+                    CFDictionaryRef boundsDict = CFDictionaryGetValue(d, kCGWindowBounds);
+                    if (boundsDict) CGRectMakeWithDictionaryRepresentation(boundsDict, &bounds);
+                    if (bounds.size.width < 100 || bounds.size.height < 80) continue;
+
+                    CGWindowID wid = (CGWindowID)dict_int(d, kCGWindowNumber);
+                    pid_t      pid = (pid_t)dict_int(d, kCGWindowOwnerPID);
+                    // Skip background tabs (ordered-out) so a native tab group is
+                    // adopted as one tile; is_tileable filters dialogs/floats.
+                    if (!ax_window_is_ordered_in(wid)) continue;
+                    manager_adopt_window(sid, pid, wid);
+                }
+                if (descs) CFRelease(descs);
+                CFRelease(wids);
+            }
+            CFRelease(spaceArr);
+        }
+    }
+    CFRelease(displays);
+
+    manager_retile_space(platform_active_space());
+}
+
+int enumerate_onscreen_tileable(AgateWindow *out, int max) {
+    // On-screen, non-desktop windows only: the window server lists just the one
+    // rendered frame per tab group, so background tabs never appear here.
+    CFArrayRef list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (!list) return 0;
+
+    int count = 0;
+    for (CFIndex i = 0; i < CFArrayGetCount(list) && count < max; i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        if (dict_int(d, kCGWindowLayer) != 0) continue; // normal app windows only
+
+        CGRect bounds = CGRectZero;
+        CFDictionaryRef boundsDict = CFDictionaryGetValue(d, kCGWindowBounds);
+        if (boundsDict) CGRectMakeWithDictionaryRepresentation(boundsDict, &bounds);
+        if (bounds.size.width < 100 || bounds.size.height < 80) continue;
+
+        CGWindowID wid = (CGWindowID)dict_int(d, kCGWindowNumber);
+        pid_t      pid = (pid_t)dict_int(d, kCGWindowOwnerPID);
+        if (!ax_window_is_tileable(pid, wid)) continue; // dialogs/sheets/floats out
+
+        out[count].wid = wid;
+        out[count].pid = pid;
+        count++;
+    }
+    CFRelease(list);
+    LOG("scan", "on-screen tileable: %d window(s)", count);
+    return count;
 }

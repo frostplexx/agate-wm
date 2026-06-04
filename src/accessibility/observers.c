@@ -1,6 +1,8 @@
 #include "observers.h"
 #include "../extern/ax_private.h"
 #include "../extern/skylight.h"
+#include "../window/ax_window.h"
+#include "../utils/log.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
@@ -47,33 +49,6 @@ static AppObserver *find_observer(pid_t pid) {
     return NULL;
 }
 
-// Returns true if wid is a top-level window (parent == 0 in the window server).
-// Rejects sheets, drawers, and sub-windows (e.g. some Ghostty panes) which
-// have a non-zero parent even though AX may report them as window elements.
-static bool is_top_level_window(CGWindowID wid) {
-    if (wid == 0) return false;
-
-    SLSConnectionID cid = CGSMainConnectionID();
-    CFNumberRef widRef  = CFNumberCreate(NULL, kCFNumberSInt32Type, &wid);
-    const void *v[1]    = { widRef };
-    CFArrayRef  arr     = CFArrayCreate(NULL, v, 1, &kCFTypeArrayCallBacks);
-
-    uint32_t parent = 0;
-    CFTypeRef query = SLSWindowQueryWindows(cid, arr, 1);
-    if (query) {
-        CFTypeRef it = SLSWindowQueryResultCopyWindows(query);
-        if (it) {
-            if (SLSWindowIteratorAdvance(it)) parent = SLSWindowIteratorGetParentID(it);
-            CFRelease(it);
-        }
-        CFRelease(query);
-    }
-    CFRelease(arr);
-    CFRelease(widRef);
-
-    return parent == 0;
-}
-
 // Subscribe a window element to per-window notifications.
 // Returns true  → newly subscribed (window is new).
 // Returns false → kAXErrorNotificationAlreadyRegistered on the first
@@ -98,15 +73,28 @@ static void ax_callback(AXObserverRef obs, AXUIElementRef element,
     CGWindowID wid = 0;
     _AXUIElementGetWindow(element, &wid);
 
+    if (agate_log_enabled()) {
+        char nbuf[128] = {0};
+        CFStringGetCString(notif, nbuf, sizeof(nbuf), kCFStringEncodingUTF8);
+        LOG("ax", "notif=%s pid=%d wid=%u", nbuf, pid, wid);
+    }
+
     if (CFEqual(notif, kAXWindowCreatedNotification)) {
         // Reject non-top-level elements (sheets, panes with a window-server parent).
-        if (!is_top_level_window(wid)) return;
+        if (!ax_window_is_top_level(wid)) {
+            LOG("ax", "  created: wid=%u not top-level, ignoring", wid);
+            return;
+        }
 
         // subscribe_window returns false when this element was already
         // subscribed during initial registration — the app is replaying
         // notifications for existing windows, not creating a new one.
-        if (!subscribe_window(obs, element, ao)) return;
+        if (!subscribe_window(obs, element, ao)) {
+            LOG("ax", "  created: wid=%u already subscribed (replay), ignoring", wid);
+            return;
+        }
 
+        LOG("ax", "  created: wid=%u -> WINDOW_APPEARED", wid);
         if (ao->cb) ao->cb(WM_EVENT_WINDOW_APPEARED, pid, wid, ao->userdata);
 
     } else if (CFEqual(notif, kAXWindowMovedNotification)) {
@@ -116,8 +104,10 @@ static void ax_callback(AXObserverRef obs, AXUIElementRef element,
         if (ao->cb) ao->cb(WM_EVENT_WINDOW_RESIZED, pid, wid, ao->userdata);
 
     } else if (CFEqual(notif, kAXUIElementDestroyedNotification)) {
-        // wid is 0 once the element is gone from the window server; not actionable.
-        if (wid == 0) return;
+        // The element is already gone, so wid usually resolves to 0 — but the
+        // manager reconciles against the on-screen set rather than this wid, so
+        // we still emit to trigger that reconcile (this is how a closed window
+        // gets removed and the rest re-tiled).
         if (ao->cb) ao->cb(WM_EVENT_WINDOW_DISAPPEARED, pid, wid, ao->userdata);
     }
 }

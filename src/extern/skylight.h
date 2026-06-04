@@ -70,6 +70,14 @@ extern CFArrayRef SLSCopySpacesForWindows(SLSConnectionID cid, uint64_t mask, CF
 extern CFTypeRef SLSWindowQueryWindows(SLSConnectionID cid, CFArrayRef windows, int count);
 extern CFTypeRef SLSWindowQueryResultCopyWindows(CFTypeRef windowQuery);
 
+// Whether a window is "ordered in" (mapped/rendered on screen) right now. This
+// is the window server's own visibility bit and the reliable way to tell a real
+// window from a background tab: macOS native tabs are each a separate top-level
+// window, but only the selected tab is ordered in — the others are ordered out
+// (as are minimized windows). Writes the result to *out; returns kCGErrorSuccess
+// on success. (Same call yabai uses for window visibility.)
+extern CGError  SLSWindowIsOrderedIn(SLSConnectionID cid, CGWindowID wid, bool *out);
+
 extern int      SLSWindowIteratorGetCount(CFTypeRef iterator);
 extern bool     SLSWindowIteratorAdvance(CFTypeRef iterator);
 extern uint32_t SLSWindowIteratorGetWindowID(CFTypeRef iterator);
