@@ -59,6 +59,11 @@ bool ax_window_focused(pid_t *out_pid, CGWindowID *out_wid);
 // simply absent.
 bool ax_window_is_ordered_in(CGWindowID wid);
 
+// Whether the window is currently part of a native tab group (AXTabbedWindows
+// lists more than one tab). Recorded while a window is alive so that, once it
+// closes, we know whether to expect a sibling tab to surface.
+bool ax_window_is_tabbed(pid_t pid, CGWindowID wid);
+
 // Drop any cached AXUIElementRef for `wid` (call when a window disappears).
 void ax_window_forget(CGWindowID wid);
 

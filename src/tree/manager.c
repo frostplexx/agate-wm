@@ -142,22 +142,37 @@ static void reconcile_active_space(void) {
         changed = true;
     }
 
-    // Remaining unpaired removals: only drop one once it has been absent past the
-    // grace period. A window briefly missing during a tab close/reselect re-pairs
-    // above before the grace expires, so the other window never fullscreens.
+    // Remaining unpaired removals. A standalone window that's gone is removed at
+    // once. A *tabbed* window is held for a short grace: when its visible tab
+    // closes, a sibling tab surfaces a beat later and re-pairs above, so the
+    // neighbor never briefly fullscreens.
     double now = CFAbsoluteTimeGetCurrent();
     for (int r = 0; r < rn; r++) {
         if (!removals[r]) continue;
-        if (removals[r]->absent_since == 0) {
-            removals[r]->absent_since = now; // start the grace timer; keep for now
-            LOG("tile", "reconcile wid=%u absent, holding for grace", removals[r]->wid);
-            continue;
+        if (removals[r]->tabbed) {
+            if (removals[r]->absent_since == 0) {
+                removals[r]->absent_since = now; // start grace; keep for now
+                LOG("tile", "reconcile wid=%u (tabbed) absent, holding for grace", removals[r]->wid);
+                continue;
+            }
+            if (now - removals[r]->absent_since < MANAGER_REMOVE_GRACE_SECS) continue;
         }
-        if (now - removals[r]->absent_since < MANAGER_REMOVE_GRACE_SECS) continue;
-        LOG("tile", "reconcile remove wid=%u (absent past grace)", removals[r]->wid);
+        LOG("tile", "reconcile remove wid=%u%s", removals[r]->wid,
+            removals[r]->tabbed ? " (tabbed, past grace)" : "");
         ax_window_forget(removals[r]->wid);
         node_remove(removals[r]);
         changed = true;
+    }
+
+    // Record tab-group membership of the windows still present, so a later close
+    // knows whether to expect a sibling tab (and thus whether to grace it).
+    Node *cur[MAX_RECONCILE];
+    int cur_n = 0;
+    collect_leaves(root, cur, &cur_n, MAX_RECONCILE);
+    for (int i = 0; i < cur_n; i++) {
+        if (set_contains(set, n, cur[i]->wid)) {
+            cur[i]->tabbed = ax_window_is_tabbed(cur[i]->pid, cur[i]->wid);
+        }
     }
 
     LOG("tile", "reconcile sid=%llu: %d on-screen, tree now %zu, changed=%d",

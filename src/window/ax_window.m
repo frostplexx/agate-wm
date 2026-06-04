@@ -75,6 +75,18 @@ bool ax_window_is_ordered_in(CGWindowID wid) {
     return result;
 }
 
+bool ax_window_is_tabbed(pid_t pid, CGWindowID wid) {
+    AXUIElementRef w = resolve_window(pid, wid);
+    if (!w) return false;
+    CFArrayRef tabs = NULL;
+    bool tabbed = false;
+    if (AXUIElementCopyAttributeValue(w, kAXTabbedWindowsAttribute, (CFTypeRef *)&tabs) == kAXErrorSuccess && tabs) {
+        tabbed = CFArrayGetCount(tabs) > 1;
+        CFRelease(tabs);
+    }
+    return tabbed;
+}
+
 void ax_window_forget(CGWindowID wid) {
     for (int i = 0; i < g_cache_count; i++) {
         if (g_cache[i].wid != wid) continue;

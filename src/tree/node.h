@@ -50,6 +50,11 @@ struct Node {
     // Rect this node was last laid out into (top-left AX coords). Set by the
     // layout engine; used to recompute split weights on interactive resize.
     CGRect frame;
+
+    // Whether this window was part of a native tab group at the last reconcile.
+    // Only tabbed windows need the removal grace period (a sibling tab surfaces a
+    // beat after the visible tab closes); standalone windows are removed at once.
+    bool tabbed;
 };
 
 // True when the layout's split axis is horizontal (left/right).
