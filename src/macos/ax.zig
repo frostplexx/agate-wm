@@ -54,3 +54,6 @@ pub extern fn AXUIElementSetAttributeValue(
 
 pub extern fn AXValueCreate(theType: ValueType, valuePtr: *const anyopaque) AXValueRef;
 pub extern fn AXValueGetValue(value: AXValueRef, theType: ValueType, valuePtr: *anyopaque) Boolean;
+
+/// Private SPI: resolve the CGWindowID for a window AXUIElement.
+pub extern fn _AXUIElementGetWindow(element: AXUIElementRef, wid: *u32) Error;

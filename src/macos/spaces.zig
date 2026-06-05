@@ -61,14 +61,15 @@ pub fn allSpaces(alloc: Allocator, cid: sl.ConnectionID) ![]Space {
     return list.toOwnedSlice(alloc);
 }
 
-/// The window ids on `space_id`. `include_minimized` selects the SkyLight
-/// option mask (0x7 includes minimized/hidden, 0x2 is the visible set). Caller
-/// owns the slice.
+/// The window ids on `space_id`. `all` uses option mask 0x7 which returns every
+/// window assigned to the space (including those on inactive/off-screen spaces);
+/// false uses 0x2 which returns only currently on-screen windows. Pass true
+/// when enumerating spaces that are not currently visible. Caller owns the slice.
 pub fn windowsOnSpace(
     alloc: Allocator,
     cid: sl.ConnectionID,
     space_id: u64,
-    include_minimized: bool,
+    all: bool,
 ) ![]u32 {
     // Wrap the space id in a CFArray<CFNumber> as the API expects.
     var sid: i64 = @intCast(space_id);
@@ -80,7 +81,7 @@ pub fn windowsOnSpace(
 
     var set_tags: u64 = 0;
     var clear_tags: u64 = 0;
-    const options: u32 = if (include_minimized) 0x7 else 0x2;
+    const options: u32 = if (all) 0x7 else 0x2;
     const wins = sl.SLSCopyWindowsWithOptionsAndTags(
         cid,
         0, // any owner

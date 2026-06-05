@@ -1,41 +1,44 @@
 const std = @import("std");
 const macos = @import("macos");
 const state = @import("../state.zig");
+const window = @import("window.zig");
 
-pub fn init_wm(appState: state.AppState) !void {
+const AppState = state.AppState;
 
-    //Skylight connection
+pub fn init_wm(appState: AppState) !void {
     var meta = std.AutoHashMap(u32, macos.window_list.WindowInfo).init(appState.arena);
-    for (try macos.window_list.listAll(appState.arena)) |w| try meta.put(w.id, w);
+    for (try macos.window_list.listAll(appState.arena)) |info| {
+        try meta.put(info.id, info);
+    }
+    std.debug.print("meta: {d} windows from CG\n", .{meta.count()});
 
     const all_spaces = try macos.spaces.allSpaces(appState.arena, appState.skylight_cid);
+    std.debug.print("spaces: {d} total\n", .{all_spaces.len});
 
     for (all_spaces) |sp| {
-        const wids = try macos.spaces.windowsOnSpace(appState.arena, appState.skylight_cid, sp.id, false);
+        const wids = try macos.spaces.windowsOnSpace(appState.arena, appState.skylight_cid, sp.id, true);
+        std.debug.print("  space {d} (display {d}, type {d}): {d} wids\n", .{ sp.id, sp.display_index, sp.type, wids.len });
 
-        // Filter to normal, top-level application windows (layer 0). The rest
-        // are per-Space system overlays (Dock, Window Server, Notification
-        // Center) that SkyLight reports on every Space.
-        var app: usize = 0;
         for (wids) |wid| {
-            if (meta.get(wid)) |w| {
-                if (isAppWindow(w)) app += 1;
-            }
-        }
-        std.debug.print("\nspace {d}  (display {d}, type {d}) — {d} ids, {d} app windows:\n", .{
-            sp.id, sp.display_index, sp.type, wids.len, app,
-        });
-        for (wids) |wid| {
-            const w = meta.get(wid) orelse continue;
-            if (!isAppWindow(w)) continue;
+            const info = meta.get(wid) orelse {
+                std.debug.print("    #{d} not in CG meta\n", .{wid});
+                continue;
+            };
+            if (!isAppWindow(info)) continue;
+
+            const win = window.init(info) orelse {
+                std.debug.print("    #{d} {s}: AX unavailable\n", .{ info.id, info.owner });
+                continue;
+            };
+            defer win.deinit();
             std.debug.print("    #{d} pid={d} {d:.0}x{d:.0}  {s}\n", .{
-                wid, w.pid, w.bounds.size.width, w.bounds.size.height, w.owner,
+                win.id, win.pid, win.bounds.size.width, win.bounds.size.height, win.owner,
             });
         }
     }
 }
 
-
 fn isAppWindow(w: macos.window_list.WindowInfo) bool {
-    return w.layer == 0 and w.owner.len > 0;
+    return w.layer == 0 and w.owner.len > 0 and
+        w.bounds.size.width > 0 and w.bounds.size.height > 0;
 }

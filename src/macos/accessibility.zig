@@ -129,4 +129,23 @@ pub const Element = opaque {
         const ok_size = self.setSize(frame.size);
         return ok_pos and ok_size;
     }
+
+    /// Find the AX window element matching `wid` (a CGWindowID) among this
+    /// app's `AXWindows`. Returns a retained reference — caller must release.
+    pub fn windowForId(self: *Element, wid: u32) ?*Element {
+        const v = self.copyAttribute("AXWindows") orelse return null;
+        defer foundation.CFRelease(v);
+        const arr: c.CFArrayRef = @ptrCast(v);
+        const n: usize = @intCast(c.CFArrayGetCount(arr));
+        for (0..n) |i| {
+            const elem_ref: ax.AXUIElementRef = @ptrCast(c.CFArrayGetValueAtIndex(arr, @intCast(i)));
+            var window_id: u32 = 0;
+            if (ax._AXUIElementGetWindow(elem_ref, &window_id) != ax.kAXErrorSuccess) continue;
+            if (window_id == wid) {
+                foundation.CFRetain(elem_ref);
+                return fromRef(elem_ref);
+            }
+        }
+        return null;
+    }
 };
