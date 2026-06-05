@@ -25,6 +25,7 @@
           pkg-config
           clang
           gnumake
+          zig
         ];
       };
     });
