@@ -21,8 +21,8 @@ fn print_tree(con: *const data.Con, index: usize) void {
         .Monitor => std.debug.print("Monitor {d} ({d} workspaces)\n", .{
             index, con.children.len(),
         }),
-        .Workspace => std.debug.print("Workspace {d}  [space id {d}, {d} windows]\n", .{
-            index, con.id, con.children.len(),
+        .Workspace => std.debug.print("Workspace {d}  [space id {d}, {d} windows, layout={s}]\n", .{
+            index, con.id, con.children.len(), @tagName(con.layout),
         }),
         .Container => if (con.window) |w| {
             std.debug.print("Window #{d}  {s}  pid={d}  pos=({d:.0},{d:.0})  size={d:.0}x{d:.0}\n", .{
@@ -31,7 +31,9 @@ fn print_tree(con: *const data.Con, index: usize) void {
                 w.bounds.size.width, w.bounds.size.height,
             });
         } else {
-            std.debug.print("Container #{d} ({d} children)\n", .{ con.id, con.children.len() });
+            std.debug.print("Container #{d}  [{d} children, layout={s}]\n", .{
+                con.id, con.children.len(), @tagName(con.layout),
+            });
         },
     }
 
