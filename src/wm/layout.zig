@@ -80,10 +80,24 @@ fn childRect(layout: data.layouts, area: Rect, n: usize, i: usize, gap: f64) Rec
 /// also re-sets size *after* the move; we deliberately don't, because that
 /// trailing resize makes some apps — terminals like Ghostty especially —
 /// re-anchor and snap back to their old position.
+///
+/// Frame changes are wrapped in the `AXEnhancedUserInterface` disable/restore
+/// dance (yabai's `AX_ENHANCED_UI_WORKAROUND`, src/misc/helpers.h): while that
+/// app attribute is on, AppKit animates AX-driven moves/resizes, so we turn it
+/// off for the duration and restore it, making native apps tile instantly.
 fn applyFrame(win: *data.Window, area: Rect) void {
     const el = window.resolveElement(win) orelse return;
+
+    // The attribute lives on the *application* element, not the window.
+    const app = macos.Element.createApplication(@intCast(win.pid));
+    defer if (app) |a| a.release();
+    const eui = if (app) |a| a.enhancedUserInterface() else false;
+    if (eui) app.?.setEnhancedUserInterface(false);
+
     _ = el.setSize(area.size);
     _ = el.setPosition(area.origin);
+
+    if (eui) app.?.setEnhancedUserInterface(true);
     win.bounds = area; // keep the model in sync with what we requested
 }
 

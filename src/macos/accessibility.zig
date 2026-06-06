@@ -91,6 +91,21 @@ pub const Element = opaque {
         _ = self.setAttribute("AXManualAccessibility", @ptrCast(c.kCFBooleanTrue));
     }
 
+    /// Read this application's `AXEnhancedUserInterface` flag. When true, AppKit
+    /// animates AX-driven frame changes (the slow window slide). macOS enables it
+    /// automatically while an assistive client — like us — is attached, so native
+    /// Cocoa apps end up animating; Electron/Chromium apps ignore it. Mirrors
+    /// yabai's `ax_enhanced_userinterface` (koekeishiya/yabai, src/misc/helpers.h).
+    pub fn enhancedUserInterface(self: *Element) bool {
+        const v = self.copyAttribute("AXEnhancedUserInterface") orelse return false;
+        defer foundation.CFRelease(v);
+        return c.CFBooleanGetValue(@ptrCast(v)) != 0;
+    }
+
+    pub fn setEnhancedUserInterface(self: *Element, on: bool) void {
+        _ = self.setAttribute("AXEnhancedUserInterface", @ptrCast(if (on) c.kCFBooleanTrue else c.kCFBooleanFalse));
+    }
+
     /// Copy a child AXUIElement attribute (e.g. "AXFocusedWindow", "AXMainWindow").
     pub fn copyElement(self: *Element, name: []const u8) ?*Element {
         const v = self.copyAttribute(name) orelse return null;
