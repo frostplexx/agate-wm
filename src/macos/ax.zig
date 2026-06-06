@@ -57,3 +57,9 @@ pub extern fn AXValueGetValue(value: AXValueRef, theType: ValueType, valuePtr: *
 
 /// Private SPI: resolve the CGWindowID for a window AXUIElement.
 pub extern fn _AXUIElementGetWindow(element: AXUIElementRef, wid: *u32) Error;
+
+/// Private SPI: fabricate an AXUIElement from a "remote token" (a 20-byte blob
+/// of {pid, magic, element_id}). This is how a window's AX element can be
+/// reached even when its Space has never been active and so it's absent from
+/// the app's `AXWindows` list (the approach yabai uses).
+pub extern fn _AXUIElementCreateWithRemoteToken(data: c.CFDataRef) AXUIElementRef;

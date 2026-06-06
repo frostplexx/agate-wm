@@ -13,12 +13,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // init app state
-    const appState: state.AppState = .{
+    var appState: state.AppState = .{
         .skylight_cid = macos.skylight.CGSMainConnectionID(), // Skylight WindowServer connection ID
         .arena = init.arena.allocator(), // Arena allocator for temporary data structures
+        .tree = null, // Container tree, built by init_wm
     };
 
-    try wm.init_wm(appState);
+    try wm.init_wm(&appState);
 }
 
 

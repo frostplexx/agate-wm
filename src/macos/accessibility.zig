@@ -81,6 +81,16 @@ pub const Element = opaque {
         return ax.AXUIElementSetAttributeValue(self.ref(), attr.ref(), value) == ax.kAXErrorSuccess;
     }
 
+    /// Force lazy-accessibility apps to expose their AX hierarchy (including
+    /// AXWindows). Chromium/Electron/Firefox-based apps (e.g. Zen) report an
+    /// empty AXWindows list until `AXManualAccessibility` is enabled. Call on
+    /// the application element. The app populates its tree asynchronously, so a
+    /// follow-up query may need a brief retry. We deliberately avoid
+    /// `AXEnhancedUserInterface`, which can make apps reposition their windows.
+    pub fn enableManualAccessibility(self: *Element) void {
+        _ = self.setAttribute("AXManualAccessibility", @ptrCast(c.kCFBooleanTrue));
+    }
+
     /// Copy a child AXUIElement attribute (e.g. "AXFocusedWindow", "AXMainWindow").
     pub fn copyElement(self: *Element, name: []const u8) ?*Element {
         const v = self.copyAttribute(name) orelse return null;
@@ -149,3 +159,38 @@ pub const Element = opaque {
         return null;
     }
 };
+
+/// Token magic used by `_AXUIElementCreateWithRemoteToken` (ASCII "coco").
+const remote_token_magic: u32 = 0x636f636f;
+/// Upper bound on the per-application AX element id scan (matches yabai).
+const remote_token_scan_limit: u64 = 0x7fff;
+
+/// Resolve the AX window element for `wid` belonging to `pid`, even when the
+/// window is on an inactive Space and therefore absent from the app's
+/// `AXWindows` list. Mirrors yabai: build a 20-byte remote token of
+/// {pid, magic, element_id} and scan element ids, fabricating AX elements via
+/// `_AXUIElementCreateWithRemoteToken` until one resolves to the target
+/// CGWindowID. Returns a retained element (caller releases) or null.
+pub fn windowForIdViaRemoteToken(pid: c.pid_t, wid: u32) ?*Element {
+    const data = c.CFDataCreateMutable(null, 0x14) orelse return null;
+    defer foundation.CFRelease(data);
+    c.CFDataIncreaseLength(data, 0x14);
+
+    const buf: [*]u8 = @ptrCast(c.CFDataGetMutableBytePtr(data));
+    @memset(buf[0..0x14], 0);
+    std.mem.writeInt(u32, buf[0..4], @intCast(pid), .little);
+    std.mem.writeInt(u32, buf[8..12], remote_token_magic, .little);
+
+    var element_id: u64 = 0;
+    while (element_id < remote_token_scan_limit) : (element_id += 1) {
+        std.mem.writeInt(u64, buf[0xc..0x14], element_id, .little);
+        const elem_ref = ax._AXUIElementCreateWithRemoteToken(@ptrCast(data)) orelse continue;
+        const elem = Element.fromRef(elem_ref) orelse continue;
+        var got: u32 = 0;
+        if (ax._AXUIElementGetWindow(elem_ref, &got) == ax.kAXErrorSuccess and got == wid) {
+            return elem; // already owned (created), hand off to caller
+        }
+        elem.release();
+    }
+    return null;
+}

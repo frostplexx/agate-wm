@@ -107,3 +107,63 @@ pub fn windowsOnSpace(
     }
     return out[0..count];
 }
+
+/// The *manageable* (tileable) window ids on `space_id`: real, top-level
+/// application windows, with child windows (sheets/tabs/popovers), overlays and
+/// non-standard windows excluded — using the window-server's own window
+/// iterator, the way yabai does. No Accessibility round-trip, so it works for
+/// windows on inactive Spaces. Caller owns the slice.
+pub fn manageableWindowsOnSpace(alloc: Allocator, cid: sl.ConnectionID, space_id: u64) ![]u32 {
+    // Wrap the space id in a CFArray<CFNumber> as the API expects.
+    var sid: i64 = @intCast(space_id);
+    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &sid) orelse return &.{};
+    defer foundation.CFRelease(num);
+    var values = [_]?*const anyopaque{@ptrCast(num)};
+    const space_arr = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return &.{};
+    defer foundation.CFRelease(space_arr);
+
+    // 0x7 = every window assigned to the space (including minimized/off-screen).
+    var set_tags: u64 = 0;
+    var clear_tags: u64 = 0;
+    const wins = sl.SLSCopyWindowsWithOptionsAndTags(cid, 0, space_arr, 0x7, &set_tags, &clear_tags) orelse return &.{};
+    defer foundation.CFRelease(wins);
+
+    const n: usize = @intCast(c.CFArrayGetCount(wins));
+    if (n == 0) return &.{};
+
+    // Run the ids through the window-server query to recover per-window tags,
+    // attributes and parent id, then keep only the manageable ones.
+    const query = sl.SLSWindowQueryWindows(cid, wins, @intCast(n)) orelse return &.{};
+    defer foundation.CFRelease(query);
+    const iterator = sl.SLSWindowQueryResultCopyWindows(query) orelse return &.{};
+    defer foundation.CFRelease(iterator);
+
+    var list: std.ArrayList(u32) = .empty;
+    errdefer list.deinit(alloc);
+
+    while (sl.SLSWindowIteratorAdvance(iterator)) {
+        const tags = sl.SLSWindowIteratorGetTags(iterator);
+        const attributes = sl.SLSWindowIteratorGetAttributes(iterator);
+        const parent_wid = sl.SLSWindowIteratorGetParentID(iterator);
+        if (isManageable(parent_wid, attributes, tags)) {
+            try list.append(alloc, sl.SLSWindowIteratorGetWindowID(iterator));
+        }
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+/// The window-server tag/attribute predicate yabai uses to decide whether a
+/// window is a real, tileable, top-level window (`space_window_list_for_connection`).
+/// Two accepting shapes: a normal top-level window (branch A), or a special
+/// window that reports no attributes but carries the right tags (branch B). Both
+/// require the window to be "visible" per its tag bits.
+fn isManageable(parent_wid: u32, attributes: u64, tags: u64) bool {
+    const visible = (tags & 0x1) != 0 or ((tags & 0x2) != 0 and (tags & 0x80000000) != 0);
+    const branch_a = parent_wid == 0 and
+        ((attributes & 0x2) != 0 or (tags & 0x0400000000000000) != 0) and
+        visible;
+    const branch_b = attributes == 0x0 and
+        ((tags & 0x1000000000000000) != 0 or (tags & 0x0300000000000000) != 0) and
+        visible;
+    return branch_a or branch_b;
+}
