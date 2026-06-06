@@ -16,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
     var appState: state.AppState = .{
         .skylight_cid = macos.skylight.CGSMainConnectionID(), // Skylight WindowServer connection ID
         .arena = init.arena.allocator(), // Arena allocator for temporary data structures
+        .gpa = init.gpa, // General-purpose allocator for transient work
         .tree = null, // Container tree, built by init_wm
     };
 

@@ -26,6 +26,14 @@ pub const Space = struct {
     display_index: usize,
 };
 
+/// The currently active Space id on the focused display (the one owning the
+/// active menu bar). Null if it can't be determined.
+pub fn activeSpace(cid: sl.ConnectionID) ?u64 {
+    const uuid = sl.SLSCopyActiveMenuBarDisplayIdentifier(cid) orelse return null;
+    defer foundation.CFRelease(uuid);
+    return sl.SLSManagedDisplayGetCurrentSpace(cid, uuid);
+}
+
 /// Every Space across every display. Caller owns the slice (use an arena).
 pub fn allSpaces(alloc: Allocator, cid: sl.ConnectionID) ![]Space {
     const displays = sl.SLSCopyManagedDisplaySpaces(cid) orelse return &.{};
@@ -111,8 +119,9 @@ pub fn windowsOnSpace(
 /// The *manageable* (tileable) window ids on `space_id`: real, top-level
 /// application windows, with child windows (sheets/tabs/popovers), overlays and
 /// non-standard windows excluded — using the window-server's own window
-/// iterator, the way yabai does. No Accessibility round-trip, so it works for
-/// windows on inactive Spaces. Caller owns the slice.
+/// iterator, the way yabai does (koekeishiya/yabai, src/space.c:
+/// `space_window_list_for_connection`). No Accessibility round-trip, so it works
+/// for windows on inactive Spaces. Caller owns the slice.
 pub fn manageableWindowsOnSpace(alloc: Allocator, cid: sl.ConnectionID, space_id: u64) ![]u32 {
     // Wrap the space id in a CFArray<CFNumber> as the API expects.
     var sid: i64 = @intCast(space_id);
@@ -153,10 +162,11 @@ pub fn manageableWindowsOnSpace(alloc: Allocator, cid: sl.ConnectionID, space_id
 }
 
 /// The window-server tag/attribute predicate yabai uses to decide whether a
-/// window is a real, tileable, top-level window (`space_window_list_for_connection`).
-/// Two accepting shapes: a normal top-level window (branch A), or a special
-/// window that reports no attributes but carries the right tags (branch B). Both
-/// require the window to be "visible" per its tag bits.
+/// window is a real, tileable, top-level window. Ported from
+/// `space_window_list_for_connection` (koekeishiya/yabai, src/space.c), including
+/// the exact bitmasks. Two accepting shapes: a normal top-level window (branch
+/// A), or a special window that reports no attributes but carries the right tags
+/// (branch B). Both require the window to be "visible" per its tag bits.
 fn isManageable(parent_wid: u32, attributes: u64, tags: u64) bool {
     const visible = (tags & 0x1) != 0 or ((tags & 0x2) != 0 and (tags & 0x80000000) != 0);
     const branch_a = parent_wid == 0 and

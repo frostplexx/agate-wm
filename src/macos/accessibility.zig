@@ -51,8 +51,8 @@ pub const Element = opaque {
     }
 
     /// The top-level accessibility object for the app with the given pid.
-    pub fn createApplication(pid: c.pid_t) ?*Element {
-        return fromRef(ax.AXUIElementCreateApplication(pid));
+    pub fn createApplication(process_id: c.pid_t) ?*Element {
+        return fromRef(ax.AXUIElementCreateApplication(process_id));
     }
 
     /// The system-wide accessibility object (used to reach the focused app).
@@ -140,6 +140,25 @@ pub const Element = opaque {
         return ok_pos and ok_size;
     }
 
+    /// This element's CGWindowID (for a window element), or null.
+    pub fn windowId(self: *Element) ?u32 {
+        var wid: u32 = 0;
+        if (ax._AXUIElementGetWindow(self.ref(), &wid) != ax.kAXErrorSuccess) return null;
+        return wid;
+    }
+
+    /// The pid that owns this element, or null.
+    pub fn pid(self: *Element) ?c.pid_t {
+        var p: c.pid_t = 0;
+        if (ax.AXUIElementGetPid(self.ref(), &p) != ax.kAXErrorSuccess) return null;
+        return p;
+    }
+
+    /// Retain this element (CoreFoundation +1). Pair with `release`.
+    pub fn retain(self: *Element) void {
+        foundation.CFRetain(self);
+    }
+
     /// Find the AX window element matching `wid` (a CGWindowID) among this
     /// app's `AXWindows`. Returns a retained reference — caller must release.
     pub fn windowForId(self: *Element, wid: u32) ?*Element {
@@ -167,10 +186,11 @@ const remote_token_scan_limit: u64 = 0x7fff;
 
 /// Resolve the AX window element for `wid` belonging to `pid`, even when the
 /// window is on an inactive Space and therefore absent from the app's
-/// `AXWindows` list. Mirrors yabai: build a 20-byte remote token of
-/// {pid, magic, element_id} and scan element ids, fabricating AX elements via
-/// `_AXUIElementCreateWithRemoteToken` until one resolves to the target
-/// CGWindowID. Returns a retained element (caller releases) or null.
+/// `AXWindows` list. Mirrors yabai (koekeishiya/yabai, src/window_manager.c):
+/// build a 20-byte remote token of {pid, magic, element_id} and scan element
+/// ids, fabricating AX elements via `_AXUIElementCreateWithRemoteToken` until
+/// one resolves to the target CGWindowID. Returns a retained element (caller
+/// releases) or null.
 pub fn windowForIdViaRemoteToken(pid: c.pid_t, wid: u32) ?*Element {
     const data = c.CFDataCreateMutable(null, 0x14) orelse return null;
     defer foundation.CFRelease(data);

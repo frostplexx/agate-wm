@@ -55,11 +55,39 @@ pub extern fn AXUIElementSetAttributeValue(
 pub extern fn AXValueCreate(theType: ValueType, valuePtr: *const anyopaque) AXValueRef;
 pub extern fn AXValueGetValue(value: AXValueRef, theType: ValueType, valuePtr: *anyopaque) Boolean;
 
-/// Private SPI: resolve the CGWindowID for a window AXUIElement.
+/// The pid that owns an AXUIElement.
+pub extern fn AXUIElementGetPid(element: AXUIElementRef, pid: *c.pid_t) Error;
+
+// --- Observers (AX notifications) ------------------------------------------
+// The per-application observer model (one AXObserver per app, added to the run
+// loop) follows yabai's `application_observe` (koekeishiya/yabai, src/application.c).
+
+pub const AXObserverRef = ?*const opaque {};
+
+/// C callback invoked on the run loop when a registered notification fires.
+/// `notification` is a CFString (e.g. "AXWindowCreated"); `refcon` is the
+/// opaque value passed to `AXObserverAddNotification`.
+pub const ObserverCallback = *const fn (
+    observer: AXObserverRef,
+    element: AXUIElementRef,
+    notification: c.CFStringRef,
+    refcon: ?*anyopaque,
+) callconv(.c) void;
+
+pub extern fn AXObserverCreate(application: c.pid_t, callback: ObserverCallback, out: *AXObserverRef) Error;
+pub extern fn AXObserverAddNotification(observer: AXObserverRef, element: AXUIElementRef, notification: c.CFStringRef, refcon: ?*anyopaque) Error;
+pub extern fn AXObserverRemoveNotification(observer: AXObserverRef, element: AXUIElementRef, notification: c.CFStringRef) Error;
+/// The run-loop source that delivers this observer's callbacks. Add it to a
+/// run loop with `CFRunLoopAddSource`.
+pub extern fn AXObserverGetRunLoopSource(observer: AXObserverRef) c.CFRunLoopSourceRef;
+
+/// Private SPI: resolve the CGWindowID for a window AXUIElement. Same call
+/// yabai uses for `ax_window_id` (koekeishiya/yabai, src/window.c).
 pub extern fn _AXUIElementGetWindow(element: AXUIElementRef, wid: *u32) Error;
 
 /// Private SPI: fabricate an AXUIElement from a "remote token" (a 20-byte blob
 /// of {pid, magic, element_id}). This is how a window's AX element can be
 /// reached even when its Space has never been active and so it's absent from
-/// the app's `AXWindows` list (the approach yabai uses).
+/// the app's `AXWindows` list. Technique from yabai
+/// (koekeishiya/yabai, src/window_manager.c) — see `windowForIdViaRemoteToken`.
 pub extern fn _AXUIElementCreateWithRemoteToken(data: c.CFDataRef) AXUIElementRef;

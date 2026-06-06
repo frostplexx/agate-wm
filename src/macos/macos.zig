@@ -27,6 +27,8 @@ pub const workspace = @import("workspace.zig");
 pub const window_list = @import("window_list.zig");
 /// Per-Space window enumeration via SkyLight (spans all Spaces/displays).
 pub const spaces = @import("spaces.zig");
+/// Display geometry (NSScreen visible frame, AX coordinates).
+pub const display = @import("display.zig");
 
 // Common conveniences re-exported at the top level.
 pub const String = foundation.String;
