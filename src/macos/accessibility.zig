@@ -192,6 +192,40 @@ pub const Element = opaque {
         }
         return null;
     }
+
+    /// Find an AX window element belonging to this app whose frame matches
+    /// `frame` (within `eps`), excluding window id `exclude`. Used to locate the
+    /// surviving sibling tab after the front tab of a native macOS tab group is
+    /// closed: every window in a tab group shares one frame, and the window
+    /// server has no tab concept (confirmed by a dyld-cache symbol search: no
+    /// `CGS*`/`SLS*` tab API exists, and the AppKit `AXTabbedWindows` attribute
+    /// some WMs assume does not exist on macOS 26 either), so a same-app window
+    /// still sitting at the closed tab's exact frame is the tab that was just
+    /// promoted to front. Returns a retained reference — caller must release.
+    pub fn windowMatchingFrame(self: *Element, frame: Rect, eps: f64, exclude: u32) ?*Element {
+        const v = self.copyAttribute("AXWindows") orelse return null;
+        defer foundation.CFRelease(v);
+        const arr: c.CFArrayRef = @ptrCast(v);
+        const n: usize = @intCast(c.CFArrayGetCount(arr));
+        for (0..n) |i| {
+            const elem_ref: ax.AXUIElementRef = @ptrCast(c.CFArrayGetValueAtIndex(arr, @intCast(i)));
+            var window_id: u32 = 0;
+            if (ax._AXUIElementGetWindow(elem_ref, &window_id) != ax.kAXErrorSuccess) continue;
+            if (window_id == exclude) continue;
+            const elem = fromRef(elem_ref) orelse continue;
+            const pos = elem.position() orelse continue;
+            const sz = elem.size() orelse continue;
+            if (@abs(pos.x - frame.origin.x) < eps and
+                @abs(pos.y - frame.origin.y) < eps and
+                @abs(sz.width - frame.size.width) < eps and
+                @abs(sz.height - frame.size.height) < eps)
+            {
+                foundation.CFRetain(elem_ref);
+                return elem;
+            }
+        }
+        return null;
+    }
 };
 
 /// Token magic used by `_AXUIElementCreateWithRemoteToken` (ASCII "coco").

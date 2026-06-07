@@ -38,6 +38,39 @@ const Entry = struct {
     app: *macos.Element,
 };
 
+/// Context for a grace-period tab-repair timer. Heap-allocated on the gpa;
+/// freed inside `graceTimerFired`. Carries everything needed to retry the
+/// surviving-sibling lookup without touching the (dead) destroyed element.
+const GraceContext = struct {
+    mgr: *Manager,
+    observer: ax.AXObserverRef,
+    wid: u32,
+    pid: i32,
+    frame: macos.window_list.Rect,
+};
+
+/// CFRunLoopTimer callback: fires ~0.3 s after a tabbed window's AX element was
+/// destroyed and the immediate re-pair (`repairTabLeaf`) found no sibling yet.
+/// A previously-background tab can take a moment to surface in the app's
+/// `AXWindows` list; retry the re-pair now. If it still fails, the group really
+/// is gone — drop the leaf and re-flush.
+fn graceTimerFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const ctx: *GraceContext = @ptrCast(@alignCast(info orelse return));
+    const mgr = ctx.mgr;
+    defer mgr.appState.gpa.destroy(ctx);
+    const root = mgr.appState.tree orelse return;
+    const leaf = tree.findLeaf(root, ctx.wid) orelse return; // already removed/re-paired
+
+    if (repairTabLeaf(ctx.observer, leaf, ctx.pid, ctx.frame, ctx.wid)) {
+        tree.flushActive(mgr.appState);
+        return;
+    }
+    if (tree.removeWindow(root, ctx.wid)) {
+        std.debug.print("[observer] -window #{d} (tab grace expired)\n", .{ctx.wid});
+        tree.flushActive(mgr.appState);
+    }
+}
+
 const Manager = struct {
     appState: *state.AppState,
     /// pid -> its observer. Lives for the whole process (arena-allocated).
@@ -161,7 +194,7 @@ fn axCallback(
     if (std.mem.eql(u8, name, "AXWindowCreated")) {
         onWindowCreated(mgr, observer, element);
     } else if (std.mem.eql(u8, name, "AXUIElementDestroyed")) {
-        if (refcon) |r| onWindowDestroyed(mgr, @intCast(@intFromPtr(r)));
+        if (refcon) |r| onWindowDestroyed(mgr, observer, @intCast(@intFromPtr(r)));
     }
 }
 
@@ -267,6 +300,12 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
         leaf.window.?.deinit();
         leaf.window = win;
         leaf.id = win.id;
+        // We just *observed* a tab join (same pid + identical frame), so mark the
+        // leaf as a tab-group member directly. We can't rely on an AX attribute
+        // for this: a dyld-cache search confirms `AXTabbedWindows` does not exist
+        // on macOS 26, so the old `window.isTabbed` check always read false and
+        // every tab close fell through to plain removal (untiling the group).
+        leaf.window.?.is_tabbed = true;
         if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
         tree.flushActive(app);
         return;
@@ -280,10 +319,91 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     tree.flushActive(app);
 }
 
-/// A window was destroyed. Drop its leaf and re-flush.
-fn onWindowDestroyed(mgr: *Manager, wid: u32) void {
+/// Re-pair `leaf` onto a surviving sibling tab after the tab it tracked was
+/// closed. Every window in a native macOS tab group shares one frame, so a
+/// same-app window still sitting at the closed tab's frame is the tab AppKit
+/// just promoted to front. When one is found, swap the leaf onto it (and
+/// re-register the destroy hook for the new window id) so the group keeps its
+/// tile instead of collapsing. Returns true if the leaf was re-paired.
+fn repairTabLeaf(
+    observer: ax.AXObserverRef,
+    leaf: *data.Con,
+    pid: i32,
+    frame: macos.window_list.Rect,
+    dead_wid: u32,
+) bool {
+    const app_el = macos.Element.createApplication(pid) orelse return false;
+    defer app_el.release();
+    app_el.enableManualAccessibility();
+
+    const eps: f64 = 2;
+    const sib = app_el.windowMatchingFrame(frame, eps, dead_wid) orelse return false;
+    // Reuse the old window's owner string (arena-allocated, outlives the swap).
+    const owner = leaf.window.?.owner;
+    const win = window.fromElement(sib, owner) orelse {
+        sib.release();
+        return false;
+    };
+    sib.release(); // `fromElement` took its own retain on the element
+
+    leaf.window.?.deinit();
+    leaf.window = win;
+    leaf.id = win.id;
+    leaf.window.?.is_tabbed = true; // still a member of the (now smaller) group
+    if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, win.id);
+    std.debug.print("[observer] ~window #{d} -> #{d} (tab survived)\n", .{ dead_wid, win.id });
+    return true;
+}
+
+/// A window was destroyed. If it was the front tab of a native tab group, the
+/// surviving sibling is already at the same frame, so re-pair the leaf onto it
+/// (`repairTabLeaf`) instead of dropping the tile. If the window was a known tab
+/// member but no sibling is queryable yet (the promoted tab can lag in
+/// `AXWindows`), hold the slot ~0.3 s and retry from the grace timer. Otherwise
+/// it's a plain window close: drop the leaf and re-flush.
+fn onWindowDestroyed(mgr: *Manager, observer: ax.AXObserverRef, wid: u32) void {
     const app = mgr.appState;
-    if (tree.removeWindow(app.tree orelse return, wid)) {
+    const root = app.tree orelse return;
+    const leaf = tree.findLeaf(root, wid) orelse return;
+    const w = if (leaf.window) |*win| win else return;
+    const pid = w.pid;
+    const frame = w.bounds;
+    const was_tabbed = w.is_tabbed;
+
+    // Fast path: the promoted sibling tab is already sitting at the closed tab's
+    // frame — keep the tile by swapping the leaf onto it.
+    if (repairTabLeaf(observer, leaf, pid, frame, wid)) {
+        tree.flushActive(app);
+        return;
+    }
+
+    // Known tab group whose sibling hasn't surfaced yet: retry after a grace
+    // period before giving up the tile.
+    if (was_tabbed) {
+        const ctx = app.gpa.create(GraceContext) catch {
+            _ = tree.removeWindow(root, wid);
+            tree.flushActive(app);
+            return;
+        };
+        ctx.* = .{ .mgr = mgr, .observer = observer, .wid = wid, .pid = pid, .frame = frame };
+        var timer_ctx = c.CFRunLoopTimerContext{
+            .version = 0,
+            .info = ctx,
+            .retain = null,
+            .release = null,
+            .copyDescription = null,
+        };
+        const fire_at = c.CFAbsoluteTimeGetCurrent() + 0.30;
+        const timer = c.CFRunLoopTimerCreate(null, fire_at, 0, 0, 0, graceTimerFired, &timer_ctx);
+        if (timer) |t| {
+            c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopDefaultMode);
+            c.CFRelease(t);
+            return;
+        }
+        app.gpa.destroy(ctx);
+    }
+
+    if (tree.removeWindow(root, wid)) {
         std.debug.print("[observer] -window #{d}\n", .{wid});
         tree.flushActive(app);
     }

@@ -46,6 +46,14 @@ pub const Window = struct {
     /// Whether the window is in a "fake" i.e. not macos native full-screen mode. This is used to determine whether to apply gaps and tiling.
     fake_full_screen: bool = false,
 
+    /// Whether this window was observed joining a native macOS tab group (a new
+    /// window created at the exact frame of an existing same-app window; see
+    /// `observer.onWindowCreated`). There is no cross-process AX/CGS attribute
+    /// for this on macOS 26 — `AXTabbedWindows` does not exist and the window
+    /// server has no tab concept — so it is set when the join is observed and
+    /// read by `onWindowDestroyed` to grant a tab close a grace re-pair.
+    is_tabbed: bool = false,
+
     pub fn deinit(self: Window) void {
         if (self.ax_element) |el| el.release();
     }
