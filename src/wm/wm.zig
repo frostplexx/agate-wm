@@ -24,12 +24,12 @@ pub fn init_wm(appState: *AppState) !void {
 fn print_tree(con: *const data.Con, index: usize) void {
     for (0..con.depth) |_| std.debug.print("  ", .{});
     switch (con.con_type) {
-        .Root => std.debug.print("Root ({d} monitors)\n", .{con.children.len()}),
+        .Root => std.debug.print("Root ({d} monitors)\n", .{con.children.items.len}),
         .Monitor => std.debug.print("Monitor {d} ({d} workspaces)\n", .{
-            index, con.children.len(),
+            index, con.children.items.len,
         }),
         .Workspace => std.debug.print("Workspace {d}  [space id {d}, {d} windows, layout={s}]\n", .{
-            index, con.id, con.children.len(), @tagName(con.layout),
+            index, con.id, con.children.items.len, @tagName(con.layout),
         }),
         .Container => if (con.window) |w| {
             std.debug.print("Window #{d}  {s}  pid={d}  pos=({d:.0},{d:.0})  size={d:.0}x{d:.0}\n", .{
@@ -39,16 +39,12 @@ fn print_tree(con: *const data.Con, index: usize) void {
             });
         } else {
             std.debug.print("Container #{d}  [{d} children, layout={s}]\n", .{
-                con.id, con.children.len(), @tagName(con.layout),
+                con.id, con.children.items.len, @tagName(con.layout),
             });
         },
     }
 
-    var it = con.children.first;
-    var i: usize = 1;
-    while (it) |n| {
-        print_tree(data.Con.fromNode(n), i);
-        it = n.next;
-        i += 1;
+    for (con.children.items, 1..) |child, i| {
+        print_tree(child, i);
     }
 }

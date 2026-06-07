@@ -47,14 +47,14 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
         const gop = try monitors.getOrPut(sp.display_index);
         if (!gop.found_existing) {
             const mon = try makeCon(alloc, .Monitor, root, 1, @intCast(sp.display_index));
-            root.children.append(&mon.node);
+            try root.children.append(alloc, mon);
             gop.value_ptr.* = mon;
         }
         const monitor = gop.value_ptr.*;
 
         const workspace = try makeCon(alloc, .Workspace, monitor, 2, sp.id);
         workspace.gaps = default_gaps;
-        monitor.children.append(&workspace.node);
+        try monitor.children.append(alloc, workspace);
 
         for (try macos.spaces.manageableWindowsOnSpace(alloc, cid, sp.id)) |wid| {
             const info = meta.get(wid) orelse continue;
@@ -78,20 +78,17 @@ pub fn addLeaf(alloc: Allocator, ws: *data.Con, win: data.Window) !*data.Con {
     const leaf = try makeCon(alloc, .Container, ws, ws.depth + 1, win.id);
     leaf.window = win;
     leaf.ratio = averageChildRatio(ws);
-    ws.children.append(&leaf.node);
+    try ws.children.append(alloc, leaf);
     return leaf;
 }
 
 /// Mean ratio of `con`'s children (1.0 if it has none).
 fn averageChildRatio(con: *data.Con) f64 {
+    const count = con.children.items.len;
+    if (count == 0) return 1.0;
     var total: f64 = 0;
-    var count: f64 = 0;
-    var it = con.children.first;
-    while (it) |n| : (it = n.next) {
-        total += data.Con.fromNode(n).ratio;
-        count += 1;
-    }
-    return if (count == 0) 1.0 else total / count;
+    for (con.children.items) |child| total += child.ratio;
+    return total / @as(f64, @floatFromInt(count));
 }
 
 /// Append a new leaf window Con built from CoreGraphics metadata. Returns the leaf.
@@ -102,14 +99,12 @@ pub fn addWindowLeaf(alloc: Allocator, ws: *data.Con, info: macos.window_list.Wi
 /// Remove the leaf holding window `wid` from anywhere under `con`. Releases the
 /// window's AX element. Returns true if a leaf was removed.
 pub fn removeWindow(con: *data.Con, wid: u64) bool {
-    var it = con.children.first;
-    while (it) |n| : (it = n.next) {
-        const child = data.Con.fromNode(n);
+    for (con.children.items, 0..) |child, i| {
         if (child.con_type == .Container) {
             if (child.window) |*w| {
                 if (w.id == wid) {
                     w.deinit();
-                    con.children.remove(n);
+                    _ = con.children.orderedRemove(i);
                     return true;
                 }
             }
@@ -121,9 +116,7 @@ pub fn removeWindow(con: *data.Con, wid: u64) bool {
 
 /// Whether a leaf for window `wid` already exists under `con`.
 pub fn hasWindow(con: *data.Con, wid: u64) bool {
-    var it = con.children.first;
-    while (it) |n| : (it = n.next) {
-        const child = data.Con.fromNode(n);
+    for (con.children.items) |child| {
         if (child.con_type == .Container) {
             if (child.window) |w| if (w.id == wid) return true;
         }
@@ -135,9 +128,8 @@ pub fn hasWindow(con: *data.Con, wid: u64) bool {
 /// The Workspace Con for SkyLight space id `sid`, or null.
 pub fn findWorkspace(con: *data.Con, sid: u64) ?*data.Con {
     if (con.con_type == .Workspace and con.id == sid) return con;
-    var it = con.children.first;
-    while (it) |n| : (it = n.next) {
-        if (findWorkspace(data.Con.fromNode(n), sid)) |w| return w;
+    for (con.children.items) |child| {
+        if (findWorkspace(child, sid)) |w| return w;
     }
     return null;
 }
@@ -159,9 +151,7 @@ pub fn flushActive(appState: *state.AppState) void {
 /// the group's frame). Tight epsilon — tab frames are identical, not merely close.
 pub fn findTabSibling(ws: *data.Con, pid: i32, frame: macos.window_list.Rect) ?*data.Con {
     const eps: f64 = 2;
-    var it = ws.children.first;
-    while (it) |n| : (it = n.next) {
-        const child = data.Con.fromNode(n);
+    for (ws.children.items) |child| {
         if (child.window) |w| {
             if (w.pid == pid and
                 @abs(w.bounds.origin.x - frame.origin.x) < eps and
@@ -178,19 +168,28 @@ pub fn findLeaf(con: *data.Con, wid: u64) ?*data.Con {
     if (con.con_type == .Container) {
         if (con.window) |w| if (w.id == wid) return con;
     }
-    var it = con.children.first;
-    while (it) |n| : (it = n.next) {
-        if (findLeaf(data.Con.fromNode(n), wid)) |found| return found;
+    for (con.children.items) |child| {
+        if (findLeaf(child, wid)) |found| return found;
     }
     return null;
 }
 
-/// The previous / next sibling Con in the parent's child list, or null.
+/// The previous / next sibling Con in the parent's children slice, or null.
 fn prevSibling(con: *data.Con) ?*data.Con {
-    return if (con.node.prev) |n| data.Con.fromNode(n) else null;
+    const parent = con.parent orelse return null;
+    for (parent.children.items, 0..) |child, i| {
+        if (child == con) return if (i > 0) parent.children.items[i - 1] else null;
+    }
+    return null;
 }
 fn nextSibling(con: *data.Con) ?*data.Con {
-    return if (con.node.next) |n| data.Con.fromNode(n) else null;
+    const parent = con.parent orelse return null;
+    for (parent.children.items, 0..) |child, i| {
+        if (child == con) {
+            return if (i + 1 < parent.children.items.len) parent.children.items[i + 1] else null;
+        }
+    }
+    return null;
 }
 
 /// Minimum window extent (points) along the split axis, so a neighbour can't be
@@ -237,9 +236,7 @@ pub fn applyManualResize(leaf: *data.Con, frame: macos.window_list.Rect) bool {
 /// Set each child's ratio to its current main-axis extent (from its window's
 /// bounds), so subsequent ratio math is in consistent point units.
 fn pinExtents(parent: *data.Con, horizontal: bool) void {
-    var it = parent.children.first;
-    while (it) |n| : (it = n.next) {
-        const child = data.Con.fromNode(n);
+    for (parent.children.items) |child| {
         if (child.window) |w| {
             child.ratio = if (horizontal) w.bounds.size.width else w.bounds.size.height;
         }
@@ -256,9 +253,7 @@ pub fn applyManualMove(leaf: *data.Con, frame: macos.window_list.Rect) bool {
     const cx = frame.origin.x + frame.size.width / 2;
     const cy = frame.origin.y + frame.size.height / 2;
 
-    var it = parent.children.first;
-    while (it) |n| : (it = n.next) {
-        const child = data.Con.fromNode(n);
+    for (parent.children.items) |child| {
         if (child == leaf) continue;
         const b = (child.window orelse continue).bounds;
         if (cx >= b.origin.x and cx < b.origin.x + b.size.width and

@@ -115,15 +115,8 @@ pub const Con = struct {
     ratio: f64 = 1.0,
     /// Depth of this Con in the tree. Root is 0, its children are 1, etc.
     depth: u32 = 0,
-    /// Children of this Con. Empty for leaf nodes. An intrusive doubly-linked
-    /// list (each child embeds the `node` hook below) for O(1) insert/remove.
-    children: std.DoublyLinkedList = .{},
-    /// Intrusive list hook so this Con can be linked into its parent's
-    /// `children` list. Recover the Con with `@fieldParentPtr("node", n)`.
-    node: std.DoublyLinkedList.Node = .{},
-
-    /// Recover the owning Con from an intrusive list node.
-    pub fn fromNode(n: *std.DoublyLinkedList.Node) *Con {
-        return @fieldParentPtr("node", n);
-    }
+    /// Children of this Con in tiling order. Empty for leaf nodes. The slice
+    /// order is the tiling order: index 0 is leftmost (H_SPLIT) or topmost
+    /// (V_SPLIT); appending a new leaf places it at the trailing edge.
+    children: std.ArrayListUnmanaged(*Con) = .{ .items = &.{}, .capacity = 0 },
 };

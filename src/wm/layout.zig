@@ -26,7 +26,7 @@ pub fn flushWorkspace(ws: *data.Con, area: Rect) void {
 /// child's `ratio`; the cross axis fills the area. (Like yabai's view, each leaf
 /// gets its exact computed area — no readback.)
 fn layoutChildren(con: *data.Con, area: Rect) void {
-    const n = con.children.len();
+    const n = con.children.items.len;
     if (n == 0) return;
 
     const horizontal = con.layout == .H_SPLIT;
@@ -34,19 +34,14 @@ fn layoutChildren(con: *data.Con, area: Rect) void {
     const gap: f64 = @floatFromInt(con.gaps.inner);
 
     var total_ratio: f64 = 0;
-    {
-        var it = con.children.first;
-        while (it) |node| : (it = node.next) total_ratio += data.Con.fromNode(node).ratio;
-    }
+    for (con.children.items) |child| total_ratio += child.ratio;
     if (total_ratio <= 0) total_ratio = 1;
 
     const nf: f64 = @floatFromInt(n);
     const avail_main = (if (horizontal) area.size.width else area.size.height) - gap * (nf - 1);
 
     var offset = if (horizontal) area.origin.x else area.origin.y;
-    var it = con.children.first;
-    while (it) |node| : (it = node.next) {
-        const child = data.Con.fromNode(node);
+    for (con.children.items) |child| {
         if (stacked) {
             place(child, area); // stacks/float: every child fills the area for now
             continue;

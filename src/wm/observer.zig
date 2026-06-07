@@ -107,8 +107,7 @@ fn observeWindows(mgr: *Manager, con: *data.Con) void {
             } else |_| {}
         }
     }
-    var it = con.children.first;
-    while (it) |n| : (it = n.next) observeWindows(mgr, data.Con.fromNode(n));
+    for (con.children.items) |child| observeWindows(mgr, child);
 }
 
 /// Get (creating if needed) the observer for `pid`, registered for window
@@ -208,9 +207,7 @@ fn onMouseUp(mgr: *Manager) void {
     var moved: ?*data.Con = null;
     var moved_frame: macos.window_list.Rect = undefined;
 
-    var it = ws.children.first;
-    while (it) |n| : (it = n.next) {
-        const leaf = data.Con.fromNode(n);
+    for (ws.children.items) |leaf| {
         const win = if (leaf.window) |*w| w else continue;
         const el = window.resolveElement(win) orelse continue;
         const pos = el.position() orelse continue;
