@@ -51,6 +51,9 @@ pub extern fn AXUIElementSetAttributeValue(
     attribute: c.CFStringRef,
     value: c.CFTypeRef,
 ) Error;
+/// Perform a named action on an element (e.g. "AXRaise" to bring a window to the
+/// front within its application). Used by the focus engine.
+pub extern fn AXUIElementPerformAction(element: AXUIElementRef, action: c.CFStringRef) Error;
 
 pub extern fn AXValueCreate(theType: ValueType, valuePtr: *const anyopaque) AXValueRef;
 pub extern fn AXValueGetValue(value: AXValueRef, theType: ValueType, valuePtr: *anyopaque) Boolean;

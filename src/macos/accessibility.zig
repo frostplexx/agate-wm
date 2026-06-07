@@ -106,6 +106,19 @@ pub const Element = opaque {
         _ = self.setAttribute("AXEnhancedUserInterface", @ptrCast(if (on) c.kCFBooleanTrue else c.kCFBooleanFalse));
     }
 
+    /// Set a boolean AX attribute (e.g. "AXMain", "AXFocused", "AXFrontmost").
+    /// Returns true if the app accepted it.
+    pub fn setBool(self: *Element, name: []const u8, on: bool) bool {
+        return self.setAttribute(name, @ptrCast(if (on) c.kCFBooleanTrue else c.kCFBooleanFalse));
+    }
+
+    /// Perform a named AX action (e.g. "AXRaise"). Returns true on success.
+    pub fn performAction(self: *Element, name: []const u8) bool {
+        const a = String.createUtf8(name) catch return false;
+        defer a.release();
+        return ax.AXUIElementPerformAction(self.ref(), a.ref()) == ax.kAXErrorSuccess;
+    }
+
     /// Copy a child AXUIElement attribute (e.g. "AXFocusedWindow", "AXMainWindow").
     pub fn copyElement(self: *Element, name: []const u8) ?*Element {
         const v = self.copyAttribute(name) orelse return null;

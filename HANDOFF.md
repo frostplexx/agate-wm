@@ -75,11 +75,22 @@ Space, and stays live reacting to window create/destroy and mouse drags.
   yabai's changed-field direction logic; move → swap slots), and reflush once.
   Tap re-enables on `kCGEventTapDisabledBy*`.
 - **Native tabs** (the last big fix): the window server has **no** tab concept
-  (tabbing is pure AppKit — confirmed by dyld-cache symbol search: only
+  (tabbing is pure AppKit — confirmed by dyld-cache symbol search on 26.5.1: only
   movement/ordering/shadow groups exist at CGS level, all tab symbols are
-  `NSWindowTabGroup*`). Detection signal = **same pid + identical frame** (AppKit
-  gives a tab group one shared frame). `findTabSibling` → on create, a matching
-  window **replaces** the group's leaf instead of adding a tile.
+  `NSWindowTabGroup*`/`AX…TabGroup` UI roles). Detection signal = **same pid +
+  identical frame** (AppKit gives a tab group one shared frame). `findTabSibling`
+  → on create, a matching window **replaces** the group's leaf instead of adding
+  a tile.
+  - On tab **close**, `onWindowDestroyed` → `repairTabLeaf` re-pairs the leaf to
+    the surviving same-frame sibling (`Element.windowMatchingFrame` over the
+    app's `AXWindows`) so the group keeps its tile; a `was_tabbed` grace timer
+    retries once if the promoted tab hasn't surfaced yet. Before this, closing a
+    tab dropped the whole leaf (the group untiled).
+  - **There is no `AXTabbedWindows` attribute on macOS 26** (dyld-cache search:
+    absent) — the prior `isTabbed()` always returned false, so tab membership is
+    now tracked by *observing the join* (`is_tabbed=true` when `findTabSibling`
+    hits), not by querying AX. `AXFocusedTabChanged` IS a real AX notification,
+    useful for the future tab-switch re-tile (issue #1).
 
 ## Key learnings (non-obvious; will save re-deriving)
 
@@ -104,8 +115,8 @@ Space, and stays live reacting to window create/destroy and mouse drags.
    (`onWindowCreated` assumes active). Should resolve the window's real Space
    (`SLSCopySpacesForWindows`).
 3. **Tab edges**: frame-match can misfire if an app opens a genuine new window
-   exactly atop a same-app window (rare); closing the *tracked* tab while the
-   group persists drops the group until rediscovery.
+   exactly atop a same-app window (rare). (Closing the *tracked* front tab while
+   the group persists is now handled by `repairTabLeaf` — fixed.)
 4. **Multi-display**: tree has per-display Monitors, but `flushActive` only uses
    `display.mainVisibleFrame()` (main screen). Needs per-display frames.
 5. **Layout is flat** (one split level, single-neighbour resize). No nested

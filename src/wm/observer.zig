@@ -26,6 +26,7 @@ const macos = @import("macos");
 const data = @import("data.zig");
 const tree = @import("tree.zig");
 const window = @import("window.zig");
+const focus = @import("focus/focus.zig");
 const state = @import("../state.zig");
 
 const ax = macos.ax;
@@ -65,10 +66,22 @@ fn graceTimerFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void 
         tree.flushActive(mgr.appState);
         return;
     }
+    const ws = leaf.parent;
+    const idx = childIndex(ws, leaf);
     if (tree.removeWindow(root, ctx.wid)) {
         std.debug.print("[observer] -window #{d} (tab grace expired)\n", .{ctx.wid});
         tree.flushActive(mgr.appState);
+        if (ws) |w| focus.focusAfterClose(w, ctx.pid, idx);
     }
+}
+
+/// The index of `child` within `parent`'s children slice (0 if absent / no
+/// parent). Captured before removal so the focus engine knows which slot — and
+/// therefore which left neighbour — a closed window vacated.
+fn childIndex(parent: ?*data.Con, child: *data.Con) usize {
+    const p = parent orelse return 0;
+    for (p.children.items, 0..) |c2, i| if (c2 == child) return i;
+    return 0;
 }
 
 const Manager = struct {
@@ -403,8 +416,13 @@ fn onWindowDestroyed(mgr: *Manager, observer: ax.AXObserverRef, wid: u32) void {
         app.gpa.destroy(ctx);
     }
 
+    const ws = leaf.parent;
+    const idx = childIndex(ws, leaf);
     if (tree.removeWindow(root, wid)) {
         std.debug.print("[observer] -window #{d}\n", .{wid});
         tree.flushActive(app);
+        // Feature 1: if that was the app's last window here, focus the tile to
+        // its left so focus doesn't fall onto an unrelated app (yabai-style).
+        if (ws) |parent| focus.focusAfterClose(parent, pid, idx);
     }
 }
