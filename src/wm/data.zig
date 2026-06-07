@@ -107,6 +107,12 @@ pub const Con = struct {
     gaps: gaps = .{ .inner = 0, .outer = 0, .top = 0, .bottom = 0, .left = 0, .right = 0 },
     /// parent of this Con. Null for the root Con.
     parent: ?*Con = null,
+    /// Relative weight of this Con among its siblings along the parent's split
+    /// axis. Equal weights tile evenly; a manual resize rewrites these so the
+    /// new proportions persist (see `tree.applyManualResize`). Layout normalizes
+    /// by the sum of siblings' ratios, so the units are arbitrary but must be
+    /// consistent across siblings.
+    ratio: f64 = 1.0,
     /// Depth of this Con in the tree. Root is 0, its children are 1, etc.
     depth: u32 = 0,
     /// Children of this Con. Empty for leaf nodes. An intrusive doubly-linked

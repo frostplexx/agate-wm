@@ -21,19 +21,46 @@ pub fn flushWorkspace(ws: *data.Con, area: Rect) void {
 }
 
 /// Split `area` among `con`'s children according to its layout, recursing into
-/// nested split containers and applying frames at the leaves.
+/// nested split containers and applying frames at the leaves. The main axis
+/// (width for H_SPLIT, height for V_SPLIT) is divided in proportion to each
+/// child's `ratio`; the cross axis fills the area. (Like yabai's view, each leaf
+/// gets its exact computed area — no readback.)
 fn layoutChildren(con: *data.Con, area: Rect) void {
     const n = con.children.len();
     if (n == 0) return;
 
+    const horizontal = con.layout == .H_SPLIT;
+    const stacked = con.layout == .H_STACK or con.layout == .V_STACK or con.layout == .FLOAT;
     const gap: f64 = @floatFromInt(con.gaps.inner);
+
+    var total_ratio: f64 = 0;
+    {
+        var it = con.children.first;
+        while (it) |node| : (it = node.next) total_ratio += data.Con.fromNode(node).ratio;
+    }
+    if (total_ratio <= 0) total_ratio = 1;
+
+    const nf: f64 = @floatFromInt(n);
+    const avail_main = (if (horizontal) area.size.width else area.size.height) - gap * (nf - 1);
+
+    var offset = if (horizontal) area.origin.x else area.origin.y;
     var it = con.children.first;
-    var i: usize = 0;
-    while (it) |node| : ({
-        it = node.next;
-        i += 1;
-    }) {
-        place(data.Con.fromNode(node), childRect(con.layout, area, n, i, gap));
+    while (it) |node| : (it = node.next) {
+        const child = data.Con.fromNode(node);
+        if (stacked) {
+            place(child, area); // stacks/float: every child fills the area for now
+            continue;
+        }
+        const extent = avail_main * (child.ratio / total_ratio);
+        const rect: Rect = if (horizontal) .{
+            .origin = .{ .x = offset, .y = area.origin.y },
+            .size = .{ .width = extent, .height = area.size.height },
+        } else .{
+            .origin = .{ .x = area.origin.x, .y = offset },
+            .size = .{ .width = area.size.width, .height = extent },
+        };
+        place(child, rect);
+        offset += extent + gap;
     }
 }
 
@@ -46,45 +73,15 @@ fn place(con: *data.Con, area: Rect) void {
     }
 }
 
-/// The rect for child `i` of `n` within `area` under `layout`.
-fn childRect(layout: data.layouts, area: Rect, n: usize, i: usize, gap: f64) Rect {
-    const nf: f64 = @floatFromInt(n);
-    const fi: f64 = @floatFromInt(i);
-    return switch (layout) {
-        // Even columns left-to-right.
-        .H_SPLIT => blk: {
-            const w = (area.size.width - gap * (nf - 1)) / nf;
-            break :blk .{
-                .origin = .{ .x = area.origin.x + fi * (w + gap), .y = area.origin.y },
-                .size = .{ .width = w, .height = area.size.height },
-            };
-        },
-        // Even rows top-to-bottom.
-        .V_SPLIT => blk: {
-            const h = (area.size.height - gap * (nf - 1)) / nf;
-            break :blk .{
-                .origin = .{ .x = area.origin.x, .y = area.origin.y + fi * (h + gap) },
-                .size = .{ .width = area.size.width, .height = h },
-            };
-        },
-        // Stacks and float: every child fills the area for now.
-        .H_STACK, .V_STACK, .FLOAT => area,
-    };
-}
-
-/// Push a frame onto the real window (AX element resolved lazily).
-///
-/// Order matters: set size FIRST so the target position isn't clamped to the
-/// window's old (larger) extent, then set position LAST. yabai's
-/// `window_manager_set_window_frame` (koekeishiya/yabai, src/window_manager.c)
-/// also re-sets size *after* the move; we deliberately don't, because that
-/// trailing resize makes some apps — terminals like Ghostty especially —
-/// re-anchor and snap back to their old position.
-///
-/// Frame changes are wrapped in the `AXEnhancedUserInterface` disable/restore
-/// dance (yabai's `AX_ENHANCED_UI_WORKAROUND`, src/misc/helpers.h): while that
-/// app attribute is on, AppKit animates AX-driven moves/resizes, so we turn it
-/// off for the duration and restore it, making native apps tile instantly.
+/// Push a frame onto the real window (AX element resolved lazily). This is a
+/// direct port of yabai's `window_manager_set_window_frame`
+/// (koekeishiya/yabai, src/window_manager.c): apply size → position → size.
+/// macOS clamps a window to the visible area, so the size may need setting both
+/// before the move (so the position isn't clamped to the old, larger extent) and
+/// after it. The whole sequence runs with `AXEnhancedUserInterface` disabled
+/// (yabai's `AX_ENHANCED_UI_WORKAROUND`, src/misc/helpers.h) — that attribute,
+/// which macOS turns on for any app an assistive client attaches to, makes
+/// AppKit *animate* AX-driven frame changes; turning it off makes them instant.
 fn applyFrame(win: *data.Window, area: Rect) void {
     const el = window.resolveElement(win) orelse return;
 
@@ -96,6 +93,7 @@ fn applyFrame(win: *data.Window, area: Rect) void {
 
     _ = el.setSize(area.size);
     _ = el.setPosition(area.origin);
+    _ = el.setSize(area.size);
 
     if (eui) app.?.setEnhancedUserInterface(true);
     win.bounds = area; // keep the model in sync with what we requested

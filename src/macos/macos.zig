@@ -29,6 +29,10 @@ pub const window_list = @import("window_list.zig");
 pub const spaces = @import("spaces.zig");
 /// Display geometry (NSScreen visible frame, AX coordinates).
 pub const display = @import("display.zig");
+/// Monotonic millisecond clock.
+pub const clock = @import("clock.zig");
+/// CoreGraphics event tap (listen-only mouse up/down).
+pub const event_tap = @import("event_tap.zig");
 
 // Common conveniences re-exported at the top level.
 pub const String = foundation.String;

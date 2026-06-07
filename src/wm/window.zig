@@ -1,6 +1,18 @@
 const macos = @import("macos");
 const data = @import("data.zig");
 
+/// Whether the window is "ordered in" — mapped/rendered by the window server.
+/// Background macOS *native tabs* are not ordered in (only the front tab of a
+/// tab group is), so this is how we keep a tab group from tiling as several
+/// windows. Uses the private SkyLight SPI `SLSWindowIsOrderedIn`; on error we
+/// assume ordered-in so a query failure never hides a real window.
+pub fn isOrderedIn(win: *const data.Window) bool {
+    var out: bool = false;
+    const cid = macos.skylight.CGSMainConnectionID();
+    if (macos.skylight.SLSWindowIsOrderedIn(cid, win.id, &out) != macos.skylight.kCGErrorSuccess) return true;
+    return out;
+}
+
 /// Build a Window from CG/SkyLight metadata. The AX element is *not* resolved
 /// here — see `resolveElement`. macOS won't expose a window's AX element while
 /// its Space has never been active, so eager resolution fails for every window
