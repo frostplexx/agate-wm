@@ -33,6 +33,8 @@ pub const display = @import("display.zig");
 pub const clock = @import("clock.zig");
 /// CoreGraphics event tap (listen-only mouse up/down).
 pub const event_tap = @import("event_tap.zig");
+/// NSWorkspace app launch/terminate notifications (event-driven, real-time).
+pub const app_watch = @import("app_watch.zig");
 
 // Common conveniences re-exported at the top level.
 pub const String = foundation.String;

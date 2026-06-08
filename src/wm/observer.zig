@@ -134,11 +134,17 @@ pub fn run(appState: *state.AppState) !void {
     // window-less app (Finder, a backgrounded app, …) still fires.
     if (macos.workspace.regularAppPids(appState.gpa)) |pids| {
         defer appState.gpa.free(pids);
-        for (pids) |pid| _ = ensureAppObserver(mgr, pid) catch continue;
+        for (pids) |pid| _ = observeApp(mgr, pid);
     } else |_| {}
 
     // Observe destruction of each window already in the tree.
     if (appState.tree) |root| observeWindows(mgr, root);
+
+    // Real-time app launch/terminate (see `macos.app_watch`): NSWorkspace posts
+    // the instant an app starts or quits. This is the entire discovery path for
+    // apps started after us — on launch we observe the app and enumerate the
+    // windows it already has (yabai-style); no polling, no reconcile sweep.
+    macos.app_watch.start(onAppEvent, mgr);
 
     c.CFRunLoopRun();
 }
@@ -148,40 +154,57 @@ pub fn run(appState: *state.AppState) !void {
 fn observeWindows(mgr: *Manager, con: *data.Con) void {
     if (con.con_type == .Container) {
         if (con.window) |*w| {
-            if (ensureAppObserver(mgr, w.pid)) |entry| {
+            if (observeApp(mgr, w.pid)) |entry| {
                 if (window.resolveElement(w)) |el| addDestroyNotification(entry.observer, el, w.id);
-            } else |_| {}
+            }
         }
     }
     for (con.children.items) |child| observeWindows(mgr, child);
 }
 
-/// Get (creating if needed) the observer for `pid`, registered for window
-/// creation and wired into the run loop.
-fn ensureAppObserver(mgr: *Manager, pid: i32) !Entry {
+/// Ensure `pid` has an active create-observer: an `AXObserver` subscribed to
+/// `AXWindowCreated` on the app element and wired into the run loop. Returns the
+/// entry, or null if the app's Accessibility interface isn't ready yet — a
+/// freshly launched app briefly returns errors from `AXObserverCreate` /
+/// `AXObserverAddNotification`, and the caller (`observeAndAddWindows`) retries.
+/// Idempotent: a second call for an already-observed pid just returns the entry.
+fn observeApp(mgr: *Manager, pid: i32) ?Entry {
     if (mgr.entries.get(pid)) |e| return e;
 
     var observer: ax.AXObserverRef = null;
-    if (ax.AXObserverCreate(pid, axCallback, &observer) != ax.kAXErrorSuccess) return error.ObserverCreate;
-    const app = macos.Element.createApplication(pid) orelse return error.AppElement;
+    if (ax.AXObserverCreate(pid, axCallback, &observer) != ax.kAXErrorSuccess) return null;
+    const app = macos.Element.createApplication(pid) orelse {
+        foundation.CFRelease(observer);
+        return null;
+    };
 
     // Nudge Chromium/Electron/Firefox-based apps to publish their AX tree so
     // they emit window notifications too.
     app.enableManualAccessibility();
-    addAppNotification(observer, app, "AXWindowCreated");
+    if (!addAppNotification(observer, app, "AXWindowCreated")) {
+        app.release();
+        foundation.CFRelease(observer);
+        return null; // app not ready — caller retries
+    }
     c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), ax.AXObserverGetRunLoopSource(observer), c.kCFRunLoopDefaultMode);
 
     const entry = Entry{ .observer = observer, .app = app };
-    try mgr.entries.put(pid, entry);
+    mgr.entries.put(pid, entry) catch {
+        c.CFRunLoopRemoveSource(c.CFRunLoopGetCurrent(), ax.AXObserverGetRunLoopSource(observer), c.kCFRunLoopDefaultMode);
+        app.release();
+        foundation.CFRelease(observer);
+        return null;
+    };
     return entry;
 }
 
 /// Register an application-level notification (the callback receives the
-/// affected window element). `refcon` is null for these.
-fn addAppNotification(observer: ax.AXObserverRef, app: *macos.Element, name_str: []const u8) void {
-    const name = foundation.String.createUtf8(name_str) catch return;
+/// affected window element). `refcon` is null for these. Returns true on
+/// success — a not-yet-ready app returns an error here.
+fn addAppNotification(observer: ax.AXObserverRef, app: *macos.Element, name_str: []const u8) bool {
+    const name = foundation.String.createUtf8(name_str) catch return false;
     defer name.release();
-    _ = ax.AXObserverAddNotification(observer, app.ref(), name.ref(), null);
+    return ax.AXObserverAddNotification(observer, app.ref(), name.ref(), null) == ax.kAXErrorSuccess;
 }
 
 fn addDestroyNotification(observer: ax.AXObserverRef, el: *macos.Element, wid: u32) void {
@@ -283,6 +306,179 @@ fn onMouseUp(mgr: *Manager) void {
     }
 }
 
+/// yabai's `window_is_standard` (koekeishiya/yabai, src/window.c): a window we
+/// tile must report role `AXWindow` and subrole `AXStandardWindow`. This is a
+/// *whitelist*, unlike the old subrole blacklist — it rejects sheets, popovers,
+/// panels, and the auxiliary non-standard windows some apps (Ghostty, browsers)
+/// keep around, which a blacklist would let through and double-tile.
+fn isStandardAXWindow(el: *macos.Element) bool {
+    const role = el.copyString("AXRole") orelse return false;
+    defer role.release();
+    var rbuf: [64]u8 = undefined;
+    const r = role.cstring(&rbuf) orelse return false;
+    if (!std.mem.eql(u8, r, "AXWindow")) return false;
+
+    const sub = el.copyString("AXSubrole") orelse return false;
+    defer sub.release();
+    var sbuf: [64]u8 = undefined;
+    const s = sub.cstring(&sbuf) orelse return false;
+    return std.mem.eql(u8, s, "AXStandardWindow");
+}
+
+/// The Workspace Con for the Space window `wid` currently lives on, via
+/// `SLSCopySpacesForWindows`. Null if the window has no resolvable space yet.
+fn workspaceForWindow(mgr: *Manager, wid: u32) ?*data.Con {
+    const root = mgr.appState.tree orelse return null;
+    var wid_i64: i64 = @intCast(wid);
+    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &wid_i64) orelse return null;
+    defer foundation.CFRelease(num);
+    var values = [_]?*const anyopaque{@ptrCast(num)};
+    const wins_arr = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return null;
+    defer foundation.CFRelease(wins_arr);
+    const space_arr = macos.skylight.SLSCopySpacesForWindows(
+        mgr.appState.skylight_cid,
+        0xFFFF_FFFF_FFFF_FFFF,
+        wins_arr,
+    ) orelse return null;
+    defer foundation.CFRelease(space_arr);
+    if (c.CFArrayGetCount(space_arr) == 0) return null;
+    var sid: i64 = 0;
+    if (c.CFNumberGetValue(
+        @ptrCast(c.CFArrayGetValueAtIndex(space_arr, 0)),
+        c.kCFNumberSInt64Type,
+        &sid,
+    ) == 0) return null;
+    return tree.findWorkspace(root, @intCast(sid));
+}
+
+/// Enumerate `pid`'s current windows via Accessibility and add any standard,
+/// not-yet-tracked one — yabai's `window_manager_add_application_windows`
+/// (koekeishiya/yabai, src/window_manager.c). Run right after an app is observed
+/// so a window it created in the gap between launching and our observer attaching
+/// (which would miss the `AXWindowCreated` event) is still picked up. Keyed by
+/// `_AXUIElementGetWindow` id with a `hasWindow` guard, so it never double-adds.
+fn addApplicationWindows(mgr: *Manager, pid: i32, observer: ax.AXObserverRef) void {
+    const app = mgr.appState;
+    const root = app.tree orelse return;
+    const app_el = macos.Element.createApplication(pid) orelse return;
+    defer app_el.release();
+    app_el.enableManualAccessibility();
+
+    const wins_v = app_el.copyAttribute("AXWindows") orelse return;
+    defer foundation.CFRelease(wins_v);
+    const arr: c.CFArrayRef = @ptrCast(wins_v);
+    const n: usize = @intCast(c.CFArrayGetCount(arr));
+    if (n == 0) return;
+
+    var namebuf: [256]u8 = undefined;
+    const name = macos.workspace.appName(pid, &namebuf) orelse "";
+
+    var changed = false;
+    for (0..n) |i| {
+        const elem_ref: ax.AXUIElementRef = @ptrCast(c.CFArrayGetValueAtIndex(arr, @intCast(i)));
+        const el = macos.Element.fromRef(elem_ref) orelse continue;
+        const wid = el.windowId() orelse continue;
+        if (tree.hasWindow(root, wid)) continue;
+        if (!isStandardAXWindow(el)) continue;
+
+        const ws = workspaceForWindow(mgr, wid) orelse continue;
+        const owner = app.arena.dupe(u8, name) catch continue;
+        const win = window.fromElement(el, owner) orelse continue;
+        if (win.bounds.size.width == 0 and win.bounds.size.height == 0) {
+            win.deinit();
+            continue;
+        }
+        const leaf = tree.addLeaf(app.arena, ws, win) catch {
+            win.deinit();
+            continue;
+        };
+        if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
+        std.debug.print("[observer] +window #{d} {s} (launch)\n", .{ wid, win.owner });
+        changed = true;
+    }
+    if (changed) tree.flushActive(app);
+}
+
+/// Tear down `pid`'s app observer and drop all of its windows from the tree
+/// (the app terminated). Releases the now-defunct AXObserver + app element and
+/// re-flushes if any window was removed. Safe to call for a pid we aren't
+/// tracking (no-op beyond the window sweep).
+fn removeApp(mgr: *Manager, pid: i32) void {
+    const app = mgr.appState;
+    const root = app.tree orelse return;
+    if (mgr.entries.fetchRemove(pid)) |kv| {
+        const src = ax.AXObserverGetRunLoopSource(kv.value.observer);
+        c.CFRunLoopRemoveSource(c.CFRunLoopGetCurrent(), src, c.kCFRunLoopDefaultMode);
+        foundation.CFRelease(kv.value.observer);
+        kv.value.app.release();
+    }
+    if (tree.removeWindowsForPid(root, pid)) {
+        std.debug.print("[observer] -app pid={d} (terminated)\n", .{pid});
+        tree.flushActive(app);
+    }
+}
+
+/// Max attempts and delay for the launch-time observe retry. A freshly launched
+/// app's Accessibility server can lag the launch notification by a few hundred
+/// ms, so `AXObserverCreate`/`AXObserverAddNotification` transiently fail.
+const max_observe_attempts: u32 = 12;
+const observe_retry_delay: f64 = 0.5;
+
+/// Heap-allocated context for an observe retry timer (freed in the callback).
+const ObserveRetry = struct {
+    mgr: *Manager,
+    pid: i32,
+    attempt: u32,
+};
+
+fn observeRetryFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const ctx: *ObserveRetry = @ptrCast(@alignCast(info orelse return));
+    defer ctx.mgr.appState.gpa.destroy(ctx);
+    observeAndAddWindows(ctx.mgr, ctx.pid, ctx.attempt);
+}
+
+/// Observe `pid` and pull in the windows it already has. If the app isn't ready
+/// to be observed yet, retry on a short timer (up to `max_observe_attempts`),
+/// mirroring yabai's launch retry (koekeishiya/yabai, src/event.c
+/// APPLICATION_LAUNCHED). Once observed, `AXWindowCreated` handles every later
+/// window, so this only needs to run until the first successful observe.
+fn observeAndAddWindows(mgr: *Manager, pid: i32, attempt: u32) void {
+    if (observeApp(mgr, pid)) |entry| {
+        addApplicationWindows(mgr, pid, entry.observer);
+        return;
+    }
+    if (attempt + 1 >= max_observe_attempts) return;
+
+    const ctx = mgr.appState.gpa.create(ObserveRetry) catch return;
+    ctx.* = .{ .mgr = mgr, .pid = pid, .attempt = attempt + 1 };
+    var timer_ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = ctx,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    const fire_at = c.CFAbsoluteTimeGetCurrent() + observe_retry_delay;
+    const timer = c.CFRunLoopTimerCreate(null, fire_at, 0, 0, 0, observeRetryFired, &timer_ctx);
+    if (timer) |t| {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopDefaultMode);
+        c.CFRelease(t);
+    } else {
+        mgr.appState.gpa.destroy(ctx);
+    }
+}
+
+/// Real-time NSWorkspace app launch/terminate handler (see `macos.app_watch`).
+/// Launch → observe the app (with retry) and enumerate its existing windows;
+/// terminate → drop the app's windows immediately.
+fn onAppEvent(event: macos.app_watch.AppEvent, pid: i32, context: ?*anyopaque) callconv(.c) void {
+    const mgr: *Manager = @ptrCast(@alignCast(context orelse return));
+    switch (event) {
+        .launched => observeAndAddWindows(mgr, pid, 0),
+        .terminated => removeApp(mgr, pid),
+    }
+}
+
 /// A window appeared. The created window's AX element is handed to us directly,
 /// and we build the Window from it (id/pid/frame via Accessibility) — the window
 /// server has not registered it with CoreGraphics/SkyLight yet, so a CG/SLS
@@ -294,6 +490,13 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     const wid = el.windowId() orelse return; // non-window elements have no id
     if (tree.hasWindow(app.tree orelse return, wid)) return;
 
+    // Only tile real, standard top-level windows (yabai `window_is_standard`).
+    // Sheets, popovers, panels, scroll-indicator overlays (Zen/Firefox), and
+    // apps' auxiliary non-standard windows all fire AXWindowCreated too, but
+    // tiling them reflows and blinks the layout — so reject anything that isn't
+    // an AXWindow/AXStandardWindow.
+    if (!isStandardAXWindow(el)) return;
+
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(app.tree.?, sid) orelse return;
 
@@ -303,6 +506,12 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     const owner = app.arena.dupe(u8, name) catch return; // must outlive the event
 
     const win = window.fromElement(el, owner) orelse return;
+    // A zero-size frame means the app hasn't committed the window's geometry yet
+    // (or the AX query failed). These are transient overlays — skip them.
+    if (win.bounds.size.width == 0 and win.bounds.size.height == 0) {
+        win.deinit();
+        return;
+    }
 
     // Native macOS tab: a new window created at the exact frame of an existing
     // window of the same app is a tab joining that group (AppKit gives a tab

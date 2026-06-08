@@ -1,22 +1,3 @@
-//! Focus engine — which window is "active", and the primitives that change it.
-//!
-//! Scope so far:
-//!   1. `focusAfterClose` — when a window closes and it was the *last* window of
-//!      its app on the active workspace, move focus to the tile on its left
-//!      (the previous slot). This is the yabai behaviour: focus never falls onto
-//!      a random app just because an app's last window went away.
-//!   2. `focusWindow` / `focusLeaf` / `focusDirection` — the reusable primitives
-//!      for *changing* focus between windows (and therefore between apps). These
-//!      are the hooks a keybinding layer will drive later; nothing binds keys to
-//!      them yet.
-//!
-//! Focusing is AX-driven: make the owning app frontmost (`AXFrontmost`) and the
-//! window key (`AXMain` + `AXFocused`), then raise it (`AXRaise`). yabai does the
-//! equivalent through the private `_SLPSSetFrontProcessWithOptions` +
-//! `SLPSPostEventRecordTo` SkyLight path (both verified present on macOS 26); if
-//! AX focus proves flaky for stubborn apps, that's the documented hardening path
-//! — it needs a Carbon `ProcessSerialNumber` (via `GetProcessForPID`) for the
-//! target pid, which is why we start with the simpler self-contained AX route.
 const std = @import("std");
 const macos = @import("macos");
 const data = @import("../data.zig");

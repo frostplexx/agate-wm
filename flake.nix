@@ -3,31 +3,36 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # zig.url = "github:mitchellh/zig-overlay";
   };
 
-  outputs = { self, nixpkgs }:
-  let
-    systems = [
-      "x86_64-linux"
-      "aarch64-linux"
-      "x86_64-darwin"
-      "aarch64-darwin"
-    ];
+  outputs =
+    {
+      self,
+      nixpkgs,
+    }:
+    let
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
 
-    forAllSystems = f:
-      nixpkgs.lib.genAttrs systems
-        (system: f (import nixpkgs { inherit system; }));
-  in {
-    devShells = forAllSystems (pkgs: {
-      default = pkgs.mkShell {
-        packages = with pkgs; [
-          lua
-          pkg-config
-          clang
-          gnumake
-          zig
-        ];
-      };
-    });
-  };
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
+    in
+    {
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            lua
+            pkg-config
+            clang
+            gnumake
+            zig
+          ];
+        };
+      });
+    };
 }

@@ -58,6 +58,8 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
 
         for (try macos.spaces.manageableWindowsOnSpace(alloc, cid, sp.id)) |wid| {
             const info = meta.get(wid) orelse continue;
+            // Non-zero layers are system chrome (menu bar, Dock overlays, etc.).
+            if (info.layer != 0) continue;
             const win = window.init(info);
             // Skip windows that aren't "ordered in" (mapped): background macOS
             // native tabs, minimized and hidden windows. The front tab of a tab
@@ -112,6 +114,31 @@ pub fn removeWindow(con: *data.Con, wid: u64) bool {
         if (removeWindow(child, wid)) return true;
     }
     return false;
+}
+
+/// Remove every leaf window owned by `pid` from anywhere under `con` (an app
+/// terminated). Releases each window's AX element. Returns true if any leaf was
+/// removed. Walks the children list defensively, re-checking after each removal
+/// since `orderedRemove` shifts subsequent indices.
+pub fn removeWindowsForPid(con: *data.Con, pid: i32) bool {
+    var removed = false;
+    var i: usize = 0;
+    while (i < con.children.items.len) {
+        const child = con.children.items[i];
+        if (child.con_type == .Container) {
+            if (child.window) |*w| {
+                if (w.pid == pid) {
+                    w.deinit();
+                    _ = con.children.orderedRemove(i);
+                    removed = true;
+                    continue; // list shifted; re-check this index
+                }
+            }
+        }
+        if (removeWindowsForPid(child, pid)) removed = true;
+        i += 1;
+    }
+    return removed;
 }
 
 /// Whether a leaf for window `wid` already exists under `con`.
