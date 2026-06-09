@@ -33,6 +33,8 @@ pub const display = @import("display.zig");
 pub const clock = @import("clock.zig");
 /// CoreGraphics event tap (listen-only mouse up/down).
 pub const event_tap = @import("event_tap.zig");
+/// IOHIDEvent SPI: synthesize Space-switch gestures (iohid.zig).
+pub const iohid = @import("iohid.zig");
 /// NSWorkspace app launch/terminate notifications (event-driven, real-time).
 pub const app_watch = @import("app_watch.zig");
 

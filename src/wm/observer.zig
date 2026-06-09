@@ -385,7 +385,22 @@ fn onSpaceChanged(
 ) callconv(.c) void {
     const mgr: *Manager = @ptrCast(@alignCast(userdata orelse return));
     tree.flushActive(mgr.appState);
+    // A SkyLight space switch leaves the previous space's app frontmost, so the
+    // menu bar keeps showing (and overlapping with) its menus. The menu bar
+    // tracks the frontmost app, so activate a window on the now-active space to
+    // pull the menu bar over. No-op on an empty space (nothing to focus).
+    focusActiveSpace(mgr.appState);
     std.debug.print("[observer] space changed → retiled\n", .{});
+}
+
+/// Make an app on the currently active space frontmost (see `onSpaceChanged`).
+fn focusActiveSpace(app: *state.AppState) void {
+    const root = app.tree orelse return;
+    const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
+    const ws = tree.findWorkspace(root, sid) orelse return;
+    for (ws.children.items) |child| {
+        if (focus.focusLeaf(child)) return; // first window that accepts focus
+    }
 }
 
 /// Listen-only mouse tap (the drag driver). Mirrors yabai's `mouse_handler`

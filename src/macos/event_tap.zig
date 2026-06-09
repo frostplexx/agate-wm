@@ -118,6 +118,9 @@ pub extern fn CGEventCreate(source: ?*anyopaque) EventRef;
 pub extern fn CGEventSetIntegerValueField(event: EventRef, field: CGEventField, value: i64) void;
 pub extern fn CGEventSetDoubleValueField(event: EventRef, field: CGEventField, value: f64) void;
 pub extern fn CGEventPost(tap: TapLocation, event: EventRef) void;
+/// Create an event source bound to a state (we use HID-system state so the
+/// gesture looks like it originated from the kernel HID path).
+pub extern fn CGEventSourceCreate(stateID: CGEventSourceStateID) ?*anyopaque;
 
 const kCGSEventTypeField: CGEventField = 55;
 const kCGEventGestureHIDType: CGEventField = 110;
@@ -126,6 +129,11 @@ const kCGEventGestureSwipeProgress: CGEventField = 124;
 const kCGEventGestureSwipeVelocityX: CGEventField = 129;
 const kCGEventGestureSwipeVelocityY: CGEventField = 130;
 const kCGEventGesturePhase: CGEventField = 132;
+/// Source process id carried by the event. Real trackpad/HID gestures report 0
+/// (kernel). Tahoe's gesture recognizer (WindowManager.SpaceSwapSystemGesture,
+/// eventSource gated to `.trackpad`) rejects events that look synthetic — RE'd
+/// from `SystemGestureBase.handleEvent`. We force this to 0 to fake HID origin.
+const kCGEventSourceUnixProcessID: CGEventField = 41;
 
 const kCGSEventDockControl: i64 = 30; // CGSEventType for a dock-control gesture
 const kIOHIDEventTypeDockSwipe: i64 = 23; // IOHIDEventType
@@ -145,7 +153,11 @@ fn postDockSwipe(phase: GesturePhase, dir: SwipeDirection, velocity: f64) void {
     const progress: f64 = if (dir == .right) tiny else -tiny;
     const vel: f64 = if (dir == .right) velocity else -velocity;
 
-    const ev = CGEventCreate(null) orelse return;
+    // Build the event from an HID-system source so it carries kernel-ish
+    // provenance (see kCGEventSourceUnixProcessID note).
+    const src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+    defer if (src) |s| c.CFRelease(@ptrCast(s));
+    const ev = CGEventCreate(src) orelse return;
     defer c.CFRelease(@ptrCast(ev));
     CGEventSetIntegerValueField(ev, kCGSEventTypeField, kCGSEventDockControl);
     CGEventSetIntegerValueField(ev, kCGEventGestureHIDType, kIOHIDEventTypeDockSwipe);
@@ -154,19 +166,20 @@ fn postDockSwipe(phase: GesturePhase, dir: SwipeDirection, velocity: f64) void {
     CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, kCGGestureMotionHorizontal);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, vel);
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, vel);
-    CGEventPost(kCGSessionEventTap, ev);
+    // Fake kernel/HID provenance: real gestures report source pid 0.
+    CGEventSetIntegerValueField(ev, kCGEventSourceUnixProcessID, 0);
+    // Post at the HID tap (most upstream), where real gestures enter.
+    CGEventPost(kCGHIDEventTap, ev);
 }
 
-/// Post one full three-phase horizontal Dock swipe (one Space step).
-///
-/// BROKEN on macOS 26 (Tahoe) / 27: the window server rejects the synthetic
-/// dock-swipe event (you get an error beep, no switch) — Apple changed the
-/// gesture event's format/validation (jurplel/InstantSpaceSwitcher#72). Kept for
-/// reference and for older macOS; the active path is `performSpaceShortcut`.
+/// Step one Space in `dir`. On macOS 26/27 the CGEvent dock-swipe (`postDockSwipe`
+/// below) is rejected — the recognizer reads the IOHIDEvent backing the event,
+/// which a synthetic CGEvent lacks. So we inject a real DockSwipe IOHIDEvent via
+/// `iohid` instead. `velocity` is unused on the IOHID path (kept for signature
+/// stability); `postDockSwipe` is retained only as documentation of the old way.
 pub fn performSwitchGesture(dir: SwipeDirection, velocity: f64) void {
-    postDockSwipe(.began, dir, velocity);
-    postDockSwipe(.changed, dir, velocity);
-    postDockSwipe(.ended, dir, velocity);
+    _ = velocity;
+    @import("iohid.zig").dispatchDockSwipe(dir == .right);
 }
 
 // ---------------------------------------------------------------------------

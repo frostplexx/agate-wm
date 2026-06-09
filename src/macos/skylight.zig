@@ -57,6 +57,20 @@ pub extern fn SLSShowSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
 /// `SLSManagedDisplaySetCurrentSpace` that leaves the menu bar stale.
 pub extern fn SLSSpaceResetMenuBar(cid: ConnectionID, space: u64) void;
 
+// --- Atomic space-switch transaction (the Tahoe path) ----------------------
+// macOS 26/27 applies a Space switch as a single transaction (create → add
+// operations → commit), which is how Dock keeps the menu bar coherent. The
+// per-call legacy functions above don't compose, leaving the menu bar half
+// updated. Signatures here are inferred (ipsw can't disassemble these on the
+// beta cache) by analogy to their non-transaction counterparts, with the
+// `txn` handle replacing the connection id. `SLSTransactionCreate` is confirmed
+// exported/linkable; the rest are confirmed present in the cache.
+pub const TransactionRef = ?*anyopaque;
+pub extern fn SLSTransactionCreate(cid: ConnectionID) TransactionRef;
+pub extern fn SLSTransactionSetManagedDisplayCurrentSpace(txn: TransactionRef, display: c.CFStringRef, space: u64) void;
+pub extern fn SLSTransactionSpaceRebuildMenuBar(txn: TransactionRef, space: u64) void;
+pub extern fn SLSTransactionCommit(txn: TransactionRef, options: c_int) CGError;
+
 // --- Window enumeration / iteration ----------------------------------------
 
 /// All spaces across every display: an array of per-display dictionaries, each

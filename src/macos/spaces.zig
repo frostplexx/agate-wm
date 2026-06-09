@@ -36,7 +36,7 @@ pub fn activeSpace(cid: sl.ConnectionID) ?u64 {
 
 /// The spaces on the focused display in Mission Control order, plus the position
 /// of the active space within that order. Caller owns `.spaces`.
-const Order = struct { spaces: []Space, active_pos: usize };
+const Order = struct { spaces: []Space, active_pos: usize, cid: sl.ConnectionID };
 
 fn focusedDisplayOrder(alloc: Allocator, cid: sl.ConnectionID) !?Order {
     const active = activeSpace(cid) orelse return null;
@@ -58,51 +58,47 @@ fn focusedDisplayOrder(alloc: Allocator, cid: sl.ConnectionID) !?Order {
         if (sp.id == active) active_pos = list.items.len;
         try list.append(alloc, sp);
     }
-    return .{ .spaces = try list.toOwnedSlice(alloc), .active_pos = active_pos };
+    return .{ .spaces = try list.toOwnedSlice(alloc), .active_pos = active_pos, .cid = cid };
 }
 
-/// Switch the focused display to absolute `space_id`, replicating the full
-/// sequence Dock.app uses so the menu bar refreshes — a bare SetCurrentSpace
-/// leaves it stale (overlapping menus). On macOS 26/27 each of these calls gates
-/// on `SLSWindowManagementClientOperationsEnabled` and, for a normal process,
-/// falls back to the legacy window-server-client message path, which the server
-/// honors (SetCurrentSpace already worked for us that way). See skylight.zig.
+/// Switch the focused display to absolute `space_id`. NOTE: emulating a real
+/// swipe is impossible in-process on Tahoe (the gesture recognizer reads an
+/// injected IOHIDEvent that only a DriverKit virtual-HID service can provide —
+/// see iohid.zig). This direct window-server path switches instantly but leaves
+/// the menu bar stale (overlapping menus); `killall Dock` clears it. The atomic
+/// transaction is preferred when available, else the per-call legacy path.
 fn switchToSpaceDirect(cid: sl.ConnectionID, space_id: u64) void {
     const uuid = sl.SLSCopyActiveMenuBarDisplayIdentifier(cid) orelse return;
     defer foundation.CFRelease(uuid);
 
-    // CFArray<CFNumber> holding just the target space id, for Will/ShowSpaces.
-    var sid: i64 = @intCast(space_id);
-    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &sid) orelse return;
-    defer foundation.CFRelease(num);
-    var values = [_]?*const anyopaque{@ptrCast(num)};
-    const arr = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return;
-    defer foundation.CFRelease(arr);
-
-    std.debug.print("[spaces] switchToSpaceDirect -> {d}: willSwitch…\n", .{space_id});
-    sl.SLSWillSwitchSpaces(cid, arr);
-    std.debug.print("[spaces]   setCurrentSpace…\n", .{});
+    if (sl.SLSTransactionCreate(cid)) |txn| {
+        sl.SLSTransactionSetManagedDisplayCurrentSpace(txn, uuid, space_id);
+        sl.SLSTransactionSpaceRebuildMenuBar(txn, space_id);
+        _ = sl.SLSTransactionCommit(txn, 0);
+        return;
+    }
     sl.SLSManagedDisplaySetCurrentSpace(cid, uuid, space_id);
-    std.debug.print("[spaces]   showSpaces…\n", .{});
-    sl.SLSShowSpaces(cid, arr);
-    std.debug.print("[spaces]   resetMenuBar…\n", .{});
-    sl.SLSSpaceResetMenuBar(cid, space_id);
-    std.debug.print("[spaces]   done\n", .{});
+}
+
+/// Switch from the active Space to position `target_pos` in the focused-display
+/// order.
+fn swipeToPos(order: Order, target_pos: usize) void {
+    if (target_pos != order.active_pos) switchToSpaceDirect(order.cid, order.spaces[target_pos].id);
 }
 
 /// Switch the focused display to the 1-based user-space index `n`
-/// (counting only `type == 0` user Spaces).
+/// (counting only `type == 0` user Spaces, stepping past fullscreen ones).
 pub fn switchToIndex(alloc: Allocator, cid: sl.ConnectionID, n: usize) !void {
     if (n == 0) return;
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);
 
     var seen: usize = 0;
-    for (order.spaces) |sp| {
+    for (order.spaces, 0..) |sp, i| {
         if (sp.type != 0) continue;
         seen += 1;
         if (seen == n) {
-            switchToSpaceDirect(cid, sp.id);
+            swipeToPos(order, i);
             return;
         }
     }
@@ -115,7 +111,7 @@ pub fn switchNext(alloc: Allocator, cid: sl.ConnectionID) !void {
     var i: usize = order.active_pos + 1;
     while (i < order.spaces.len) : (i += 1) {
         if (order.spaces[i].type == 0) {
-            switchToSpaceDirect(cid, order.spaces[i].id);
+            swipeToPos(order, i);
             return;
         }
     }
@@ -129,7 +125,7 @@ pub fn switchPrev(alloc: Allocator, cid: sl.ConnectionID) !void {
     while (i > 0) {
         i -= 1;
         if (order.spaces[i].type == 0) {
-            switchToSpaceDirect(cid, order.spaces[i].id);
+            swipeToPos(order, i);
             return;
         }
     }
