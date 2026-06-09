@@ -36,6 +36,14 @@
             .url = "https://github.com/mitchellh/zig-objc/archive/refs/heads/main.tar.gz",
             .hash = "zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi",
         },
+        .zlua = .{
+            .url = "git+https://github.com/natecraddock/ziglua#d59103e257b25ae892cdede9a671366e8d4f3e51",
+            .hash = "zlua-0.1.0-hGRpC4aUBQCOTE7WgTqCz0YBVUUaIpqDu1cNBu8nN6jH",
+        },
+        .macos_sdk = .{
+            .url = "git+https://github.com/frostplexx/zig-build-macos-sdk#e98f2cf83eb57f65efadd93e896a51956ba5adc7",
+            .hash = "N-V-__8AACDrEQQ49TXhy6tl2QpY2w2QqKDz2VXmUUrEbfZ2",
+        },
     },
     .paths = .{
         "build.zig",

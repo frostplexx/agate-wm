@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     }).module("objc");
 
+    // Lua bindings for zig
+    const lua_dep = b.dependency("zlua", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The native macOS interop layer. This mirrors Ghostty's `pkg/macos`
     // strategy: a single module that consolidates the C framework headers via
     // @cImport and exposes hand-written, idiomatic Zig wrappers on top. The
@@ -35,6 +41,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{
                 .{ .name = "macos", .module = macos },
                 .{ .name = "objc", .module = objc },
+                .{ .name = "zlua", .module = lua_dep.module("zlua")}
             },
         }),
     });
@@ -56,60 +63,32 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_exe_tests.step);
 }
 
-/// Link every macOS framework agate needs and point the module at the active
-/// SDK. `linkFramework` on a module both adds the linker flag and (combined
-/// with `addAppleSDK`) lets `@cImport` resolve the umbrella headers.
+/// Link every macOS framework agate needs and point the module at the SDK.
 fn linkMacOSFrameworks(b: *std.Build, m: *std.Build.Module) !void {
-    try addAppleSDK(b, m);
-    // CoreFoundation: CFString, CFArray, CFDictionary, retain/release.
+    // Public framework headers + includes from the bundled zig-build-macos-sdk
+    // snapshot. Use the dependency path API so the paths resolve correctly to
+    // the package cache directory (avoids the @src().file relative-path issue).
+    const sdk_dep = b.dependency("macos_sdk", .{});
+    m.addSystemFrameworkPath(sdk_dep.path("Frameworks"));
+    m.addSystemIncludePath(sdk_dep.path("include"));
+    m.addLibraryPath(sdk_dep.path("lib"));
+    // SkyLight is a private framework whose .tbd stub lives under
+    // PrivateFrameworks in the installed Xcode SDK — not bundled above.
+    try addPrivateFrameworkPath(b, m);
     m.linkFramework("CoreFoundation", .{});
-    // CoreGraphics: CGWindowID, CGRect, CGWindowListCopyWindowInfo, CGEvent.
     m.linkFramework("CoreGraphics", .{});
-    // ApplicationServices: the Accessibility (AX) API lives in its HIServices
-    // sub-framework (AXUIElement, AXObserver, AXIsProcessTrusted).
     m.linkFramework("ApplicationServices", .{});
-    // AppKit: NSWorkspace, NSRunningApplication, NSScreen (used via objc).
     m.linkFramework("AppKit", .{});
-    // SkyLight: the private window-server framework (Spaces, window iteration,
-    // snap detection, native tile spaces). It has no public headers — the API
-    // is hand-declared in `src/macos/skylight.zig` — but the SDK ships a
-    // `SkyLight.tbd` stub under PrivateFrameworks, so it links normally. The
-    // CGS* symbols it pairs with live in CoreGraphics (linked above).
+    // SkyLight: private window-server framework; API hand-declared in skylight.zig.
     m.linkFramework("SkyLight", .{});
 }
 
-/// Resolve the active Apple SDK with `xcrun` and add its framework, include,
-/// and library paths to the module. This is the keystone of the strategy: it
-/// is what lets `@cInclude("CoreFoundation/CoreFoundation.h")` and
-/// `linkFramework` find anything. Lifted from mitchellh/zig-objc's build.zig,
-/// which itself follows Ghostty's apple-sdk package.
-pub fn addAppleSDK(b: *std.Build, m: *std.Build.Module) !void {
+/// Add the PrivateFrameworks path from the installed Xcode SDK so the linker
+/// can find SkyLight.tbd (not included in the zig-build-macos-sdk bundle).
+fn addPrivateFrameworkPath(b: *std.Build, m: *std.Build.Module) !void {
     const target = m.resolved_target.?.result;
     if (!target.os.tag.isDarwin()) return;
-
-    const Cache = struct {
-        const Key = struct {
-            arch: std.Target.Cpu.Arch,
-            os: std.Target.Os.Tag,
-            abi: std.Target.Abi,
-        };
-        var map: std.AutoHashMapUnmanaged(Key, ?[]const u8) = .{};
-    };
-
-    const gop = try Cache.map.getOrPut(b.allocator, .{
-        .arch = target.cpu.arch,
-        .os = target.os.tag,
-        .abi = target.abi,
-    });
-    if (!gop.found_existing) {
-        // Runs `xcrun --show-sdk-path` (cached, since it spawns a subprocess).
-        gop.value_ptr.* = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target);
-    }
-
-    const path = gop.value_ptr.* orelse return error.XcodeMacOSSDKNotFound;
-    m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ path, "/System/Library/Frameworks" }) });
-    // Private frameworks (SkyLight & co.) ship `.tbd` stubs here in the SDK.
-    m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ path, "/System/Library/PrivateFrameworks" }) });
-    m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ path, "/usr/include" }) });
-    m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ path, "/usr/lib" }) });
+    const sdk_path = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target)
+        orelse return error.XcodeMacOSSDKNotFound;
+    m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "/System/Library/PrivateFrameworks" }) });
 }
