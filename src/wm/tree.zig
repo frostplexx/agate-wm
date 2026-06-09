@@ -296,3 +296,35 @@ pub fn applyManualMove(leaf: *data.Con, frame: macos.window_list.Rect) bool {
     }
     return false;
 }
+
+/// Swap `leaf` with its previous (`forward=false`) or next (`forward=true`)
+/// sibling in the parent's tiling order. Window payloads are swapped so each
+/// slot keeps its ratio. Returns true if a swap happened.
+pub fn swapLeaf(leaf: *data.Con, forward: bool) bool {
+    const nb = if (forward) nextSibling(leaf) else prevSibling(leaf);
+    const target = nb orelse return false;
+    const tmp = leaf.window;
+    leaf.window = target.window;
+    target.window = tmp;
+    if (leaf.window) |w| leaf.id = w.id;
+    if (target.window) |w| target.id = w.id;
+    return true;
+}
+
+/// Adjust `leaf`'s main-axis ratio by `delta` pixels (positive = grow, negative
+/// = shrink), transferring the difference to the neighbour on the trailing edge.
+/// Pins every sibling's ratio to its current extent first so the units are
+/// consistent with `applyManualResize`. Returns true if the tree changed.
+pub fn resizeLeaf(leaf: *data.Con, grow: bool, delta: f64) bool {
+    const parent = leaf.parent orelse return false;
+    if (parent.layout != .H_SPLIT and parent.layout != .V_SPLIT) return false;
+    const horizontal = parent.layout == .H_SPLIT;
+    const nb = if (grow) nextSibling(leaf) else prevSibling(leaf);
+    const neighbor = nb orelse return false;
+    const win = leaf.window orelse return false;
+    pinExtents(parent, horizontal);
+    const cur = if (horizontal) win.bounds.size.width else win.bounds.size.height;
+    leaf.ratio = @max(cur + delta, min_extent);
+    neighbor.ratio = @max(neighbor.ratio - delta, min_extent);
+    return true;
+}

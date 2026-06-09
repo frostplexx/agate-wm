@@ -4,6 +4,7 @@ const state = @import("../state.zig");
 const data = @import("data.zig");
 const tree = @import("tree.zig");
 const observer = @import("observer.zig");
+const lua_config = @import("../config/lua.zig");
 
 const AppState = state.AppState;
 
@@ -13,6 +14,11 @@ pub fn init_wm(appState: *AppState) !void {
     // Tile the active Space; other Spaces are deferred until visible (yabai-style).
     tree.flushActive(appState);
     print_tree(appState.tree.?, 1);
+
+    // Load init.lua; registers keybindings via agate.bind() calls. Must run
+    // before the observer (which sets up the keyboard tap that dispatches them).
+    const cfg = try lua_config.init(appState.gpa, appState);
+    _ = cfg; // config lifetime managed by lua_config module globals
 
     // Observe window create/destroy and keep tiling. Blocks on the run loop.
     try observer.run(appState);

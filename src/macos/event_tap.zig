@@ -7,6 +7,7 @@
 //! releases the left mouse button, so window drags are applied on mouse-up
 //! rather than on a timer — the role yabai's mouse event tap plays
 //! (koekeishiya/yabai, src/mouse_handler.c).
+const std = @import("std");
 const c = @import("c.zig").c;
 
 pub const EventRef = ?*anyopaque;
@@ -17,6 +18,7 @@ pub const EventType = u32;
 pub const kCGEventLeftMouseDown: EventType = 1;
 pub const kCGEventLeftMouseUp: EventType = 2;
 pub const kCGEventLeftMouseDragged: EventType = 6;
+pub const kCGEventKeyDown: EventType = 10;
 // The system disables a tap that is too slow or interrupted; the callback must
 // re-enable it (yabai, src/mouse_handler.c).
 pub const kCGEventTapDisabledByTimeout: EventType = 0xFFFFFFFE;
@@ -31,9 +33,28 @@ pub fn mask(t: EventType) EventMask {
 pub const TapLocation = u32;
 pub const kCGSessionEventTap: TapLocation = 1;
 pub const TapPlacement = u32;
-pub const kCGHeadInsertEventTap: TapPlacement = 0;
+pub const kCGHeadInsertEventTap: TapPlacement = 0; // runs before pre-existing taps
+pub const kCGTailAppendEventTap: TapPlacement = 1; // runs after pre-existing taps
 pub const TapOptions = u32;
+pub const kCGEventTapOptionDefault: TapOptions = 0; // intercepting tap (can swallow events)
 pub const kCGEventTapOptionListenOnly: TapOptions = 1;
+
+// Modifier flag bits present in CGEventGetFlags output.
+pub const kCGEventFlagMaskShift: u64 = 0x0002_0000;
+pub const kCGEventFlagMaskControl: u64 = 0x0004_0000;
+pub const kCGEventFlagMaskAlternate: u64 = 0x0008_0000; // Option key
+pub const kCGEventFlagMaskCommand: u64 = 0x0010_0000;
+/// Combined mask for all four standard modifier keys.
+pub const kCGModifiersMask: u64 =
+    kCGEventFlagMaskShift | kCGEventFlagMaskControl |
+    kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand;
+
+// CGEventField enum value for the virtual key code.
+pub const CGEventField = u32;
+pub const kCGKeyboardEventKeycode: CGEventField = 9;
+
+pub extern fn CGEventGetIntegerValueField(event: EventRef, field: CGEventField) i64;
+pub extern fn CGEventGetFlags(event: EventRef) u64;
 
 /// Listen-only callback. Return `event` unchanged (we don't modify the stream).
 pub const TapCallBack = *const fn (
@@ -59,3 +80,69 @@ pub extern fn CFMachPortCreateRunLoopSource(
     port: MachPortRef,
     order: c.CFIndex,
 ) c.CFRunLoopSourceRef;
+
+// ---------------------------------------------------------------------------
+// Synthetic Dock-swipe gesture (instant Space switching)
+// ---------------------------------------------------------------------------
+//
+// A direct `SLSManagedDisplaySetCurrentSpace` switches the window-server's
+// active Space but bypasses Dock.app — which owns Mission Control and the menu
+// bar — so the menu bar is left stale (overlapping menus). Instead we
+// synthesize the same horizontal Dock-swipe CGEvent that a trackpad emits, the
+// way InstantSpaceSwitcher does (jurplel/InstantSpaceSwitcher, Sources/ISS/ISS.c).
+// Dock.app runs its own transition in response, so the menu bar stays correct.
+//
+// These CGEvent "field" numbers and the `DockControl` event type are private
+// (not in any public header); the values are the ones ISS reverse-engineered.
+
+pub extern fn CGEventCreate(source: ?*anyopaque) EventRef;
+pub extern fn CGEventSetIntegerValueField(event: EventRef, field: CGEventField, value: i64) void;
+pub extern fn CGEventSetDoubleValueField(event: EventRef, field: CGEventField, value: f64) void;
+pub extern fn CGEventPost(tap: TapLocation, event: EventRef) void;
+
+const kCGSEventTypeField: CGEventField = 55;
+const kCGEventGestureHIDType: CGEventField = 110;
+const kCGEventGestureSwipeMotion: CGEventField = 123;
+const kCGEventGestureSwipeProgress: CGEventField = 124;
+const kCGEventGestureSwipeVelocityX: CGEventField = 129;
+const kCGEventGestureSwipeVelocityY: CGEventField = 130;
+const kCGEventGesturePhase: CGEventField = 132;
+
+const kCGSEventDockControl: i64 = 30; // CGSEventType for a dock-control gesture
+const kIOHIDEventTypeDockSwipe: i64 = 23; // IOHIDEventType
+const kCGGestureMotionHorizontal: i64 = 1;
+
+/// A swipe traverses Mission Control left or right.
+pub const SwipeDirection = enum { left, right };
+
+/// Gesture phases. macOS needs all three (began→changed→ended) for the swipe to
+/// register; sending only two leaves Mission Control unmoved.
+const GesturePhase = enum(i64) { began = 1, changed = 2, ended = 4 };
+
+fn postDockSwipe(phase: GesturePhase, dir: SwipeDirection, velocity: f64) void {
+    // The smallest positive subnormal float (C's FLT_TRUE_MIN). Paired with a
+    // large velocity this makes the switch instant (no slide animation).
+    const tiny: f64 = std.math.floatTrueMin(f32);
+    const progress: f64 = if (dir == .right) tiny else -tiny;
+    const vel: f64 = if (dir == .right) velocity else -velocity;
+
+    const ev = CGEventCreate(null) orelse return;
+    defer c.CFRelease(@ptrCast(ev));
+    CGEventSetIntegerValueField(ev, kCGSEventTypeField, kCGSEventDockControl);
+    CGEventSetIntegerValueField(ev, kCGEventGestureHIDType, kIOHIDEventTypeDockSwipe);
+    CGEventSetIntegerValueField(ev, kCGEventGesturePhase, @intFromEnum(phase));
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, progress);
+    CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, kCGGestureMotionHorizontal);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, vel);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, vel);
+    CGEventPost(kCGSessionEventTap, ev);
+}
+
+/// Post one full three-phase horizontal Dock swipe (one Space step). Drives
+/// Dock.app's own Space transition; requires the same Accessibility / Input
+/// Monitoring permission the taps above use.
+pub fn performSwitchGesture(dir: SwipeDirection, velocity: f64) void {
+    postDockSwipe(.began, dir, velocity);
+    postDockSwipe(.changed, dir, velocity);
+    postDockSwipe(.ended, dir, velocity);
+}

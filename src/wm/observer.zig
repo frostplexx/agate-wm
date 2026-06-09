@@ -28,6 +28,7 @@ const tree = @import("tree.zig");
 const window = @import("window.zig");
 const focus = @import("focus/focus.zig");
 const state = @import("../state.zig");
+const lua_config = @import("../config/lua.zig");
 
 const ax = macos.ax;
 const c = macos.c;
@@ -90,6 +91,11 @@ const Manager = struct {
     entries: std.AutoHashMap(i32, Entry),
     /// The mouse event-tap handle (kept so we can re-enable it if disabled).
     tap: macos.event_tap.MachPortRef = null,
+    /// The keyboard event-tap handle. Kept for the same reason: an intercepting
+    /// tap is disabled by the system whenever its callback runs too long, and the
+    /// callback must re-enable *itself* — re-enabling the mouse tap here (the old
+    /// bug) left keybindings permanently dead after the first slow action.
+    ktap: macos.event_tap.MachPortRef = null,
     /// Whether the mouse actually moved since mouse-down (a drag, not a click).
     dragging: bool = false,
 };
@@ -145,6 +151,46 @@ pub fn run(appState: *state.AppState) !void {
     // apps started after us — on launch we observe the app and enumerate the
     // windows it already has (yabai-style); no polling, no reconcile sweep.
     macos.app_watch.start(onAppEvent, mgr);
+
+    // Intercept keyboard events for registered keybindings. This mirrors
+    // Ghostty's global event tap (ghostty-org/ghostty, macos GlobalEventTap.swift):
+    //   * session tap, head-inserted, `Default` option = an *intercepting* tap so
+    //     a matched chord can be swallowed before the focused app sees it;
+    //   * the run-loop source is added in `kCFRunLoopCommonModes`, not the default
+    //     mode, so the tap keeps firing while the run loop is in a tracking/modal
+    //     loop (menus, window drags) instead of going deaf;
+    //   * a nil result means the permission (Accessibility / Input Monitoring) is
+    //     missing — there is no separate query, the create just fails.
+    //
+    // Placement differs from Ghostty: we *tail-append* rather than head-insert so
+    // agate's tap runs AFTER other session taps. Modifier remappers (lazykeys,
+    // Karabiner's userspace tap, …) inject the hyper modifiers from their own
+    // session tap; a head-inserted tap would run first and see the bare keycode
+    // with no modifiers (observed: code=4 mods=0x0). Tail placement lets the
+    // remapped flags land before we test bindings.
+    const kmask = macos.event_tap.mask(macos.event_tap.kCGEventKeyDown);
+    mgr.ktap = macos.event_tap.CGEventTapCreate(
+        macos.event_tap.kCGSessionEventTap,
+        macos.event_tap.kCGTailAppendEventTap,
+        macos.event_tap.kCGEventTapOptionDefault,
+        kmask,
+        keyTap,
+        null,
+    );
+    if (mgr.ktap) |tap| {
+        const ksrc = macos.event_tap.CFMachPortCreateRunLoopSource(null, tap, 0);
+        c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), ksrc, c.kCFRunLoopCommonModes);
+        macos.event_tap.CGEventTapEnable(tap, true);
+    } else {
+        std.debug.print("[observer] keyboard tap unavailable; keybindings disabled\n", .{});
+    }
+
+    // Re-tile whenever the user switches Mission Control spaces.
+    _ = macos.skylight.CGSRegisterNotifyProc(
+        onSpaceChanged,
+        macos.skylight.kCGSNotificationSpaceChanged,
+        mgr,
+    );
 
     c.CFRunLoopRun();
 }
@@ -232,6 +278,92 @@ fn axCallback(
     } else if (std.mem.eql(u8, name, "AXUIElementDestroyed")) {
         if (refcon) |r| onWindowDestroyed(mgr, observer, @intCast(@intFromPtr(r)));
     }
+}
+
+/// Heap context (gpa) carrying a matched key chord from the tap callback to the
+/// deferred executor; freed in `keyActionFired`.
+const KeyAction = struct { code: u16, flags: u64 };
+
+/// Run a matched keybinding's action one run-loop pass after the tap callback
+/// returns. The actions here (space switch, full re-tile via Accessibility) are
+/// slow enough to trip the event tap's ~1 s timeout if run inline, which would
+/// have the system disable the tap mid-callback. Doing the work off the callback
+/// keeps `keyTap` fast so the tap stays alive.
+fn scheduleKeyAction(code: u16, flags: u64) void {
+    const mgr = g_manager orelse return;
+    const ctx = mgr.appState.gpa.create(KeyAction) catch return;
+    ctx.* = .{ .code = code, .flags = flags };
+    var timer_ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = ctx,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    // Fire immediately (next loop pass); interval 0 = one-shot.
+    const timer = c.CFRunLoopTimerCreate(null, c.CFAbsoluteTimeGetCurrent(), 0, 0, 0, keyActionFired, &timer_ctx);
+    if (timer) |t| {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopCommonModes);
+        c.CFRelease(t);
+    } else {
+        mgr.appState.gpa.destroy(ctx);
+    }
+}
+
+fn keyActionFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const ctx: *KeyAction = @ptrCast(@alignCast(info orelse return));
+    const mgr = g_manager orelse return;
+    defer mgr.appState.gpa.destroy(ctx);
+    _ = lua_config.handleKey(ctx.code, ctx.flags);
+}
+
+/// Keyboard event tap — intercepts kCGEventKeyDown before apps see it.
+/// Returns null to swallow an event that matched a registered keybinding, or
+/// the original event to let it through. Requires Accessibility permission.
+fn keyTap(
+    proxy: macos.event_tap.EventTapProxy,
+    etype: macos.event_tap.EventType,
+    event: macos.event_tap.EventRef,
+    info: ?*anyopaque,
+) callconv(.c) macos.event_tap.EventRef {
+    _ = proxy;
+    _ = info;
+    switch (etype) {
+        // The system disables an intercepting tap whose callback stalls; the only
+        // way back is to re-enable it from here. Re-enable the *keyboard* tap.
+        macos.event_tap.kCGEventTapDisabledByTimeout,
+        macos.event_tap.kCGEventTapDisabledByUserInput,
+        => if (g_manager) |m| if (m.ktap) |t| macos.event_tap.CGEventTapEnable(t, true),
+        macos.event_tap.kCGEventKeyDown => {
+            const code: u16 = @intCast(macos.event_tap.CGEventGetIntegerValueField(
+                event,
+                macos.event_tap.kCGKeyboardEventKeycode,
+            ));
+            const flags = macos.event_tap.CGEventGetFlags(event);
+            // Decide fast (swallow or pass through) here; run the slow action off
+            // the callback so we never trip the tap's stall timeout.
+            if (lua_config.matchBinding(code, flags)) {
+                std.debug.print("[observer] intercepted keybinding: code={d} mods=0x{x}\n", .{ code, flags & lua_config.MOD_MASK });
+                scheduleKeyAction(code, flags);
+                return null; // swallow — chord is ours
+            }
+        },
+        else => {},
+    }
+    return event;
+}
+
+/// CGSRegisterNotifyProc callback for kCGSNotificationSpaceChanged: re-tile the
+/// newly active workspace. Registered in `run()` below.
+fn onSpaceChanged(
+    _: u32,
+    _: ?*anyopaque,
+    _: usize,
+    userdata: ?*anyopaque,
+) callconv(.c) void {
+    const mgr: *Manager = @ptrCast(@alignCast(userdata orelse return));
+    tree.flushActive(mgr.appState);
+    std.debug.print("[observer] space changed → retiled\n", .{});
 }
 
 /// Listen-only mouse tap (the drag driver). Mirrors yabai's `mouse_handler`

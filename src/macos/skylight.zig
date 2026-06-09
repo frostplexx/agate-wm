@@ -37,6 +37,13 @@ pub extern fn CGSMainConnectionID() ConnectionID;
 pub extern fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnectionID) c.CFStringRef;
 /// Current space id for the display with the given UUID.
 pub extern fn SLSManagedDisplayGetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef) u64;
+/// Switch the active Space on the given display to `space_id` directly. NOTE:
+/// this bypasses Dock.app (which owns Mission Control and the menu bar), so it
+/// leaves the menu bar stale — overlapping menus from multiple Spaces. We no
+/// longer switch this way; space switching is done via a synthetic Dock-swipe
+/// gesture (`event_tap.performSwitchGesture`), which drives Dock's own
+/// transition. Kept here for reference / read parity with the getter above.
+pub extern fn SLSManagedDisplaySetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef, space_id: u64) void;
 
 // --- Window enumeration / iteration ----------------------------------------
 
