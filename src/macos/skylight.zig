@@ -37,13 +37,25 @@ pub extern fn CGSMainConnectionID() ConnectionID;
 pub extern fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnectionID) c.CFStringRef;
 /// Current space id for the display with the given UUID.
 pub extern fn SLSManagedDisplayGetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef) u64;
-/// Switch the active Space on the given display to `space_id` directly. NOTE:
-/// this bypasses Dock.app (which owns Mission Control and the menu bar), so it
-/// leaves the menu bar stale — overlapping menus from multiple Spaces. We no
-/// longer switch this way; space switching is done via a synthetic Dock-swipe
-/// gesture (`event_tap.performSwitchGesture`), which drives Dock's own
-/// transition. Kept here for reference / read parity with the getter above.
+/// Switch the active Space on the given display to `space_id`. On its own this
+/// leaves the menu bar stale (overlapping menus) — Dock pairs it with the four
+/// calls below. Disassembly of all five on macOS 26/27 (Tahoe) shows each gates
+/// on `SLSWindowManagementClientOperationsEnabled`: a normal process (agate)
+/// takes the legacy "SLSWindowServerClient…" message path, which the window
+/// server honors (this call already works for us). So calling the whole Dock
+/// sequence — `SLSWillSwitchSpaces` → set current space → `SLSShowSpaces` →
+/// `SLSSpaceResetMenuBar` — switches *and* refreshes the menu bar without a
+/// gesture (broken on Tahoe) or a keystroke. `display` is the menu-bar display
+/// UUID from `SLSCopyActiveMenuBarDisplayIdentifier`.
 pub extern fn SLSManagedDisplaySetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef, space_id: u64) void;
+/// Announce an impending Space switch. `spaces` is a CFArray<CFNumber> of the
+/// space ids involved. Dock calls this before changing the current space.
+pub extern fn SLSWillSwitchSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
+/// Make the given Spaces (CFArray<CFNumber> of ids) the shown/visible ones.
+pub extern fn SLSShowSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
+/// Rebuild the menu bar for `space`. This is the step missing from a bare
+/// `SLSManagedDisplaySetCurrentSpace` that leaves the menu bar stale.
+pub extern fn SLSSpaceResetMenuBar(cid: ConnectionID, space: u64) void;
 
 // --- Window enumeration / iteration ----------------------------------------
 

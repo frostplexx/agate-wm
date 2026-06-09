@@ -103,6 +103,11 @@ const Manager = struct {
 /// The single WM instance, reached from the C observer callback.
 var g_manager: ?*Manager = null;
 
+/// Whether the configured hyper trigger key (e.g. F18) is currently held. A key
+/// remapper applies the real hyper modifiers downstream of our tap, so we track
+/// the trigger key ourselves and synthesize the modifiers in `keyTap`.
+var g_hyper_held: bool = false;
+
 /// Set up create/destroy observers for every app that currently owns a managed
 /// window, then run the loop. Blocks until the run loop stops.
 pub fn run(appState: *state.AppState) !void {
@@ -162,13 +167,16 @@ pub fn run(appState: *state.AppState) !void {
     //   * a nil result means the permission (Accessibility / Input Monitoring) is
     //     missing — there is no separate query, the create just fails.
     //
-    // Placement differs from Ghostty: we *tail-append* rather than head-insert so
-    // agate's tap runs AFTER other session taps. Modifier remappers (lazykeys,
-    // Karabiner's userspace tap, …) inject the hyper modifiers from their own
-    // session tap; a head-inserted tap would run first and see the bare keycode
-    // with no modifiers (observed: code=4 mods=0x0). Tail placement lets the
-    // remapped flags land before we test bindings.
-    const kmask = macos.event_tap.mask(macos.event_tap.kCGEventKeyDown);
+    // A remapper (lazykeys) injects the hyper modifiers from its own session tap,
+    // and our tap can land ahead of it in the chain, so the modifier flags are
+    // often absent from the key *event* we receive (observed: mods=0x0). We don't
+    // rely on the event's flags — `keyTap` queries the live modifier state
+    // instead (see `CGEventSourceFlagsState`), which is order-independent. So tap
+    // location/placement only needs to support swallowing: a session tap with the
+    // Default option does (and tail-append is harmless here).
+    // KeyDown for bindings; KeyUp so we can track a held "hyper" key (see keyTap).
+    const kmask = macos.event_tap.mask(macos.event_tap.kCGEventKeyDown) |
+        macos.event_tap.mask(macos.event_tap.kCGEventKeyUp);
     mgr.ktap = macos.event_tap.CGEventTapCreate(
         macos.event_tap.kCGSessionEventTap,
         macos.event_tap.kCGTailAppendEventTap,
@@ -339,14 +347,28 @@ fn keyTap(
                 event,
                 macos.event_tap.kCGKeyboardEventKeycode,
             ));
-            const flags = macos.event_tap.CGEventGetFlags(event);
+            // The hyper trigger key (e.g. F18, from a Caps→F18 remap): track its
+            // held state and pass it through so other apps still get it.
+            const hk = lua_config.hyperKey();
+            if (hk != 0 and code == hk) {
+                g_hyper_held = true;
+                return event;
+            }
+            // Synthesize the hyper modifiers a remapper hides from our tap.
+            var flags = macos.event_tap.CGEventGetFlags(event);
+            if (g_hyper_held) flags |= lua_config.hyperMods();
             // Decide fast (swallow or pass through) here; run the slow action off
             // the callback so we never trip the tap's stall timeout.
             if (lua_config.matchBinding(code, flags)) {
-                std.debug.print("[observer] intercepted keybinding: code={d} mods=0x{x}\n", .{ code, flags & lua_config.MOD_MASK });
+                std.debug.print("[observer] intercepted code={d} mods=0x{x}\n", .{ code, flags & lua_config.MOD_MASK });
                 scheduleKeyAction(code, flags);
                 return null; // swallow — chord is ours
             }
+        },
+        macos.event_tap.kCGEventKeyUp => {
+            const code: u16 = @intCast(macos.event_tap.CGEventGetIntegerValueField(event, macos.event_tap.kCGKeyboardEventKeycode));
+            const hk = lua_config.hyperKey();
+            if (hk != 0 and code == hk) g_hyper_held = false;
         },
         else => {},
     }

@@ -19,6 +19,8 @@ pub const kCGEventLeftMouseDown: EventType = 1;
 pub const kCGEventLeftMouseUp: EventType = 2;
 pub const kCGEventLeftMouseDragged: EventType = 6;
 pub const kCGEventKeyDown: EventType = 10;
+pub const kCGEventKeyUp: EventType = 11;
+pub const kCGEventFlagsChanged: EventType = 12;
 // The system disables a tap that is too slow or interrupted; the callback must
 // re-enable it (yabai, src/mouse_handler.c).
 pub const kCGEventTapDisabledByTimeout: EventType = 0xFFFFFFFE;
@@ -31,7 +33,13 @@ pub fn mask(t: EventType) EventMask {
 }
 
 pub const TapLocation = u32;
+pub const kCGHIDEventTap: TapLocation = 0; // lowest level — best for injecting real keystrokes
 pub const kCGSessionEventTap: TapLocation = 1;
+/// Downstream of all session taps: events here have already been annotated/
+/// modified by other session taps (e.g. a key remapper like lazykeys). Tapping
+/// here makes us see those modifications regardless of tap insertion order —
+/// unlike a session tap, whose head/tail placement races other session taps.
+pub const kCGAnnotatedSessionEventTap: TapLocation = 2;
 pub const TapPlacement = u32;
 pub const kCGHeadInsertEventTap: TapPlacement = 0; // runs before pre-existing taps
 pub const kCGTailAppendEventTap: TapPlacement = 1; // runs after pre-existing taps
@@ -55,6 +63,17 @@ pub const kCGKeyboardEventKeycode: CGEventField = 9;
 
 pub extern fn CGEventGetIntegerValueField(event: EventRef, field: CGEventField) i64;
 pub extern fn CGEventGetFlags(event: EventRef) u64;
+
+/// The *current* modifier-flag state for an event source, independent of any
+/// particular event. We need this because a key remapper (lazykeys) can hold a
+/// "hyper" chord whose flags never appear on the individual key event our tap
+/// sees (tap-ordering against the remapper), yet the modifiers are active —
+/// querying the combined session state recovers them. `stateID` 0 = combined
+/// session state.
+pub const CGEventSourceStateID = u32;
+pub const kCGEventSourceStateCombinedSessionState: CGEventSourceStateID = 0;
+pub const kCGEventSourceStateHIDSystemState: CGEventSourceStateID = 1;
+pub extern fn CGEventSourceFlagsState(stateID: CGEventSourceStateID) u64;
 
 /// Listen-only callback. Return `event` unchanged (we don't modify the stream).
 pub const TapCallBack = *const fn (
@@ -138,11 +157,52 @@ fn postDockSwipe(phase: GesturePhase, dir: SwipeDirection, velocity: f64) void {
     CGEventPost(kCGSessionEventTap, ev);
 }
 
-/// Post one full three-phase horizontal Dock swipe (one Space step). Drives
-/// Dock.app's own Space transition; requires the same Accessibility / Input
-/// Monitoring permission the taps above use.
+/// Post one full three-phase horizontal Dock swipe (one Space step).
+///
+/// BROKEN on macOS 26 (Tahoe) / 27: the window server rejects the synthetic
+/// dock-swipe event (you get an error beep, no switch) — Apple changed the
+/// gesture event's format/validation (jurplel/InstantSpaceSwitcher#72). Kept for
+/// reference and for older macOS; the active path is `performSpaceShortcut`.
 pub fn performSwitchGesture(dir: SwipeDirection, velocity: f64) void {
     postDockSwipe(.began, dir, velocity);
     postDockSwipe(.changed, dir, velocity);
     postDockSwipe(.ended, dir, velocity);
+}
+
+// ---------------------------------------------------------------------------
+// Mission Control keyboard-shortcut emulation (the macOS 26+/Tahoe path)
+// ---------------------------------------------------------------------------
+//
+// Since the dock-swipe gesture above no longer works, we switch Spaces the only
+// way that still works without disabling SIP: by synthesizing the system "Move
+// left/right a space" shortcut (Control+Arrow), the same symbolic hotkey the
+// user could press by hand. Dock.app handles the transition, so the menu bar
+// stays correct. Needs the shortcut enabled in System Settings ▸ Keyboard ▸
+// Shortcuts ▸ Mission Control (Control+Arrow is on by default).
+
+pub extern fn CGEventCreateKeyboardEvent(source: ?*anyopaque, keycode: u16, keydown: bool) EventRef;
+pub extern fn CGEventSetFlags(event: EventRef, flags: u64) void;
+
+// kVK_LeftArrow / kVK_RightArrow (HIToolbox/Events.h).
+const kVK_LeftArrow: u16 = 123;
+const kVK_RightArrow: u16 = 124;
+
+/// Switch one Space in `dir` by emulating the Control+Arrow Mission Control
+/// shortcut. Posted at the HID level so the system hotkey handler sees it.
+pub fn performSpaceShortcut(dir: SwipeDirection) void {
+    const keycode: u16 = if (dir == .right) kVK_RightArrow else kVK_LeftArrow;
+    // Control-only flags. A binding may fire while a Control-containing "hyper"
+    // key is physically held; we must not let Alt/Cmd leak into the event or the
+    // ^Arrow hotkey won't match (the matcher compares the event's flags).
+    const flags = kCGEventFlagMaskControl;
+
+    const down = CGEventCreateKeyboardEvent(null, keycode, true) orelse return;
+    defer c.CFRelease(@ptrCast(down));
+    CGEventSetFlags(down, flags);
+    CGEventPost(kCGHIDEventTap, down);
+
+    const up = CGEventCreateKeyboardEvent(null, keycode, false) orelse return;
+    defer c.CFRelease(@ptrCast(up));
+    CGEventSetFlags(up, flags);
+    CGEventPost(kCGHIDEventTap, up);
 }

@@ -14,13 +14,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const c = @import("c.zig").c;
 const sl = @import("skylight.zig");
-const et = @import("event_tap.zig");
 const foundation = @import("foundation.zig");
 const String = foundation.String;
-
-/// Base per-step swipe velocity (matches InstantSpaceSwitcher's default). Scaled
-/// by the number of steps so multi-Space jumps stay instant.
-const base_velocity: f64 = 2000.0;
 
 pub const Space = struct {
     /// The window-server space id ("id64").
@@ -39,9 +34,8 @@ pub fn activeSpace(cid: sl.ConnectionID) ?u64 {
     return sl.SLSManagedDisplayGetCurrentSpace(cid, uuid);
 }
 
-/// The spaces on the focused display in Mission Control order (every type, so
-/// step counts match what a real swipe traverses), plus the position of the
-/// active space within that order. Caller owns `.spaces`.
+/// The spaces on the focused display in Mission Control order, plus the position
+/// of the active space within that order. Caller owns `.spaces`.
 const Order = struct { spaces: []Space, active_pos: usize };
 
 fn focusedDisplayOrder(alloc: Allocator, cid: sl.ConnectionID) !?Order {
@@ -67,53 +61,61 @@ fn focusedDisplayOrder(alloc: Allocator, cid: sl.ConnectionID) !?Order {
     return .{ .spaces = try list.toOwnedSlice(alloc), .active_pos = active_pos };
 }
 
-/// Swipe `steps` Spaces in `dir`, driving Dock.app's transition (so the menu bar
-/// stays correct). Velocity is scaled by the step count so multi-Space jumps are
-/// still instant.
-fn swipe(dir: et.SwipeDirection, steps: usize) void {
-    if (steps == 0) return;
-    const velocity = base_velocity * @as(f64, @floatFromInt(steps));
-    var i: usize = 0;
-    while (i < steps) : (i += 1) et.performSwitchGesture(dir, velocity);
+/// Switch the focused display to absolute `space_id`, replicating the full
+/// sequence Dock.app uses so the menu bar refreshes — a bare SetCurrentSpace
+/// leaves it stale (overlapping menus). On macOS 26/27 each of these calls gates
+/// on `SLSWindowManagementClientOperationsEnabled` and, for a normal process,
+/// falls back to the legacy window-server-client message path, which the server
+/// honors (SetCurrentSpace already worked for us that way). See skylight.zig.
+fn switchToSpaceDirect(cid: sl.ConnectionID, space_id: u64) void {
+    const uuid = sl.SLSCopyActiveMenuBarDisplayIdentifier(cid) orelse return;
+    defer foundation.CFRelease(uuid);
+
+    // CFArray<CFNumber> holding just the target space id, for Will/ShowSpaces.
+    var sid: i64 = @intCast(space_id);
+    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &sid) orelse return;
+    defer foundation.CFRelease(num);
+    var values = [_]?*const anyopaque{@ptrCast(num)};
+    const arr = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return;
+    defer foundation.CFRelease(arr);
+
+    std.debug.print("[spaces] switchToSpaceDirect -> {d}: willSwitch…\n", .{space_id});
+    sl.SLSWillSwitchSpaces(cid, arr);
+    std.debug.print("[spaces]   setCurrentSpace…\n", .{});
+    sl.SLSManagedDisplaySetCurrentSpace(cid, uuid, space_id);
+    std.debug.print("[spaces]   showSpaces…\n", .{});
+    sl.SLSShowSpaces(cid, arr);
+    std.debug.print("[spaces]   resetMenuBar…\n", .{});
+    sl.SLSSpaceResetMenuBar(cid, space_id);
+    std.debug.print("[spaces]   done\n", .{});
 }
 
-/// Swipe from the active Space to position `target_pos` in the focused-display
-/// order, choosing direction and step count automatically.
-fn swipeToPos(order: Order, target_pos: usize) void {
-    if (target_pos > order.active_pos) {
-        swipe(.right, target_pos - order.active_pos);
-    } else if (target_pos < order.active_pos) {
-        swipe(.left, order.active_pos - target_pos);
-    }
-}
-
-/// Switch the focused display to the 1-based user-space index `n` (counting only
-/// `type == 0` user Spaces, but stepping past any fullscreen Spaces in between).
+/// Switch the focused display to the 1-based user-space index `n`
+/// (counting only `type == 0` user Spaces).
 pub fn switchToIndex(alloc: Allocator, cid: sl.ConnectionID, n: usize) !void {
     if (n == 0) return;
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);
 
     var seen: usize = 0;
-    for (order.spaces, 0..) |sp, i| {
+    for (order.spaces) |sp| {
         if (sp.type != 0) continue;
         seen += 1;
         if (seen == n) {
-            swipeToPos(order, i);
+            switchToSpaceDirect(cid, sp.id);
             return;
         }
     }
 }
 
-/// Switch to the next user Space on the focused display. Native swipes don't
-/// wrap, so at the last Space this is a no-op.
+/// Switch to the next user Space on the focused display (no wrap).
 pub fn switchNext(alloc: Allocator, cid: sl.ConnectionID) !void {
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);
     var i: usize = order.active_pos + 1;
     while (i < order.spaces.len) : (i += 1) {
         if (order.spaces[i].type == 0) {
-            swipeToPos(order, i);
+            switchToSpaceDirect(cid, order.spaces[i].id);
             return;
         }
     }
@@ -127,7 +129,7 @@ pub fn switchPrev(alloc: Allocator, cid: sl.ConnectionID) !void {
     while (i > 0) {
         i -= 1;
         if (order.spaces[i].type == 0) {
-            swipeToPos(order, i);
+            switchToSpaceDirect(cid, order.spaces[i].id);
             return;
         }
     }

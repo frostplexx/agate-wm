@@ -35,6 +35,12 @@ pub const Config = struct {
     outer_gaps: f64,
     /// CGEventFlag mask for the "hyper" macro key.
     hyper_mods: u64,
+    /// Virtual keycode of a physical key whose held state means "hyper". Needed
+    /// when a remapper (lazykeys, Karabiner) turns e.g. Caps Lock into F18 and
+    /// applies the real modifiers downstream of our event tap, where we can't see
+    /// them: we instead watch this key go down/up and synthesize `hyper_mods`.
+    /// Default 79 = kVK_F18. 0 disables the feature.
+    hyper_key: u16,
     bindings: std.ArrayList(Binding),
     lua: *Lua,
 };
@@ -72,6 +78,11 @@ const key_table = [_]KeyEntry{
     .{ .name = "delete", .code = 51 }, .{ .name = "escape", .code = 53 },
     .{ .name = "left", .code = 123 }, .{ .name = "right", .code = 124 },
     .{ .name = "down", .code = 125 }, .{ .name = "up", .code = 126 },
+    // Function keys commonly used as a remapped "hyper" trigger.
+    .{ .name = "f13", .code = 105 }, .{ .name = "f14", .code = 107 },
+    .{ .name = "f15", .code = 113 }, .{ .name = "f16", .code = 106 },
+    .{ .name = "f17", .code = 64 },  .{ .name = "f18", .code = 79 },
+    .{ .name = "f19", .code = 80 },  .{ .name = "f20", .code = 90 },
 };
 
 fn lookupKeycode(name: []const u8) ?u16 {
@@ -138,6 +149,14 @@ fn agateConfig(lua: *Lua) i32 {
             lua.pop(1);
             i += 1;
         }
+    }
+    lua.pop(1);
+    // hyper_key: name of the physical key whose held state means "hyper" (for
+    // remappers that hide the real modifiers from our tap). e.g. "f18".
+    _ = lua.getField(1, "hyper_key");
+    if (lua.isString(-1)) {
+        const s = lua.toString(-1) catch "";
+        if (lookupKeycode(std.mem.sliceTo(s, 0))) |code| cfg.hyper_key = code;
     }
     lua.pop(1);
     // Apply gaps to every workspace in the tree
@@ -278,6 +297,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .gaps = 8,
         .outer_gaps = 8,
         .hyper_mods = MOD_CTRL | MOD_ALT | MOD_CMD | MOD_SHIFT,
+        .hyper_key = 79, // kVK_F18 — common remapped-hyper trigger
         .bindings = .empty,
         .lua = try Lua.init(gpa),
     };
@@ -317,6 +337,20 @@ pub fn deinit(cfg: *Config) void {
     cfg.alloc.destroy(cfg);
     g_config = null;
     g_appstate = null;
+}
+
+/// The CGEventFlag bits to synthesize when the hyper key is held (see
+/// `Config.hyper_key`). Used by the event tap to fake the modifiers a remapper
+/// hides from it.
+pub fn hyperMods() u64 {
+    const cfg = g_config orelse return 0;
+    return cfg.hyper_mods;
+}
+
+/// The virtual keycode whose held state means "hyper" (0 = feature disabled).
+pub fn hyperKey() u16 {
+    const cfg = g_config orelse return 0;
+    return cfg.hyper_key;
 }
 
 /// Cheap test: does any registered binding match this chord? Called from inside
