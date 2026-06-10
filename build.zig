@@ -81,8 +81,6 @@ fn linkMacOSFrameworks(b: *std.Build, m: *std.Build.Module) !void {
     m.linkFramework("AppKit", .{});
     // SkyLight: private window-server framework; API hand-declared in skylight.zig.
     m.linkFramework("SkyLight", .{});
-    // IOKit: IOHIDEvent SPI for synthesizing gesture events (iohid.zig).
-    m.linkFramework("IOKit", .{});
 }
 
 /// Add the PrivateFrameworks path from the installed Xcode SDK so the linker

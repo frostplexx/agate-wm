@@ -101,26 +101,34 @@ pub extern fn CFMachPortCreateRunLoopSource(
 ) c.CFRunLoopSourceRef;
 
 // ---------------------------------------------------------------------------
-// Synthetic Dock-swipe gesture (instant Space switching)
+// Synthetic Dock-swipe gesture (Space switching, macOS 27 / Golden Gate)
 // ---------------------------------------------------------------------------
 //
-// A direct `SLSManagedDisplaySetCurrentSpace` switches the window-server's
-// active Space but bypasses Dock.app — which owns Mission Control and the menu
-// bar — so the menu bar is left stale (overlapping menus). Instead we
-// synthesize the same horizontal Dock-swipe CGEvent that a trackpad emits, the
-// way InstantSpaceSwitcher does (jurplel/InstantSpaceSwitcher, Sources/ISS/ISS.c).
-// Dock.app runs its own transition in response, so the menu bar stays correct.
+// macOS 27 moved the Space-swipe recognizer into Swift WindowManager.framework
+// (`SpaceSwapSystemGesture` fed by `SystemGestureBase.handleEvent`). It calls
+// `CGEventCopyIOHIDEvent` and reads the gesture from the IOHIDEvent *backing*
+// the CGEvent — a synthetic CGEvent has no backing IOHIDEvent, so it is dropped.
 //
-// These CGEvent "field" numbers and the `DockControl` event type are private
-// (not in any public header); the values are the ones ISS reverse-engineered.
+// Fix discovered by FasterSwiper (jurplel): inject the private field 4205
+// (`IOHIDSystemQueueElement`) into the CGEvent's serialized form. macOS 27 reads
+// this field via `CGEventCreateFromData` instead of a live IOHIDEvent backing.
+//
+// Approach: create the CGEvent normally → serialize via `CGEventCreateData` →
+// strip any existing field 4205 → build and append the field 4205 payload →
+// deserialize via `CGEventCreateFromData` → post.
 
 pub extern fn CGEventCreate(source: ?*anyopaque) EventRef;
 pub extern fn CGEventSetIntegerValueField(event: EventRef, field: CGEventField, value: i64) void;
 pub extern fn CGEventSetDoubleValueField(event: EventRef, field: CGEventField, value: f64) void;
 pub extern fn CGEventPost(tap: TapLocation, event: EventRef) void;
-/// Create an event source bound to a state (we use HID-system state so the
-/// gesture looks like it originated from the kernel HID path).
 pub extern fn CGEventSourceCreate(stateID: CGEventSourceStateID) ?*anyopaque;
+pub extern fn CGEventCreateData(allocator: ?*const anyopaque, event: EventRef) c.CFDataRef;
+pub extern fn CGEventCreateFromData(allocator: ?*const anyopaque, data: c.CFDataRef) EventRef;
+pub extern fn CFDataCreate(allocator: ?*const anyopaque, bytes: [*]const u8, length: c.CFIndex) c.CFDataRef;
+pub extern fn CFDataGetBytePtr(theData: c.CFDataRef) [*]const u8;
+pub extern fn CFDataGetLength(theData: c.CFDataRef) c.CFIndex;
+pub extern fn CGEventGetTimestamp(event: EventRef) u64;
+extern fn mach_absolute_time() u64;
 
 const kCGSEventTypeField: CGEventField = 55;
 const kCGEventGestureHIDType: CGEventField = 110;
@@ -129,93 +137,225 @@ const kCGEventGestureSwipeProgress: CGEventField = 124;
 const kCGEventGestureSwipeVelocityX: CGEventField = 129;
 const kCGEventGestureSwipeVelocityY: CGEventField = 130;
 const kCGEventGesturePhase: CGEventField = 132;
-/// Source process id carried by the event. Real trackpad/HID gestures report 0
-/// (kernel). Tahoe's gesture recognizer (WindowManager.SpaceSwapSystemGesture,
-/// eventSource gated to `.trackpad`) rejects events that look synthetic — RE'd
-/// from `SystemGestureBase.handleEvent`. We force this to 0 to fake HID origin.
+/// Force source pid to 0 so the event looks like it came from the kernel HID path.
 const kCGEventSourceUnixProcessID: CGEventField = 41;
 
-const kCGSEventDockControl: i64 = 30; // CGSEventType for a dock-control gesture
-const kIOHIDEventTypeDockSwipe: i64 = 23; // IOHIDEventType
+const kCGSEventDockControl: i64 = 30;
+const kIOHIDEventTypeDockSwipe: i64 = 23;
 const kCGGestureMotionHorizontal: i64 = 1;
 
 /// A swipe traverses Mission Control left or right.
 pub const SwipeDirection = enum { left, right };
-
-/// Gesture phases. macOS needs all three (began→changed→ended) for the swipe to
-/// register; sending only two leaves Mission Control unmoved.
 const GesturePhase = enum(i64) { began = 1, changed = 2, ended = 4 };
 
-fn postDockSwipe(phase: GesturePhase, dir: SwipeDirection, velocity: f64) void {
-    // The smallest positive subnormal float (C's FLT_TRUE_MIN). Paired with a
-    // large velocity this makes the switch instant (no slide animation).
-    const tiny: f64 = std.math.floatTrueMin(f32);
-    const progress: f64 = if (dir == .right) tiny else -tiny;
-    const vel: f64 = if (dir == .right) velocity else -velocity;
+// ---------------------------------------------------------------------------
+// IOHIDSystemQueueElement payload (field 4205) — little-endian.
+// Reconstructed from FasterSwiper's gesture-serialization notes and the
+// IOHIDFamily header layouts.
+//
+// extern struct gives the same layout as C with no extra padding for these
+// structs (all fields naturally aligned, total sizes divisible by max align).
+// IOHIDSystemQueueElementHeader has trailing padding in C ABI (28-byte members
+// in an 8-byte-aligned struct → padded to 32); we write its 28 bytes manually.
+// ---------------------------------------------------------------------------
 
-    // Build the event from an HID-system source so it carries kernel-ish
-    // provenance (see kCGEventSourceUnixProcessID note).
+const IOHIDEventBase = extern struct {
+    size: u32,
+    @"type": u32,
+    options: u32, // gesture phase packed at bits 24-31: ((phase & 0xFF) << 24)
+    depth: u8,
+    reserved: [3]u8,
+};
+const IOHIDFluidTouchGestureData = extern struct {
+    base: IOHIDEventBase,
+    position_x: i32, // 16.16 fixed-point
+    position_y: i32,
+    position_z: i32,
+    swipe_mask: u32,
+    gesture_motion: u16,
+    gesture_flavor: u16,
+    swipe_progress: i32, // 16.16 fixed-point
+};
+const IOHIDVelocityEventData = extern struct {
+    base: IOHIDEventBase,
+    velocity_x: i32, // 16.16 fixed-point
+    velocity_y: i32,
+    velocity_z: i32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(IOHIDEventBase) == 16);
+    std.debug.assert(@sizeOf(IOHIDFluidTouchGestureData) == 40);
+    std.debug.assert(@sizeOf(IOHIDVelocityEventData) == 28);
+}
+
+fn writeLE32(buf: []u8, val: u32) void {
+    buf[0] = @truncate(val);
+    buf[1] = @truncate(val >> 8);
+    buf[2] = @truncate(val >> 16);
+    buf[3] = @truncate(val >> 24);
+}
+
+fn writeLE64(buf: []u8, val: u64) void {
+    writeLE32(buf[0..], @truncate(val));
+    writeLE32(buf[4..], @truncate(val >> 32));
+}
+
+/// Convert a float to 16.16 fixed-point. Values that round to 0 are clamped to
+/// ±1 so direction information survives the precision loss.
+fn toFixed16_16(val: f64) i32 {
+    const fixed: i32 = @intFromFloat(val * 65536.0);
+    if (fixed == 0 and @abs(val) > 0.0) return if (val > 0.0) 1 else -1;
+    return fixed;
+}
+
+/// Create a CGEvent with the standard Dock-swipe fields, inject the field 4205
+/// IOHIDSystemQueueElement payload into its serialized form, deserialize, and post.
+fn postPhase(phase: GesturePhase, dir: SwipeDirection, progress: f64, vel_x: f64) void {
     const src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
     defer if (src) |s| c.CFRelease(@ptrCast(s));
     const ev = CGEventCreate(src) orelse return;
     defer c.CFRelease(@ptrCast(ev));
+
     CGEventSetIntegerValueField(ev, kCGSEventTypeField, kCGSEventDockControl);
     CGEventSetIntegerValueField(ev, kCGEventGestureHIDType, kIOHIDEventTypeDockSwipe);
     CGEventSetIntegerValueField(ev, kCGEventGesturePhase, @intFromEnum(phase));
     CGEventSetDoubleValueField(ev, kCGEventGestureSwipeProgress, progress);
     CGEventSetIntegerValueField(ev, kCGEventGestureSwipeMotion, kCGGestureMotionHorizontal);
-    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, vel);
-    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, vel);
-    // Fake kernel/HID provenance: real gestures report source pid 0.
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityX, vel_x);
+    CGEventSetDoubleValueField(ev, kCGEventGestureSwipeVelocityY, 0.0);
     CGEventSetIntegerValueField(ev, kCGEventSourceUnixProcessID, 0);
-    // Post at the HID tap (most upstream), where real gestures enter.
-    CGEventPost(kCGHIDEventTap, ev);
+
+    // Serialize the base event.
+    const cf_src = CGEventCreateData(null, ev) orelse return;
+    defer c.CFRelease(@ptrCast(cf_src));
+    const raw: []const u8 = CFDataGetBytePtr(cf_src)[0..@intCast(CFDataGetLength(cf_src))];
+    if (raw.len < 4) return;
+
+    // Rebuild without any pre-existing field 4205 (shouldn't be present, but strip defensively).
+    var buf: [4096]u8 = undefined;
+    var out: usize = 0;
+
+    @memcpy(buf[0..4], raw[0..4]); // version header
+    out = 4;
+
+    var idx: usize = 4;
+    while (idx + 4 <= raw.len) {
+        const size_words: u16 = (@as(u16, raw[idx]) << 8) | @as(u16, raw[idx + 1]);
+        const tag_word: u16 = (@as(u16, raw[idx + 2]) << 8) | @as(u16, raw[idx + 3]);
+        const field_id: u16 = tag_word & 0x3FFF;
+        const type_bits: u2 = @truncate(tag_word >> 14);
+
+        const payload: usize = switch (type_bits) {
+            0 => if (size_words == 1) 8 else (@as(usize, size_words) + 3) & ~@as(usize, 3),
+            1, 3 => @as(usize, size_words) * 4,
+            2 => 0,
+        };
+        if (idx + 4 + payload > raw.len) break;
+
+        if (field_id != 4205) {
+            const entry = 4 + payload;
+            if (out + entry > buf.len) return;
+            @memcpy(buf[out .. out + entry], raw[idx .. idx + entry]);
+            out += entry;
+        }
+        idx += 4 + payload;
+    }
+
+    // Append field 4205.
+    var ts = CGEventGetTimestamp(ev);
+    if (ts == 0) ts = mach_absolute_time();
+
+    const has_vel = vel_x != 0.0 or phase == .ended;
+    const payload_size: u16 = if (has_vel) 96 else 68;
+    const event_count: u32 = if (has_vel) 2 else 1;
+    const swipe_mask: u32 = if (dir == .right) 0x8 else 0x4;
+    const phase_opts: u32 = @as(u32, @intCast(@intFromEnum(phase) & 0xFF)) << 24;
+
+    if (out + 4 + payload_size > buf.len) return;
+
+    // Tag: big-endian size_words (= byte count for binary fields) and field id.
+    buf[out + 0] = @intCast((payload_size >> 8) & 0xFF);
+    buf[out + 1] = @intCast(payload_size & 0xFF);
+    buf[out + 2] = 0x10; // (4205 >> 8) & 0xFF
+    buf[out + 3] = 0x6D; // 4205 & 0xFF
+    out += 4;
+
+    // IOHIDSystemQueueElementHeader — 28 bytes, little-endian (native on Apple Silicon).
+    // Written manually: C-ABI extern struct would add 4 bytes of trailing padding
+    // (struct alignment is 8 due to u64 fields, 28 bytes rounds up to 32).
+    writeLE64(buf[out..], ts);
+    out += 8;
+    writeLE64(buf[out..], 0x100003416); // horizontal gesture registry entry
+    out += 8;
+    writeLE32(buf[out..], 0); // options
+    out += 4;
+    writeLE32(buf[out..], 0); // attribute_length
+    out += 4;
+    writeLE32(buf[out..], event_count);
+    out += 4;
+
+    // IOHIDFluidTouchGestureData — 40 bytes via extern struct.
+    const inner1 = IOHIDFluidTouchGestureData{
+        .base = .{
+            .size = 40,
+            .@"type" = 23, // kIOHIDEventTypeFluidTouchGesture
+            .options = phase_opts,
+            .depth = 0,
+            .reserved = .{ 0, 0, 0 },
+        },
+        .position_x = 0,
+        .position_y = 0,
+        .position_z = 0,
+        .swipe_mask = swipe_mask,
+        .gesture_motion = 1, // kIOHIDGestureMotionHorizontalX
+        .gesture_flavor = 3, // kIOHIDGestureFlavorDockPrimary
+        .swipe_progress = toFixed16_16(progress),
+    };
+    const i1_b = std.mem.asBytes(&inner1);
+    @memcpy(buf[out .. out + i1_b.len], i1_b);
+    out += i1_b.len;
+
+    if (has_vel) {
+        const inner2 = IOHIDVelocityEventData{
+            .base = .{
+                .size = 28,
+                .@"type" = 9, // kIOHIDEventTypeVelocity
+                .options = 0,
+                .depth = 1,
+                .reserved = .{ 0, 0, 0 },
+            },
+            .velocity_x = toFixed16_16(vel_x),
+            .velocity_y = 0,
+            .velocity_z = 0,
+        };
+        const i2_b = std.mem.asBytes(&inner2);
+        @memcpy(buf[out .. out + i2_b.len], i2_b);
+        out += i2_b.len;
+    }
+
+    // Deserialize the augmented event and post at the session tap level, where
+    // Dock.app processes DockControl gestures (matches yabai's #2781 technique).
+    const new_cf = CFDataCreate(null, buf[0..out].ptr, @intCast(out)) orelse return;
+    defer c.CFRelease(@ptrCast(new_cf));
+    const new_ev = CGEventCreateFromData(null, new_cf) orelse return;
+    defer c.CFRelease(@ptrCast(new_ev));
+    CGEventPost(kCGSessionEventTap, new_ev);
 }
 
-/// Step one Space in `dir`. On macOS 26/27 the CGEvent dock-swipe (`postDockSwipe`
-/// below) is rejected — the recognizer reads the IOHIDEvent backing the event,
-/// which a synthetic CGEvent lacks. So we inject a real DockSwipe IOHIDEvent via
-/// `iohid` instead. `velocity` is unused on the IOHID path (kept for signature
-/// stability); `postDockSwipe` is retained only as documentation of the old way.
-pub fn performSwitchGesture(dir: SwipeDirection, velocity: f64) void {
-    _ = velocity;
-    @import("iohid.zig").dispatchDockSwipe(dir == .right);
-}
-
-// ---------------------------------------------------------------------------
-// Mission Control keyboard-shortcut emulation (the macOS 26+/Tahoe path)
-// ---------------------------------------------------------------------------
-//
-// Since the dock-swipe gesture above no longer works, we switch Spaces the only
-// way that still works without disabling SIP: by synthesizing the system "Move
-// left/right a space" shortcut (Control+Arrow), the same symbolic hotkey the
-// user could press by hand. Dock.app handles the transition, so the menu bar
-// stays correct. Needs the shortcut enabled in System Settings ▸ Keyboard ▸
-// Shortcuts ▸ Mission Control (Control+Arrow is on by default).
-
-pub extern fn CGEventCreateKeyboardEvent(source: ?*anyopaque, keycode: u16, keydown: bool) EventRef;
-pub extern fn CGEventSetFlags(event: EventRef, flags: u64) void;
-
-// kVK_LeftArrow / kVK_RightArrow (HIToolbox/Events.h).
-const kVK_LeftArrow: u16 = 123;
-const kVK_RightArrow: u16 = 124;
-
-/// Switch one Space in `dir` by emulating the Control+Arrow Mission Control
-/// shortcut. Posted at the HID level so the system hotkey handler sees it.
-pub fn performSpaceShortcut(dir: SwipeDirection) void {
-    const keycode: u16 = if (dir == .right) kVK_RightArrow else kVK_LeftArrow;
-    // Control-only flags. A binding may fire while a Control-containing "hyper"
-    // key is physically held; we must not let Alt/Cmd leak into the event or the
-    // ^Arrow hotkey won't match (the matcher compares the event's flags).
-    const flags = kCGEventFlagMaskControl;
-
-    const down = CGEventCreateKeyboardEvent(null, keycode, true) orelse return;
-    defer c.CFRelease(@ptrCast(down));
-    CGEventSetFlags(down, flags);
-    CGEventPost(kCGHIDEventTap, down);
-
-    const up = CGEventCreateKeyboardEvent(null, keycode, false) orelse return;
-    defer c.CFRelease(@ptrCast(up));
-    CGEventSetFlags(up, flags);
-    CGEventPost(kCGHIDEventTap, up);
+/// Synthesize a began→ended Dock-swipe gesture sequence that switches one
+/// Space in `dir`. Matches yabai's technique (#2781): two phases only, high
+/// velocity so the transition animation is skipped. Uses the field 4205
+/// IOHIDSystemQueueElement injection required by macOS 27 / Golden Gate.
+///
+/// `dir == .right` → positive progress → higher Mission Control index (next space).
+/// `dir == .left`  → negative progress → lower Mission Control index (prev space).
+pub fn performSwitchGesture(dir: SwipeDirection) void {
+    // Tiny progress means no visible drag — the high velocity on `ended` lets
+    // the recognizer snap straight to the adjacent space (yabai #2781).
+    const tiny: f64 = std.math.floatTrueMin(f32);
+    const progress: f64 = if (dir == .right) tiny else -tiny;
+    const sign: f64 = if (dir == .right) 1.0 else -1.0;
+    postPhase(.began, dir, progress, 0.0);
+    postPhase(.ended, dir, progress, sign * 9999.0);
 }

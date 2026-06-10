@@ -16,6 +16,7 @@ const c = @import("c.zig").c;
 const sl = @import("skylight.zig");
 const foundation = @import("foundation.zig");
 const String = foundation.String;
+const event_tap = @import("event_tap.zig");
 
 pub const Space = struct {
     /// The window-server space id ("id64").
@@ -36,7 +37,7 @@ pub fn activeSpace(cid: sl.ConnectionID) ?u64 {
 
 /// The spaces on the focused display in Mission Control order, plus the position
 /// of the active space within that order. Caller owns `.spaces`.
-const Order = struct { spaces: []Space, active_pos: usize, cid: sl.ConnectionID };
+const Order = struct { spaces: []Space, active_pos: usize };
 
 fn focusedDisplayOrder(alloc: Allocator, cid: sl.ConnectionID) !?Order {
     const active = activeSpace(cid) orelse return null;
@@ -58,32 +59,19 @@ fn focusedDisplayOrder(alloc: Allocator, cid: sl.ConnectionID) !?Order {
         if (sp.id == active) active_pos = list.items.len;
         try list.append(alloc, sp);
     }
-    return .{ .spaces = try list.toOwnedSlice(alloc), .active_pos = active_pos, .cid = cid };
+    return .{ .spaces = try list.toOwnedSlice(alloc), .active_pos = active_pos };
 }
 
-/// Switch the focused display to absolute `space_id`. NOTE: emulating a real
-/// swipe is impossible in-process on Tahoe (the gesture recognizer reads an
-/// injected IOHIDEvent that only a DriverKit virtual-HID service can provide —
-/// see iohid.zig). This direct window-server path switches instantly but leaves
-/// the menu bar stale (overlapping menus); `killall Dock` clears it. The atomic
-/// transaction is preferred when available, else the per-call legacy path.
-fn switchToSpaceDirect(cid: sl.ConnectionID, space_id: u64) void {
-    const uuid = sl.SLSCopyActiveMenuBarDisplayIdentifier(cid) orelse return;
-    defer foundation.CFRelease(uuid);
-
-    if (sl.SLSTransactionCreate(cid)) |txn| {
-        sl.SLSTransactionSetManagedDisplayCurrentSpace(txn, uuid, space_id);
-        sl.SLSTransactionSpaceRebuildMenuBar(txn, space_id);
-        _ = sl.SLSTransactionCommit(txn, 0);
-        return;
-    }
-    sl.SLSManagedDisplaySetCurrentSpace(cid, uuid, space_id);
-}
-
-/// Switch from the active Space to position `target_pos` in the focused-display
-/// order.
+/// Synthesize `|target_pos - active_pos|` Dock-swipe gestures to reach
+/// `target_pos`. Each gesture sequence switches exactly one Space.
 fn swipeToPos(order: Order, target_pos: usize) void {
-    if (target_pos != order.active_pos) switchToSpaceDirect(order.cid, order.spaces[target_pos].id);
+    if (target_pos == order.active_pos) return;
+    const dir: event_tap.SwipeDirection = if (target_pos > order.active_pos) .left else .right;
+    const steps: usize = if (target_pos > order.active_pos)
+        target_pos - order.active_pos
+    else
+        order.active_pos - target_pos;
+    for (0..steps) |_| event_tap.performSwitchGesture(dir);
 }
 
 /// Switch the focused display to the 1-based user-space index `n`
