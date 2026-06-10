@@ -126,6 +126,11 @@ pub const Con = struct {
     ratio: f64 = 1.0,
     /// Depth of this Con in the tree. Root is 0, its children are 1, etc.
     depth: u32 = 0,
+    /// The child this container last held focus through, so directional focus can
+    /// restore the last-active window when re-entering instead of jumping to the
+    /// edge (i3 "focus the most-recently-focused window"). Validated against the
+    /// current children before use, so a stale pointer (closed window) is ignored.
+    last_focused_child: ?*Con = null,
     /// Children of this Con in tiling order. Empty for leaf nodes. The slice
     /// order is the tiling order: index 0 is leftmost (H_SPLIT) or topmost
     /// (V_SPLIT); appending a new leaf places it at the trailing edge.

@@ -29,9 +29,21 @@ pub fn focusWindow(win: *data.Window) bool {
 }
 
 /// Focus the window held by `leaf` (a Container Con). No-op for non-leaf Cons.
+/// Records the focus path so each ancestor remembers `leaf` as its active branch.
 pub fn focusLeaf(leaf: *data.Con) bool {
     const win = if (leaf.window) |*w| w else return false;
-    return focusWindow(win);
+    if (!focusWindow(win)) return false;
+    recordFocusPath(leaf);
+    return true;
+}
+
+/// Walk up from `leaf`, marking each ancestor's `last_focused_child` to the child
+/// on the path, so re-entering a container later restores this window.
+fn recordFocusPath(leaf: *data.Con) void {
+    var node: *data.Con = leaf;
+    while (node.parent) |parent| : (node = parent) {
+        parent.last_focused_child = node;
+    }
 }
 
 /// A window owned by `closed_pid` was just removed from workspace `ws`, where it
@@ -92,25 +104,64 @@ fn firstLeafForPid(con: *data.Con, pid: i32) ?*data.Con {
     return null;
 }
 
-/// Move focus to the tile adjacent to the focused one in the active workspace.
-/// This is the building block for "focus the app to my left/right" once
-/// keybindings exist. With the current flat layout, left/up step to the previous
-/// sibling and right/down to the next. Returns true if focus moved.
+/// Move focus to the nearest window in `dir`, descending into and ascending out
+/// of nested containers (i3-style directional focus). Left/right traverse
+/// horizontal splits/stacks; up/down traverse vertical ones. From the focused
+/// leaf we walk up until an ancestor has a neighbour along the requested axis,
+/// then descend into that neighbour to the leaf nearest the edge we enter from.
+/// Returns true if focus moved (no wrap-around at the edges).
 pub fn focusDirection(appState: *state.AppState, dir: Direction) bool {
     const cur = currentFocusedLeaf(appState) orelse return false;
-    const parent = cur.parent orelse return false;
-
-    var idx: ?usize = null;
-    for (parent.children.items, 0..) |child, i| {
-        if (child == cur) {
-            idx = i;
-            break;
-        }
-    }
-    const i = idx orelse return false;
-
+    const horizontal = dir == .left or dir == .right;
     const forward = dir == .right or dir == .down;
-    const target = if (forward) i + 1 else (if (i > 0) i - 1 else return false);
-    if (target >= parent.children.items.len) return false;
-    return focusLeaf(parent.children.items[target]);
+
+    var node = cur;
+    while (node.parent) |parent| : (node = parent) {
+        const axis_matches = if (horizontal)
+            (parent.layout == .H_SPLIT or parent.layout == .H_STACK)
+        else
+            (parent.layout == .V_SPLIT or parent.layout == .V_STACK);
+        if (!axis_matches) continue; // perpendicular split — keep climbing
+        if (siblingInDir(parent, node, forward)) |sib| {
+            return focusLeaf(descendToLeaf(sib, forward));
+        }
+        // Axis matches but `node` is at the edge — climb and try a higher level.
+    }
+    return false;
+}
+
+/// The previous (`forward=false`) or next (`forward=true`) child of `parent`
+/// adjacent to `child`, or null if `child` is at that edge.
+fn siblingInDir(parent: *data.Con, child: *data.Con, forward: bool) ?*data.Con {
+    for (parent.children.items, 0..) |c, i| {
+        if (c != child) continue;
+        if (forward) return if (i + 1 < parent.children.items.len) parent.children.items[i + 1] else null;
+        return if (i > 0) parent.children.items[i - 1] else null;
+    }
+    return null;
+}
+
+/// Descend `con` to a leaf. At each level prefer the container's last-focused
+/// child (so re-entering restores the most-recently-active window); otherwise,
+/// when we reached it moving `forward`, take the first child (else the last).
+/// Returns `con` unchanged if it's already a leaf.
+fn descendToLeaf(con: *data.Con, forward: bool) *data.Con {
+    var node = con;
+    while (node.window == null and node.children.items.len > 0) {
+        node = if (validLastFocused(node)) |lf|
+            lf
+        else if (forward)
+            node.children.items[0]
+        else
+            node.children.items[node.children.items.len - 1];
+    }
+    return node;
+}
+
+/// `con`'s `last_focused_child` if it's still one of `con`'s children, else null
+/// (the remembered window may have been closed or moved out).
+fn validLastFocused(con: *data.Con) ?*data.Con {
+    const lf = con.last_focused_child orelse return null;
+    for (con.children.items) |c| if (c == lf) return lf;
+    return null;
 }
