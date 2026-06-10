@@ -54,17 +54,42 @@ pub fn focusAfterClose(ws: *data.Con, closed_pid: i32, closed_index: usize) void
 }
 
 /// The leaf holding the currently focused window, resolved live from the OS: the
-/// frontmost app's `AXFocusedWindow`, matched back to a tree leaf. Null if it
-/// can't be determined or the window isn't tracked.
+/// frontmost app's focused window, matched back to a tree leaf. Null if it can't
+/// be determined or the app owns no tracked window.
+///
+/// Resolution is layered because `AXFocusedWindow` is unreliable for some apps —
+/// notably Ghostty, which can hand back an auxiliary window that isn't a tree
+/// leaf (the same quirk the dialog heuristic special-cases). When that wid isn't
+/// in the tree, fall back to `AXMainWindow`, then to *any* tree leaf owned by the
+/// frontmost pid. Without these fallbacks every window op (move/swap, resize,
+/// layout) silently no-ops whenever such an app is frontmost.
 pub fn currentFocusedLeaf(appState: *state.AppState) ?*data.Con {
     const root = appState.tree orelse return null;
     const pid = macos.workspace.frontmostAppPid() orelse return null;
     const app = macos.Element.createApplication(pid) orelse return null;
     defer app.release();
-    const focused = app.copyElement("AXFocusedWindow") orelse return null;
-    defer focused.release();
-    const wid = focused.windowId() orelse return null;
+
+    if (leafFromWindowAttr(root, app, "AXFocusedWindow")) |leaf| return leaf;
+    if (leafFromWindowAttr(root, app, "AXMainWindow")) |leaf| return leaf;
+    return firstLeafForPid(root, pid);
+}
+
+/// The tree leaf for the window held by the app's `attr` (e.g. "AXFocusedWindow"),
+/// or null if the attribute is absent or its window isn't tracked.
+fn leafFromWindowAttr(root: *data.Con, app: *macos.Element, attr: []const u8) ?*data.Con {
+    const win = app.copyElement(attr) orelse return null;
+    defer win.release();
+    const wid = win.windowId() orelse return null;
     return tree.findLeaf(root, wid);
+}
+
+/// The first leaf anywhere under `con` whose window is owned by `pid`, or null.
+fn firstLeafForPid(con: *data.Con, pid: i32) ?*data.Con {
+    if (con.window) |w| if (w.pid == pid) return con;
+    for (con.children.items) |child| {
+        if (firstLeafForPid(child, pid)) |leaf| return leaf;
+    }
+    return null;
 }
 
 /// Move focus to the tile adjacent to the focused one in the active workspace.

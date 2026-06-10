@@ -107,6 +107,7 @@ pub fn removeWindow(con: *data.Con, wid: u64) bool {
                 if (w.id == wid) {
                     w.deinit();
                     _ = con.children.orderedRemove(i);
+                    collapseIfDegenerate(con); // flatten a now-single-child stack
                     return true;
                 }
             }
@@ -136,6 +137,11 @@ pub fn removeWindowsForPid(con: *data.Con, pid: i32) bool {
             }
         }
         if (removeWindowsForPid(child, pid)) removed = true;
+        // `child` may now be a degenerate sub-container; flatten/drop it. A drop
+        // shrinks the list, so re-check this index instead of advancing.
+        const before = con.children.items.len;
+        collapseIfDegenerate(child);
+        if (con.children.items.len < before) continue;
         i += 1;
     }
     return removed;
@@ -254,6 +260,79 @@ fn nextSibling(con: *data.Con) ?*data.Con {
     return null;
 }
 
+/// Combine `leaf` with its adjacent sibling (the next one if `forward`, else the
+/// previous) into a new nested split container with `layout`. This is how a
+/// workspace gets a *mixed* layout: e.g. an H_SPLIT row whose left slot is a
+/// V_STACK of two windows. The new container takes the lower of the two slots
+/// (so on-screen order is preserved) and their combined ratio; both windows are
+/// reparented under it with equal weight. Returns the new container, or null if
+/// there's no neighbour to join.
+pub fn joinWithNeighbor(alloc: Allocator, leaf: *data.Con, forward: bool, mode: data.layouts) ?*data.Con {
+    const parent = leaf.parent orelse return null;
+    const nb = (if (forward) nextSibling(leaf) else prevSibling(leaf)) orelse return null;
+
+    var li: usize = 0;
+    var ni: usize = 0;
+    for (parent.children.items, 0..) |c, i| {
+        if (c == leaf) li = i;
+        if (c == nb) ni = i;
+    }
+    const lo = @min(li, ni);
+    const hi = @max(li, ni);
+
+    const container = makeCon(alloc, .Container, parent, parent.depth + 1, 0) catch return null;
+    container.layout = mode;
+    container.ratio = leaf.ratio + nb.ratio;
+    container.gaps = parent.gaps; // inherit inner gap / accordion peek
+
+    // Reparent the two windows under the container, preserving their order and
+    // giving them equal weight within the new slot.
+    const first = if (li < ni) leaf else nb;
+    const second = if (li < ni) nb else leaf;
+    for ([_]*data.Con{ first, second }) |child| {
+        child.parent = container;
+        child.depth = container.depth + 1;
+        child.ratio = 1.0;
+        container.children.append(alloc, child) catch return null;
+    }
+
+    // Replace the two parent slots with the single container slot: remove the
+    // higher index first (so the lower stays valid), then insert at the lower.
+    _ = parent.children.orderedRemove(hi);
+    _ = parent.children.orderedRemove(lo);
+    parent.children.insert(alloc, lo, container) catch return null;
+    return container;
+}
+
+/// Collapse a nested split container that a removal left with fewer than two
+/// children: promote its sole child into its slot (i3-style flatten), or drop it
+/// if it's now empty. Keeps the tree free of single-child container cruft.
+/// No-op on workspaces and leaf cons.
+fn collapseIfDegenerate(con: *data.Con) void {
+    const parent = con.parent orelse return;
+    if (con.con_type != .Container or con.window != null) return; // leaf / non-split
+    if (con.children.items.len >= 2) return;
+
+    var idx: usize = 0;
+    var found = false;
+    for (parent.children.items, 0..) |c, i| if (c == con) {
+        idx = i;
+        found = true;
+        break;
+    };
+    if (!found) return;
+
+    if (con.children.items.len == 1) {
+        const only = con.children.items[0];
+        only.parent = parent;
+        only.depth = parent.depth + 1;
+        only.ratio = con.ratio; // take over the freed slot's weight
+        parent.children.items[idx] = only;
+    } else {
+        _ = parent.children.orderedRemove(idx);
+    }
+}
+
 /// Minimum window extent (points) along the split axis, so a neighbour can't be
 /// crushed to nothing by a resize.
 const min_extent: f64 = 50;
@@ -333,16 +412,25 @@ pub fn applyManualMove(leaf: *data.Con, frame: macos.window_list.Rect) bool {
 }
 
 /// Swap `leaf` with its previous (`forward=false`) or next (`forward=true`)
-/// sibling in the parent's tiling order. Window payloads are swapped so each
-/// slot keeps its ratio. Returns true if a swap happened.
+/// sibling in the parent's tiling order. Swaps the two *nodes' positions* in the
+/// child list (not their window payloads), so it works when the neighbour is a
+/// nested container, not just a leaf — a payload swap would empty the leaf and
+/// corrupt the container (which has no window). The ratio travels with each node,
+/// so the windows swap size as well as place. Returns true if a swap happened.
 pub fn swapLeaf(leaf: *data.Con, forward: bool) bool {
-    const nb = if (forward) nextSibling(leaf) else prevSibling(leaf);
-    const target = nb orelse return false;
-    const tmp = leaf.window;
-    leaf.window = target.window;
-    target.window = tmp;
-    if (leaf.window) |w| leaf.id = w.id;
-    if (target.window) |w| target.id = w.id;
+    const parent = leaf.parent orelse return false;
+    const target = (if (forward) nextSibling(leaf) else prevSibling(leaf)) orelse return false;
+
+    var li: ?usize = null;
+    var ti: ?usize = null;
+    for (parent.children.items, 0..) |c, i| {
+        if (c == leaf) li = i;
+        if (c == target) ti = i;
+    }
+    const a = li orelse return false;
+    const b = ti orelse return false;
+    parent.children.items[a] = target;
+    parent.children.items[b] = leaf;
     return true;
 }
 

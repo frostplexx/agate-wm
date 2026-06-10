@@ -176,7 +176,9 @@ fn agateConfig(lua: *Lua) i32 {
 }
 
 fn applyGapsToTree(con: *data.Con, gaps: f64, outer_gaps: f64, accordion: f64) void {
-    if (con.con_type == .Workspace) {
+    // Workspaces and nested split containers (a Container with no window) carry
+    // the gaps the layout reads; leaf cons (Container with a window) don't.
+    if (con.con_type == .Workspace or (con.con_type == .Container and con.window == null)) {
         con.gaps = .{
             .inner = @intFromFloat(@max(0, gaps)),
             .outer = @intFromFloat(@max(0, outer_gaps)),
@@ -245,21 +247,47 @@ fn layoutFromName(name: []const u8) ?data.layouts {
     return null;
 }
 
-/// Set the active workspace's layout by name and re-tile. "toggle" flips the
-/// split orientation (H_SPLIT ↔ V_SPLIT); anything else maps via `layoutFromName`.
+/// Set a layout by name and re-tile. Targets the *focused container* (the
+/// focused leaf's parent) so a nested sub-container can be restyled on its own —
+/// e.g. flip just the left stack to a split — falling back to the workspace when
+/// focus can't be resolved. "toggle" flips the split orientation (H_SPLIT ↔
+/// V_SPLIT); anything else maps via `layoutFromName`.
 fn setActiveLayout(app: *state.AppState, name: []const u8) void {
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
+    const target = if (focus.currentFocusedLeaf(app)) |leaf| (leaf.parent orelse ws) else ws;
     if (std.mem.eql(u8, name, "toggle")) {
-        ws.layout = switch (ws.layout) {
+        target.layout = switch (target.layout) {
             .H_SPLIT => .V_SPLIT,
             .V_SPLIT => .H_SPLIT,
             else => .H_SPLIT, // from a stack/float, toggle returns to horizontal tiling
         };
     } else {
-        ws.layout = layoutFromName(name) orelse return;
+        target.layout = layoutFromName(name) orelse return;
     }
     tree.flushActive(app);
+}
+
+/// Combine the focused window with an adjacent one into a nested container,
+/// giving the workspace a mixed layout. `agate.join(dir [, layout])`: `dir` is
+/// the neighbour to absorb ("left"/"right"/"up"/"down"); `layout` is the new
+/// container's mode (default "v_stack" — a vertical stack).
+fn agateJoin(lua: *Lua) i32 {
+    const app = g_appstate orelse return 0;
+    const dir_z = lua.toString(1) catch return 0;
+    const dir = parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    var layout: data.layouts = .V_STACK;
+    if (lua.isString(2)) {
+        const lz = lua.toString(2) catch "";
+        if (layoutFromName(std.mem.sliceTo(lz, 0))) |l| layout = l;
+    }
+    const leaf = focus.currentFocusedLeaf(app) orelse return 0;
+    const forward = dir == .right or dir == .down;
+    if (tree.joinWithNeighbor(app.arena, leaf, forward, layout)) |_| {
+        tree.flushActive(app);
+        _ = focus.focusLeaf(leaf); // keep the joined window focused and raised
+    }
+    return 0;
 }
 
 fn agateSpace(lua: *Lua) i32 {
@@ -347,6 +375,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "resize",      .func = zlua.wrap(agateResize) },
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
     .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
+    .{ .name = "join",        .func = zlua.wrap(agateJoin) },
 };
 
 // ---------------------------------------------------------------------------
@@ -468,9 +497,19 @@ fn executeCommand(cmd: []const u8) void {
     const app = g_appstate orelse return;
     if (std.mem.startsWith(u8, cmd, "move ")) {
         const dir = parseDir(cmd[5..]) orelse return;
-        const leaf = focus.currentFocusedLeaf(app) orelse return;
+        const leaf = focus.currentFocusedLeaf(app) orelse {
+            std.debug.print("[move] no focused leaf — nothing to swap\n", .{});
+            return;
+        };
         const forward = dir == .right or dir == .down;
-        if (tree.swapLeaf(leaf, forward)) tree.flushActive(app);
+        // swapLeaf swaps the window *payloads*, so the moved window keeps OS
+        // focus where it is — no re-focus needed.
+        if (tree.swapLeaf(leaf, forward)) {
+            tree.flushActive(app);
+            std.debug.print("[move] swapped {s}\n", .{cmd});
+        } else {
+            std.debug.print("[move] #{d} has no neighbour for {s}\n", .{ leaf.id, cmd });
+        }
     } else if (std.mem.startsWith(u8, cmd, "focus ")) {
         const dir = parseDir(cmd[6..]) orelse return;
         _ = focus.focusDirection(app, dir);

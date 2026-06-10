@@ -6,7 +6,7 @@
 agate.config({
     gaps = 8,              -- space between tiles
     outer_gaps = 8,        -- inset from the screen edge
-    accordion_padding = 40, -- stacked-window "peek": how far each window fans out
+    accordion_padding = 20, -- stacked-window "peek": how far each window fans out
     -- "hyper" expands to this modifier set in keyspecs below.
     hyper = { "ctrl", "alt", "cmd" },
 })
@@ -29,6 +29,12 @@ agate.bind("hyper+v", function() agate.layout("v_tiles") end)      -- vertical s
 agate.bind("hyper+e", function() agate.layout("toggle") end)       -- swap split orientation
 agate.bind("hyper+s", function() agate.layout("accordion") end)    -- vertical stack (bottom peeks)
 agate.bind("hyper+shift+s", function() agate.layout("h_stack") end) -- horizontal stack
+
+-- Combine the focused window with a neighbour into a nested container, for mixed
+-- layouts (e.g. left/right tiled with the left slot holding two stacked windows).
+-- Second arg is the new container's layout (default "v_stack").
+agate.bind("hyper+g", function() agate.join("right") end)              -- stack with right neighbour
+agate.bind("hyper+shift+g", function() agate.join("right", "v_split") end) -- split with right neighbour
 
 -- Resize the focused tile.
 agate.bind("hyper+minus", function() agate.resize("left", 50) end)
