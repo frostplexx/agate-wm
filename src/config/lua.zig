@@ -272,6 +272,37 @@ fn agateMove(lua: *Lua) i32 {
     return 0;
 }
 
+fn agateMoveToSpace(lua: *Lua) i32 {
+    const app = g_appstate orelse return 0;
+    const n = lua.toInteger(1) catch return 0;
+    if (n < 1) return 0;
+    moveFocusedToSpace(app, @intCast(n));
+    return 0;
+}
+
+/// Move the focused window to the Nth user space on the focused display via
+/// the SkyLight reassignment SPI, then sync our tree by relocating the leaf
+/// into the destination workspace and relaying out the (now-shrunk) source.
+/// No-op when the window is already on the target space.
+fn moveFocusedToSpace(app: *state.AppState, n: usize) void {
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    const win = if (leaf.window) |w| w else return;
+    const cur_ws = leaf.parent orelse return; // Workspace Con; .id == SkyLight sid
+    const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, n) catch return) orelse return;
+    if (target_sid == cur_ws.id) return; // already there — don't issue the SPI
+    if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
+    const root = app.tree orelse return;
+    const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
+    _ = tree.moveLeafToWorkspace(app.gpa, leaf, dst_ws);
+    tree.flushActive(app);        // re-tile the source we just shrank
+    tree.flushWorkspace(dst_ws);  // and slot the moved window into the destination's row
+
+    // Keep the moved window selected once its Space is shown (yabai-style): the
+    // space-change handler blanket-focuses a tile to pull the menu bar over, so
+    // arm a pending focus on this window for the destination Space instead.
+    app.pending_focus = .{ .wid = win.id, .sid = target_sid };
+}
+
 const agate_fns = [_]zlua.FnReg{
     .{ .name = "config",      .func = zlua.wrap(agateConfig) },
     .{ .name = "bind",        .func = zlua.wrap(agateBind) },
@@ -282,6 +313,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "space_prev",  .func = zlua.wrap(agateSpacePrev) },
     .{ .name = "resize",      .func = zlua.wrap(agateResize) },
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
+    .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
 };
 
 // ---------------------------------------------------------------------------
@@ -422,6 +454,9 @@ fn executeCommand(cmd: []const u8) void {
     } else if (std.mem.startsWith(u8, cmd, "space ")) {
         const n = std.fmt.parseInt(usize, cmd[6..], 10) catch return;
         macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
+    } else if (std.mem.startsWith(u8, cmd, "move_to_space ")) {
+        const n = std.fmt.parseInt(usize, cmd[14..], 10) catch return;
+        moveFocusedToSpace(app, n);
     }
 }
 

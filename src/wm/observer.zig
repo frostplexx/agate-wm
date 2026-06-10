@@ -98,6 +98,10 @@ const Manager = struct {
     ktap: macos.event_tap.MachPortRef = null,
     /// Whether the mouse actually moved since mouse-down (a drag, not a click).
     dragging: bool = false,
+    /// Pending debounce timer for a display-reconfiguration re-tile (null when
+    /// none is armed). A single configuration change (clamshell, dock/undock)
+    /// emits a burst of per-display callbacks; we coalesce them into one flush.
+    display_timer: c.CFRunLoopTimerRef = null,
 };
 
 /// The single WM instance, reached from the C observer callback.
@@ -107,6 +111,19 @@ var g_manager: ?*Manager = null;
 /// remapper applies the real hyper modifiers downstream of our tap, so we track
 /// the trigger key ourselves and synthesize the modifiers in `keyTap`.
 var g_hyper_held: bool = false;
+
+/// `CFAbsoluteTime` of the last user input that legitimately raises an app — a
+/// Cmd-Tab or a mouse click. The activation space-follow only fires within a
+/// short window after one of these (see `onAppActivated`), so a *background*
+/// app activating itself doesn't yank the user to another Space, and our own
+/// post-switch focus can't trigger a follow ping-pong. Mirrors agate-wm's
+/// `g_last_cmd_tab`/`g_last_dock_click` gate (src/platform/follow.m).
+var g_last_activation_input: f64 = 0;
+
+/// Window virtual keycode for Tab (Cmd-Tab is the app switcher).
+const kVK_Tab: u16 = 48;
+/// How long after a Cmd-Tab / click an activation still counts as user-driven.
+const activation_follow_window_s: f64 = 1.5;
 
 /// Set up create/destroy observers for every app that currently owns a managed
 /// window, then run the loop. Blocks until the run loop stops.
@@ -199,6 +216,11 @@ pub fn run(appState: *state.AppState) !void {
         macos.skylight.kCGSNotificationSpaceChanged,
         mgr,
     );
+
+    // Re-tile when the display layout changes (clamshell, dock/undock, a
+    // resolution change). The visible frame we tile to moves with it, but no
+    // window event fires, so without this the layout keeps the old geometry.
+    _ = macos.display.CGDisplayRegisterReconfigurationCallback(onDisplayReconfigured, mgr);
 
     c.CFRunLoopRun();
 }
@@ -347,6 +369,11 @@ fn keyTap(
                 event,
                 macos.event_tap.kCGKeyboardEventKeycode,
             ));
+            // Cmd-Tab (the app switcher) is a user-driven activation — open the
+            // gate so the resulting NSWorkspace activation follows to its Space.
+            if (code == kVK_Tab and (macos.event_tap.CGEventGetFlags(event) & lua_config.MOD_CMD) != 0) {
+                g_last_activation_input = c.CFAbsoluteTimeGetCurrent();
+            }
             // The hyper trigger key (e.g. F18, from a Caps→F18 remap): track its
             // held state and pass it through so other apps still get it.
             const hk = lua_config.hyperKey();
@@ -393,11 +420,80 @@ fn onSpaceChanged(
     std.debug.print("[observer] space changed → retiled\n", .{});
 }
 
+/// CGDisplayRegisterReconfigurationCallback callback: the display layout
+/// changed (clamshell open/close, an external monitor plugged or unplugged, a
+/// resolution change). Re-tile the active workspace so its windows resize to the
+/// new screen geometry. Registered in `run()`.
+fn onDisplayReconfigured(
+    _: macos.display.CGDirectDisplayID,
+    flags: macos.display.CGDisplayChangeSummaryFlags,
+    userInfo: ?*anyopaque,
+) callconv(.c) void {
+    // The "begin" pass fires before the change is applied — `mainVisibleFrame`
+    // still reports the old geometry, so act only on the settled pass.
+    if (flags & macos.display.kCGDisplayBeginConfigurationFlag != 0) return;
+    const mgr: *Manager = @ptrCast(@alignCast(userInfo orelse return));
+    scheduleDisplayReflush(mgr);
+}
+
+/// Arm (or re-arm) the debounced display re-tile. One configuration change emits
+/// a callback per affected display, and the new geometry can take a beat to
+/// settle, so each call cancels any pending timer and schedules a fresh one —
+/// the flush runs once, shortly after the *last* callback of the burst.
+fn scheduleDisplayReflush(mgr: *Manager) void {
+    if (mgr.display_timer) |t| {
+        c.CFRunLoopTimerInvalidate(t);
+        c.CFRelease(t);
+        mgr.display_timer = null;
+    }
+    var timer_ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = mgr,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    const fire_at = c.CFAbsoluteTimeGetCurrent() + 0.5;
+    const timer = c.CFRunLoopTimerCreate(null, fire_at, 0, 0, 0, displayReflushFired, &timer_ctx);
+    // Keep the +1 from Create as our own reference (so we can cancel it on the
+    // next burst event); it's released when the timer fires or is replaced.
+    if (timer) |t| {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopCommonModes);
+        mgr.display_timer = t;
+    }
+}
+
+fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const mgr: *Manager = @ptrCast(@alignCast(info orelse return));
+    if (mgr.display_timer) |t| {
+        c.CFRunLoopTimerInvalidate(t);
+        c.CFRelease(t);
+        mgr.display_timer = null;
+    }
+    tree.flushActive(mgr.appState);
+    std.debug.print("[observer] display reconfigured → retiled\n", .{});
+}
+
 /// Make an app on the currently active space frontmost (see `onSpaceChanged`).
 fn focusActiveSpace(app: *state.AppState) void {
     const root = app.tree orelse return;
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(root, sid) orelse return;
+
+    // A window was just moved to this Space and the user followed it over → keep
+    // *that* window selected instead of the first tile (yabai keeps a moved
+    // window focused). Only consume the request when its target Space is the one
+    // now active, so the intermediate notifications of a multi-step switch don't
+    // discard it. Falls through to the first tile if the window is gone.
+    if (app.pending_focus) |pf| {
+        if (pf.sid == sid) {
+            app.pending_focus = null;
+            if (tree.findLeaf(root, pf.wid)) |leaf| {
+                if (focus.focusLeaf(leaf)) return;
+            }
+        }
+    }
+
     for (ws.children.items) |child| {
         if (focus.focusLeaf(child)) return; // first window that accepts focus
     }
@@ -420,7 +516,14 @@ fn mouseTap(
         macos.event_tap.kCGEventTapDisabledByTimeout,
         macos.event_tap.kCGEventTapDisabledByUserInput,
         => if (mgr.tap) |t| macos.event_tap.CGEventTapEnable(t, true),
-        macos.event_tap.kCGEventLeftMouseDown => mgr.dragging = false,
+        macos.event_tap.kCGEventLeftMouseDown => {
+            mgr.dragging = false;
+            // A click (incl. on a Dock icon) is a user-driven activation — open
+            // the follow gate. Coarser than agate-wm's Dock hit-test, but a click
+            // that activates an app whose focused window is on the visible Space
+            // resolves to "no off-screen space" and is a no-op anyway.
+            g_last_activation_input = c.CFAbsoluteTimeGetCurrent();
+        },
         macos.event_tap.kCGEventLeftMouseDragged => mgr.dragging = true,
         macos.event_tap.kCGEventLeftMouseUp => onMouseUp(mgr),
         else => {},
@@ -494,30 +597,81 @@ fn isStandardAXWindow(el: *macos.Element) bool {
     return std.mem.eql(u8, s, "AXStandardWindow");
 }
 
+/// Apps (by owner name) that routinely have *no* fullscreen button yet whose
+/// windows are normal, tileable windows — so the "no fullscreen button = dialog"
+/// heuristic must not float them. From AeroSpace's exclusion list
+/// (nikitabobko/AeroSpace, isDialogHeuristic). Ghostty is handled separately.
+fn isFullscreenButtonExempt(app: []const u8) bool {
+    const exempt = [_][]const u8{
+        "Alacritty", "kitty", "WezTerm", "iTerm2", "Terminal",
+        "Emacs",     "Code",  "Steam",   "qutebrowser",
+    };
+    for (exempt) |name| if (std.mem.eql(u8, app, name)) return true;
+    return false;
+}
+
+/// A browser Picture-in-Picture overlay. These pass the standard-window gate
+/// (role `AXWindow`, subrole `AXStandardWindow`) and Firefox/Zen even expose an
+/// `AXFullScreenButton`, so the fullscreen-button heuristic alone would tile
+/// them. The reliable cross-browser signal is the window title: Firefox/Zen
+/// "Picture-in-Picture", Brave "Picture-in-picture", Chrome/Edge "Picture in
+/// Picture" — matched case-insensitively (confirmed against AeroSpace's axDumps).
+fn isPictureInPicture(el: *macos.Element) bool {
+    const title = el.copyString("AXTitle") orelse return false;
+    defer title.release();
+    var buf: [256]u8 = undefined;
+    const t = title.cstring(&buf) orelse return false; // long title ⇒ not PiP
+    return std.ascii.indexOfIgnoreCase(t, "picture-in-picture") != null or
+        std.ascii.indexOfIgnoreCase(t, "picture in picture") != null;
+}
+
+/// True if the (enabled) AX button `attr` (e.g. "AXFullScreenButton",
+/// "AXCloseButton") is present on `el`. The window-title-bar buttons are child
+/// AXUIElements exposed as attributes; absence means the value doesn't resolve.
+fn hasEnabledButton(el: *macos.Element, attr: []const u8) bool {
+    const btn = el.copyElement(attr) orelse return false;
+    defer btn.release();
+    return btn.getBool("AXEnabled") orelse false;
+}
+
+/// Whether agate should *tile* `el` (vs. leave it floating where macOS put it).
+/// Ports AeroSpace's dialog heuristic (nikitabobko/AeroSpace, `isDialogHeuristic`
+/// in Sources/AppBundle/model/AxUiElementWindowType.swift): Apple's AX API lets
+/// apps mark dialogs, but many (and even some Apple windows, e.g. Finder's
+/// "Copy" progress sheet) don't, so we also infer it. A window with no enabled
+/// *fullscreen* button (distinct from the maximize/zoom button) is treated as a
+/// dialog and floated — except terminals and a few special-cased apps, which
+/// legitimately lack one. `app` is the owning application's name.
+fn shouldTile(el: *macos.Element, app: []const u8) bool {
+    // Sheets, popovers, panels and other non-standard windows: never tile.
+    if (!isStandardAXWindow(el)) return false;
+
+    // Browser Picture-in-Picture overlays float (Firefox/Zen expose a fullscreen
+    // button, so they'd otherwise be tiled). Checked before the app cases since
+    // it's app-agnostic.
+    if (isPictureInPicture(el)) return false;
+
+    // Terminals & friends often lack a fullscreen button but are real windows.
+    if (isFullscreenButtonExempt(app)) return true;
+
+    // Ghostty quirk (AeroSpace special case): a Ghostty window is a dialog only
+    // when it has no fullscreen button *and* does have a close button; its real
+    // windows have both, its prompts have only close.
+    if (std.mem.eql(u8, app, "Ghostty")) {
+        return hasEnabledButton(el, "AXFullScreenButton") or
+            !hasEnabledButton(el, "AXCloseButton");
+    }
+
+    // General heuristic: a real tileable window has an enabled fullscreen button.
+    return hasEnabledButton(el, "AXFullScreenButton");
+}
+
 /// The Workspace Con for the Space window `wid` currently lives on, via
-/// `SLSCopySpacesForWindows`. Null if the window has no resolvable space yet.
+/// `macos.spaces.spaceForWindow`. Null if the window has no resolvable space yet.
 fn workspaceForWindow(mgr: *Manager, wid: u32) ?*data.Con {
     const root = mgr.appState.tree orelse return null;
-    var wid_i64: i64 = @intCast(wid);
-    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &wid_i64) orelse return null;
-    defer foundation.CFRelease(num);
-    var values = [_]?*const anyopaque{@ptrCast(num)};
-    const wins_arr = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return null;
-    defer foundation.CFRelease(wins_arr);
-    const space_arr = macos.skylight.SLSCopySpacesForWindows(
-        mgr.appState.skylight_cid,
-        0xFFFF_FFFF_FFFF_FFFF,
-        wins_arr,
-    ) orelse return null;
-    defer foundation.CFRelease(space_arr);
-    if (c.CFArrayGetCount(space_arr) == 0) return null;
-    var sid: i64 = 0;
-    if (c.CFNumberGetValue(
-        @ptrCast(c.CFArrayGetValueAtIndex(space_arr, 0)),
-        c.kCFNumberSInt64Type,
-        &sid,
-    ) == 0) return null;
-    return tree.findWorkspace(root, @intCast(sid));
+    const sid = macos.spaces.spaceForWindow(mgr.appState.skylight_cid, wid, 0xFFFF_FFFF_FFFF_FFFF) orelse return null;
+    return tree.findWorkspace(root, sid);
 }
 
 /// Enumerate `pid`'s current windows via Accessibility and add any standard,
@@ -548,7 +702,7 @@ fn addApplicationWindows(mgr: *Manager, pid: i32, observer: ax.AXObserverRef) vo
         const el = macos.Element.fromRef(elem_ref) orelse continue;
         const wid = el.windowId() orelse continue;
         if (tree.hasWindow(root, wid)) continue;
-        if (!isStandardAXWindow(el)) continue;
+        if (!shouldTile(el, name)) continue;
 
         const ws = workspaceForWindow(mgr, wid) orelse continue;
         const owner = app.arena.dupe(u8, name) catch continue;
@@ -645,7 +799,98 @@ fn onAppEvent(event: macos.app_watch.AppEvent, pid: i32, context: ?*anyopaque) c
     switch (event) {
         .launched => observeAndAddWindows(mgr, pid, 0),
         .terminated => removeApp(mgr, pid),
+        .activated => onAppActivated(mgr, pid),
     }
+}
+
+/// An app was brought to the front (Cmd-Tab, dock click, or a programmatic
+/// activation). If its focused window lives on another Space, switch to that
+/// Space *instantly* (by id, no animation) so activation follows the window.
+///
+/// This is the fast replacement for macOS's "When switching to an application,
+/// switch to a Space with open windows for the application" — turn that setting
+/// OFF (Settings ▸ Desktop & Dock ▸ Mission Control) so macOS doesn't play its
+/// slow animated switch, and let agate switch here instead via the Dock-swipe
+/// gesture (instant; the SkyLight `SetCurrentSpace` path is broken). If the
+/// setting is left ON, macOS switches first and this is a no-op (target Space is
+/// already active), so the two never fight.
+///
+/// The switch is async (the gesture lands a moment later), so we don't re-tile
+/// here — `onSpaceChanged` does that when the Space actually changes. The
+/// activated window is armed as the pending focus for its Space, so that handler
+/// keeps *it* selected rather than the first tile.
+fn onAppActivated(_: *Manager, pid: i32) void {
+    if (pid == std.c.getpid()) return; // never follow our own activation
+
+    // Gate: only follow activations the user drove via Cmd-Tab or a click in the
+    // last ~1.5s. Excludes background self-activations (which would yank the
+    // user's Space) and the activation our own post-switch focus provokes.
+    if (c.CFAbsoluteTimeGetCurrent() - g_last_activation_input > activation_follow_window_s) return;
+
+    // Defer the actual resolution + Space switch to a fresh run-loop turn. The
+    // switch posts synthetic Dock-swipe gesture events; doing that *inside* the
+    // NSWorkspace activation callback (re-entering the event system during its
+    // own delivery) destabilizes the gesture recognizer and event taps over
+    // repeated use — the same reason keybinding actions run deferred
+    // (`scheduleKeyAction`). One clean turn later, the AX focused window is also
+    // fully settled.
+    scheduleActivationFollow(pid);
+}
+
+/// Heap context (gpa) carrying the activated pid from the notification callback
+/// to the deferred follow; freed in `activationFollowFired`.
+const ActivationFollow = struct { pid: i32 };
+
+fn scheduleActivationFollow(pid: i32) void {
+    const mgr = g_manager orelse return;
+    const ctx = mgr.appState.gpa.create(ActivationFollow) catch return;
+    ctx.* = .{ .pid = pid };
+    var timer_ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = ctx,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    const timer = c.CFRunLoopTimerCreate(null, c.CFAbsoluteTimeGetCurrent(), 0, 0, 0, activationFollowFired, &timer_ctx);
+    if (timer) |t| {
+        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopCommonModes);
+        c.CFRelease(t);
+    } else {
+        mgr.appState.gpa.destroy(ctx);
+    }
+}
+
+fn activationFollowFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const ctx: *ActivationFollow = @ptrCast(@alignCast(info orelse return));
+    const mgr = g_manager orelse return;
+    defer mgr.appState.gpa.destroy(ctx);
+    followActivation(mgr, ctx.pid);
+}
+
+/// Resolve `pid`'s focused window's Space and, if it's a non-visible Space,
+/// switch to it (keeping the activated window selected via `pending_focus`).
+/// Runs deferred from `scheduleActivationFollow`.
+fn followActivation(mgr: *Manager, pid: i32) void {
+    const app = mgr.appState;
+    const app_el = macos.Element.createApplication(pid) orelse return;
+    defer app_el.release();
+    app_el.enableManualAccessibility();
+
+    const focused = app_el.copyElement("AXFocusedWindow") orelse return;
+    defer focused.release();
+    const wid = focused.windowId() orelse return;
+
+    // Mask 0x7 returns the window's space only when it's *not* the visible one
+    // (null here) — that null is the "nothing to follow" signal. The wide ~0
+    // mask would wrongly report the active space for every window (agate-wm
+    // src/platform/follow.m), so the follow would never fire.
+    const target_sid = macos.spaces.spaceForWindow(app.skylight_cid, wid, 0x7) orelse return;
+    if (target_sid == (macos.spaces.activeSpace(app.skylight_cid) orelse return)) return;
+
+    app.pending_focus = .{ .wid = wid, .sid = target_sid };
+    macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, target_sid) catch return;
+    std.debug.print("[observer] activation follows window #{d} → space {d}\n", .{ wid, target_sid });
 }
 
 /// A window appeared. The created window's AX element is handed to us directly,
@@ -659,19 +904,20 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     const wid = el.windowId() orelse return; // non-window elements have no id
     if (tree.hasWindow(app.tree orelse return, wid)) return;
 
-    // Only tile real, standard top-level windows (yabai `window_is_standard`).
-    // Sheets, popovers, panels, scroll-indicator overlays (Zen/Firefox), and
-    // apps' auxiliary non-standard windows all fire AXWindowCreated too, but
-    // tiling them reflows and blinks the layout — so reject anything that isn't
-    // an AXWindow/AXStandardWindow.
-    if (!isStandardAXWindow(el)) return;
+    const pid = el.pid() orelse return;
+    var namebuf: [256]u8 = undefined;
+    const name = macos.workspace.appName(pid, &namebuf) orelse "";
+
+    // Only tile real, standard top-level windows; float dialogs. Sheets,
+    // popovers, panels, scroll-indicator overlays (Zen/Firefox), and apps'
+    // auxiliary non-standard windows all fire AXWindowCreated too, and tiling
+    // them reflows and blinks the layout. `shouldTile` rejects those plus
+    // windows the dialog heuristic flags (no fullscreen button, etc.).
+    if (!shouldTile(el, name)) return;
 
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(app.tree.?, sid) orelse return;
 
-    const pid = el.pid() orelse return;
-    var namebuf: [256]u8 = undefined;
-    const name = macos.workspace.appName(pid, &namebuf) orelse "";
     const owner = app.arena.dupe(u8, name) catch return; // must outlive the event
 
     const win = window.fromElement(el, owner) orelse return;

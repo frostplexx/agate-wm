@@ -17,6 +17,7 @@ const sl = @import("skylight.zig");
 const foundation = @import("foundation.zig");
 const String = foundation.String;
 const event_tap = @import("event_tap.zig");
+const objc = @import("objc");
 
 pub const Space = struct {
     /// The window-server space id ("id64").
@@ -33,6 +34,49 @@ pub fn activeSpace(cid: sl.ConnectionID) ?u64 {
     const uuid = sl.SLSCopyActiveMenuBarDisplayIdentifier(cid) orelse return null;
     defer foundation.CFRelease(uuid);
     return sl.SLSManagedDisplayGetCurrentSpace(cid, uuid);
+}
+
+/// The SkyLight space id that window `wid` currently lives on, or null. Works
+/// for any window (not just tracked ones) via `SLSCopySpacesForWindows`.
+///
+/// `mask` selects which space categories to report (yabai/agate-wm `0x7` =
+/// user+fullscreen+system). NOTE: `~0`/`0xFFFF…` is *wrong* for "which space is
+/// this window on" — it returns the active space for any window. Use `0x7` to
+/// detect a window on a *non-visible* space: it returns null for a window on the
+/// currently visible space (an empty result), and the real space id otherwise.
+pub fn spaceForWindow(cid: sl.ConnectionID, wid: u32, mask: u64) ?u64 {
+    var id64: i64 = @intCast(wid);
+    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &id64) orelse return null;
+    defer foundation.CFRelease(num);
+    var values = [_]?*const anyopaque{@ptrCast(num)};
+    const wins = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return null;
+    defer foundation.CFRelease(wins);
+    const spaces_arr = sl.SLSCopySpacesForWindows(cid, mask, wins) orelse return null;
+    defer foundation.CFRelease(spaces_arr);
+    if (c.CFArrayGetCount(spaces_arr) == 0) return null;
+    var sid: i64 = 0;
+    if (c.CFNumberGetValue(
+        @ptrCast(c.CFArrayGetValueAtIndex(spaces_arr, 0)),
+        c.kCFNumberSInt64Type,
+        &sid,
+    ) == 0) return null;
+    return @intCast(sid);
+}
+
+/// Switch the focused display to the Space with id `sid` using the Dock-swipe
+/// gesture — instant, and (unlike the SkyLight `SLSManagedDisplaySetCurrentSpace`
+/// path, which is broken on current macOS) it keeps the menu bar correct. Steps
+/// through Mission Control order from the active Space to `sid`. No-op if `sid`
+/// isn't on the focused display or is already active.
+pub fn switchToSpaceId(alloc: Allocator, cid: sl.ConnectionID, sid: u64) !void {
+    const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
+    defer alloc.free(order.spaces);
+    for (order.spaces, 0..) |sp, i| {
+        if (sp.id == sid) {
+            swipeToPos(order, i);
+            return;
+        }
+    }
 }
 
 /// The spaces on the focused display in Mission Control order, plus the position
@@ -103,6 +147,49 @@ pub fn switchNext(alloc: Allocator, cid: sl.ConnectionID) !void {
             return;
         }
     }
+}
+
+/// Reassign window `wid` to managed space `space_id` on macOS 26+ Tahoe via
+/// the bridged Obj-C path SkyLight requires: alloc
+/// `SLSBridgedMoveWindowsToManagedSpaceOperation`, init with the CFArray and
+/// target sid, then submit through `SLSPerformAsynchronousBridgedWindowManagementOperation`.
+/// Mirrors yabai's `space_manager_move_window_to_space`
+/// (koekeishiya/yabai, src/space_manager.c). Returns false if SkyLight isn't
+/// loaded or the bridged class is missing — there is no legacy fallback.
+pub fn moveWindowToSpace(wid: u32, space_id: u64) bool {
+    // CGWindowID is uint32_t; SkyLight's CFArray must hold Int32 CFNumbers —
+    // Int64 entries are silently dropped.
+    var id32: i32 = @bitCast(wid);
+    const num = c.CFNumberCreate(null, c.kCFNumberSInt32Type, &id32) orelse return false;
+    defer foundation.CFRelease(num);
+    var values = [_]?*const anyopaque{@ptrCast(num)};
+    const arr = c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks) orelse return false;
+    defer foundation.CFRelease(arr);
+
+    const perform = sl.slsPerformAsynchronousBridgedWindowManagementOperation() orelse return false;
+    const cls = objc.getClass("SLSBridgedMoveWindowsToManagedSpaceOperation") orelse return false;
+    const allocd = cls.msgSend(objc.Object, "alloc", .{});
+    if (allocd.value == null) return false;
+    const op = allocd.msgSend(objc.Object, "initWithWindows:spaceID:", .{ arr, space_id });
+    if (op.value == null) return false;
+    defer op.msgSend(void, "release", .{});
+    perform(op.value);
+    return true;
+}
+
+/// Resolve the SkyLight space id of the 1-based user-space `n` on the focused
+/// display (counting only `type == 0` Spaces). Null if `n` is out of range.
+pub fn userSpaceIdAt(alloc: Allocator, cid: sl.ConnectionID, n: usize) !?u64 {
+    if (n == 0) return null;
+    const order = (try focusedDisplayOrder(alloc, cid)) orelse return null;
+    defer alloc.free(order.spaces);
+    var seen: usize = 0;
+    for (order.spaces) |sp| {
+        if (sp.type != 0) continue;
+        seen += 1;
+        if (seen == n) return sp.id;
+    }
+    return null;
 }
 
 /// Switch to the previous user Space on the focused display (no wrap).

@@ -112,6 +112,14 @@ pub const Element = opaque {
         return self.setAttribute(name, @ptrCast(if (on) c.kCFBooleanTrue else c.kCFBooleanFalse));
     }
 
+    /// Read a boolean AX attribute (e.g. "AXEnabled"). Null if the attribute is
+    /// absent. Used by the dialog heuristic to test a button's enabled state.
+    pub fn getBool(self: *Element, name: []const u8) ?bool {
+        const v = self.copyAttribute(name) orelse return null;
+        defer foundation.CFRelease(v);
+        return c.CFBooleanGetValue(@ptrCast(v)) != 0;
+    }
+
     /// Perform a named AX action (e.g. "AXRaise"). Returns true on success.
     pub fn performAction(self: *Element, name: []const u8) bool {
         const a = String.createUtf8(name) catch return false;

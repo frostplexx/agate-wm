@@ -15,6 +15,7 @@
 //! `extern` symbols are only resolved by the linker when referenced, declaring
 //! one that doesn't exist on a given OS is harmless until you call it. If you'd
 //! rather fail soft at runtime, resolve them with `std.c.dlsym` instead.
+const std = @import("std");
 const c = @import("c.zig").c;
 const cg = @import("cg.zig");
 
@@ -93,6 +94,97 @@ pub extern fn SLSCopyWindowsWithOptionsAndTags(
 /// The managed-space ids a set of windows belong to. `mask` is a space-selector
 /// bitmask; 0xFFFF_FFFF_FFFF_FFFF means "all spaces". Caller owns the result.
 pub extern fn SLSCopySpacesForWindows(cid: ConnectionID, mask: u64, windows: c.CFArrayRef) c.CFArrayRef;
+
+/// Schedule a bridged window-management operation against the WindowServer.
+/// macOS 26+ Tahoe routes cross-space window reassignment through this entry
+/// point; pair with `SLSBridgedMoveWindowsToManagedSpaceOperation` (allocated
+/// via the Obj-C runtime, `initWithWindows:spaceID:`).
+///
+/// The real symbol is a C++ file-local (mangled `_ZL…`), so `dlsym` can't see
+/// it. We mirror yabai's trick (koekeishiya/yabai, src/misc/macho_dlsym.h) and
+/// walk SkyLight's `LC_SYMTAB` directly.
+pub const SLSPerformAsynchronousBridgedWindowManagementOperationFn = *const fn (op: ?*anyopaque) callconv(.c) void;
+pub fn slsPerformAsynchronousBridgedWindowManagementOperation() ?SLSPerformAsynchronousBridgedWindowManagementOperationFn {
+    const S = struct {
+        var resolved: bool = false;
+        var fp: ?SLSPerformAsynchronousBridgedWindowManagementOperationFn = null;
+    };
+    if (!S.resolved) {
+        S.resolved = true;
+        const mangled = "__ZL54SLSPerformAsynchronousBridgedWindowManagementOperationP47SLSAsynchronousBridgedWindowManagementOperation";
+        if (machoFindSkyLightSymbol(mangled)) |sym| {
+            S.fp = @ptrCast(@alignCast(sym));
+        }
+    }
+    return S.fp;
+}
+
+// --- Mach-O symbol-table walker (ported from yabai's macho_dlsym.h) ---------
+// `dlsym` only resolves externally-visible symbols. The one we need
+// (`__ZL54SLSPerformAsynchronousBridgedWindowManagementOperationP47…`) is a
+// C++ file-local inside SkyLight, so we have to read its `LC_SYMTAB` ourselves.
+
+const macho = std.macho;
+
+extern fn _dyld_image_count() u32;
+extern fn _dyld_get_image_name(image_index: u32) ?[*:0]const u8;
+extern fn _dyld_get_image_header(image_index: u32) ?*const macho.mach_header_64;
+extern fn _dyld_get_image_vmaddr_slide(image_index: u32) usize;
+
+/// The runtime address of `name` inside the loaded SkyLight image, or null if
+/// the framework isn't mapped or the symbol isn't present. Linear scan of every
+/// nlist_64 entry — fine because we only call it once at first use.
+fn machoFindSkyLightSymbol(name: []const u8) ?*anyopaque {
+    const target = "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight";
+    const image_count = _dyld_image_count();
+
+    var i: u32 = 0;
+    while (i < image_count) : (i += 1) {
+        const img_name_ptr = _dyld_get_image_name(i) orelse continue;
+        if (!std.mem.eql(u8, std.mem.span(img_name_ptr), target)) continue;
+
+        const header = _dyld_get_image_header(i) orelse return null;
+        const slide = _dyld_get_image_vmaddr_slide(i);
+
+        var linkedit: ?*const macho.segment_command_64 = null;
+        var symtab: ?*const macho.symtab_command = null;
+
+        var cmd_addr: usize = @intFromPtr(header) + @sizeOf(macho.mach_header_64);
+        var ci: u32 = 0;
+        while (ci < header.ncmds) : (ci += 1) {
+            const cmd: *const macho.load_command = @ptrFromInt(cmd_addr);
+            if (cmd.cmd == .SEGMENT_64) {
+                const seg: *const macho.segment_command_64 = @ptrFromInt(cmd_addr);
+                if (std.mem.eql(u8, std.mem.sliceTo(&seg.segname, 0), "__LINKEDIT")) {
+                    linkedit = seg;
+                }
+            } else if (cmd.cmd == .SYMTAB) {
+                symtab = @ptrFromInt(cmd_addr);
+            }
+            cmd_addr += cmd.cmdsize;
+        }
+
+        const le = linkedit orelse return null;
+        const st = symtab orelse return null;
+
+        // The __LINKEDIT segment maps the symbol/string tables; this is the
+        // standard "fileoff is the offset within __LINKEDIT" trick.
+        const base: usize = @as(usize, @intCast(le.vmaddr - le.fileoff)) + slide;
+        const strs: [*]const u8 = @ptrFromInt(base + st.stroff);
+        const syms: [*]const macho.nlist_64 = @ptrFromInt(base + st.symoff);
+
+        var s: u32 = 0;
+        while (s < st.nsyms) : (s += 1) {
+            const sym = syms[s];
+            const sname = std.mem.span(@as([*:0]const u8, @ptrCast(strs + sym.n_strx)));
+            if (std.mem.eql(u8, sname, name)) {
+                return @ptrFromInt(@as(usize, @intCast(sym.n_value)) + slide);
+            }
+        }
+        return null;
+    }
+    return null;
+}
 
 /// Build a query over an array of window ids, then iterate the result.
 pub extern fn SLSWindowQueryWindows(cid: ConnectionID, windows: c.CFArrayRef, count: c_int) c.CFTypeRef;

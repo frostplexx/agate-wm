@@ -25,3 +25,33 @@ pub fn mainVisibleFrame() ?Rect {
         .size = vis.size,
     };
 }
+
+// --- Display reconfiguration (clamshell, dock/undock, resolution change) ---
+//
+// CoreGraphics posts a reconfiguration callback whenever the display layout
+// changes: a display is added/removed (lid close in clamshell, plugging in an
+// external monitor), the main display moves, or a mode (resolution) changes.
+// The visible frame the WM tiles to changes with it, but no window event fires,
+// so without this hook the layout would keep using the *old* screen geometry
+// until the next create/destroy/drag. See `<CoreGraphics/CGDisplayConfiguration.h>`.
+
+pub const CGDirectDisplayID = u32;
+pub const CGDisplayChangeSummaryFlags = u32;
+
+/// Fired *before* the configuration changes — the new geometry is not valid yet,
+/// so callers should ignore this pass and act on the settled (no-begin) pass.
+pub const kCGDisplayBeginConfigurationFlag: CGDisplayChangeSummaryFlags = 1 << 0;
+
+pub const CGDisplayReconfigurationCallBack = *const fn (
+    display: CGDirectDisplayID,
+    flags: CGDisplayChangeSummaryFlags,
+    userInfo: ?*anyopaque,
+) callconv(.c) void;
+
+/// Register `callback` for display-layout changes. Returns a `CGError` (0 =
+/// success). The callback fires once per affected display, in two passes (a
+/// "begin" pass with `kCGDisplayBeginConfigurationFlag`, then a settled pass).
+pub extern fn CGDisplayRegisterReconfigurationCallback(
+    callback: CGDisplayReconfigurationCallBack,
+    userInfo: ?*anyopaque,
+) i32;

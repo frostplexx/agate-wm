@@ -152,6 +152,32 @@ pub fn hasWindow(con: *data.Con, wid: u64) bool {
     return false;
 }
 
+/// Detach `leaf` from its current parent and append it to `dst`. The window is
+/// preserved (no AX element release). Caller is responsible for relaying out
+/// either workspace as needed. Returns true if the move happened.
+pub fn moveLeafToWorkspace(alloc: Allocator, leaf: *data.Con, dst: *data.Con) bool {
+    const cur_parent = leaf.parent orelse return false;
+    if (cur_parent == dst) return false;
+    var idx: ?usize = null;
+    for (cur_parent.children.items, 0..) |child, i| {
+        if (child == leaf) {
+            idx = i;
+            break;
+        }
+    }
+    const i = idx orelse return false;
+    _ = cur_parent.children.orderedRemove(i);
+    leaf.parent = dst;
+    leaf.depth = dst.depth + 1;
+    dst.children.append(alloc, leaf) catch {
+        // Undo the detach so the tree stays consistent.
+        cur_parent.children.insert(alloc, i, leaf) catch {};
+        leaf.parent = cur_parent;
+        return false;
+    };
+    return true;
+}
+
 /// The Workspace Con for SkyLight space id `sid`, or null.
 pub fn findWorkspace(con: *data.Con, sid: u64) ?*data.Con {
     if (con.con_type == .Workspace and con.id == sid) return con;
@@ -166,6 +192,15 @@ pub fn findWorkspace(con: *data.Con, sid: u64) ?*data.Con {
 pub fn flushActive(appState: *state.AppState) void {
     const sid = macos.spaces.activeSpace(appState.skylight_cid) orelse return;
     const ws = findWorkspace(appState.tree orelse return, sid) orelse return;
+    const area = macos.display.mainVisibleFrame() orelse return;
+    layout.flushWorkspace(ws, area);
+}
+
+/// Lay out `ws` regardless of whether its Space is currently active. Used when
+/// we move a window into an inactive Space: AX setSize/setPosition on cached
+/// elements still applies even on Spaces the user isn't looking at, so the
+/// destination's tiling row is correct before they swipe over.
+pub fn flushWorkspace(ws: *data.Con) void {
     const area = macos.display.mainVisibleFrame() orelse return;
     layout.flushWorkspace(ws, area);
 }

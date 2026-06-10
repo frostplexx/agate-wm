@@ -19,7 +19,7 @@ const objc = @import("objc");
 
 /// What happened to an application. Explicit tag type so it can cross the C ABI
 /// (the callback is invoked with the C calling convention).
-pub const AppEvent = enum(c_int) { launched, terminated };
+pub const AppEvent = enum(c_int) { launched, terminated, activated };
 
 /// C-ABI callback invoked on the main run loop when an app launches or quits.
 /// `context` is the opaque pointer handed to `start`.
@@ -31,6 +31,9 @@ pub const Callback = *const fn (event: AppEvent, pid: i32, context: ?*anyopaque)
 // `NSWorkspaceApplicationKey`.
 extern const NSWorkspaceDidLaunchApplicationNotification: objc.c.id;
 extern const NSWorkspaceDidTerminateApplicationNotification: objc.c.id;
+/// Posted the instant an app is brought to the front (Cmd-Tab, dock click, or a
+/// programmatic activation). Used to follow activation to the window's Space.
+extern const NSWorkspaceDidActivateApplicationNotification: objc.c.id;
 extern const NSWorkspaceApplicationKey: objc.c.id;
 
 var g_callback: ?Callback = null;
@@ -48,6 +51,7 @@ pub fn start(callback: Callback, context: ?*anyopaque) void {
     const cls = objc.allocateClassPair(NSObject, "AgateAppWatch") orelse return;
     _ = cls.addMethod("onAppLaunched:", onAppLaunched);
     _ = cls.addMethod("onAppTerminated:", onAppTerminated);
+    _ = cls.addMethod("onAppActivated:", onAppActivated);
     objc.registerClassPair(cls);
 
     const observer = cls.msgSend(objc.Object, "alloc", .{}).msgSend(objc.Object, "init", .{});
@@ -68,6 +72,12 @@ pub fn start(callback: Callback, context: ?*anyopaque) void {
         NSWorkspaceDidTerminateApplicationNotification,
         @as(objc.c.id, null),
     });
+    center.msgSend(void, "addObserver:selector:name:object:", .{
+        observer.value,
+        objc.sel("onAppActivated:"),
+        NSWorkspaceDidActivateApplicationNotification,
+        @as(objc.c.id, null),
+    });
 }
 
 fn onAppLaunched(_: objc.c.id, _: objc.c.SEL, notification: objc.c.id) callconv(.c) void {
@@ -76,6 +86,10 @@ fn onAppLaunched(_: objc.c.id, _: objc.c.SEL, notification: objc.c.id) callconv(
 
 fn onAppTerminated(_: objc.c.id, _: objc.c.SEL, notification: objc.c.id) callconv(.c) void {
     dispatch(.terminated, notification);
+}
+
+fn onAppActivated(_: objc.c.id, _: objc.c.SEL, notification: objc.c.id) callconv(.c) void {
+    dispatch(.activated, notification);
 }
 
 /// Pull the `NSRunningApplication` out of the notification's userInfo, read its
