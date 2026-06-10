@@ -151,14 +151,16 @@ pub fn lua(alloc: std.mem.Allocator) []const u8 {
     return b.list.items;
 }
 
-/// `(p1, p2, ...)` for a function signature.
-fn signature(alloc: std.mem.Allocator, f: Func) []const u8 {
+/// `(p1, p2, ...)` for a function signature. When `mark_optional` is set, an
+/// optional param shows a trailing `?` (doc convention) — but a real Lua
+/// `function` definition must use bare names, so the Lua emitter passes false.
+fn signature(alloc: std.mem.Allocator, f: Func, mark_optional: bool) []const u8 {
     var sig: std.ArrayList(u8) = .empty;
     sig.append(alloc, '(') catch {};
     for (f.params, 0..) |p, i| {
         if (i != 0) sig.appendSlice(alloc, ", ") catch {};
         sig.appendSlice(alloc, p.name) catch {};
-        if (p.optional) sig.append(alloc, '?') catch {};
+        if (mark_optional and p.optional) sig.append(alloc, '?') catch {};
     }
     sig.append(alloc, ')') catch {};
     return sig.items;
@@ -179,7 +181,7 @@ fn emitMarkdown(b: *Buf) void {
 
     b.w("## API\n\n", .{});
     for (funcs) |f| {
-        b.w("### `agate.{s}{s}`\n\n", .{ f.name, signature(b.alloc, f) });
+        b.w("### `agate.{s}{s}`\n\n", .{ f.name, signature(b.alloc, f, true) });
         b.w("{s}\n\n", .{f.doc});
         if (f.params.len != 0) {
             for (f.params) |p| {
@@ -233,7 +235,7 @@ fn emitLua(b: *Buf) void {
             b.w("---@param {s}{s} {s} {s}\n", .{ p.name, opt, p.ty, p.doc });
         }
         if (f.ret) |r| b.w("---@return {s}\n", .{r});
-        b.w("function agate.{s}{s} end\n\n", .{ f.name, signature(b.alloc, f) });
+        b.w("function agate.{s}{s} end\n\n", .{ f.name, signature(b.alloc, f, false) });
     }
 
     b.w("return agate\n", .{});

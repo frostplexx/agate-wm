@@ -47,7 +47,7 @@ function agate.layout(mode) end
 ---Resize the focused tile, transferring the delta to its neighbour.
 ---@param dir agate.Direction Edge to grow toward.
 ---@param amount? number Pixels to resize by. Default 50.
-function agate.resize(dir, amount?) end
+function agate.resize(dir, amount) end
 
 ---Swap the focused window with its neighbour in a direction. Works across nested containers.
 ---@param dir agate.Direction Direction to move the window.
@@ -56,7 +56,7 @@ function agate.move(dir) end
 ---Combine the focused window with its neighbour into a nested container, for mixed layouts (e.g. a row whose one slot is a stack of two windows).
 ---@param dir agate.Direction Neighbour to combine with.
 ---@param mode? agate.Layout Layout of the new container. Default `v_stack`.
-function agate.join(dir, mode?) end
+function agate.join(dir, mode) end
 
 ---Switch to user space N on the focused display.
 ---@param n integer 1-based user-space index on the focused display.

@@ -41,7 +41,7 @@ Set the focused container's layout (the focused window's parent), falling back t
 
 - `mode` (`agate.Layout`) — Layout mode to apply.
 
-### `agate.resize(dir, amount?)`
+### `agate.resize(dir, amount)`
 
 Resize the focused tile, transferring the delta to its neighbour.
 
@@ -54,7 +54,7 @@ Swap the focused window with its neighbour in a direction. Works across nested c
 
 - `dir` (`agate.Direction`) — Direction to move the window.
 
-### `agate.join(dir, mode?)`
+### `agate.join(dir, mode)`
 
 Combine the focused window with its neighbour into a nested container, for mixed layouts (e.g. a row whose one slot is a stack of two windows).
 
