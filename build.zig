@@ -61,6 +61,22 @@ pub fn build(b: *std.Build) !void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+
+    // `zig build docs` — regenerate the settings reference and the Lua type stub
+    // from tools/gen_docs.zig, writing them back into the source tree. The
+    // generator is a plain module (std only); we call it at configure time to
+    // render the strings, stage them with WriteFiles, then copy into the source.
+    const gen_docs = @import("tools/gen_docs.zig");
+    const staged = b.addWriteFiles();
+    const md = staged.add("configuration.md", gen_docs.markdown(b.allocator));
+    const lua_types = staged.add("agate.lua", gen_docs.lua(b.allocator));
+
+    const write_docs = b.addUpdateSourceFiles();
+    write_docs.addCopyFileToSource(md, "docs/configuration.md");
+    write_docs.addCopyFileToSource(lua_types, "types/agate.lua");
+
+    const docs_step = b.step("docs", "Generate settings docs and Lua type defs");
+    docs_step.dependOn(&write_docs.step);
 }
 
 /// Link every macOS framework agate needs and point the module at the SDK.
