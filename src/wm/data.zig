@@ -24,6 +24,9 @@ pub const gaps = struct {
     bottom: u32,
     left: u32,
     right: u32,
+    /// Accordion/stack "peek": how far each stacked window is fanned past the one
+    /// in front so its trailing edge stays visible (AeroSpace's accordion-padding).
+    accordion: u32 = 40,
 };
 
 

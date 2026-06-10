@@ -4,8 +4,9 @@
 
 -- Gaps and hyper-key definition.
 agate.config({
-    gaps = 8,       -- space between tiles
-    outer_gaps = 8, -- inset from the screen edge
+    gaps = 8,              -- space between tiles
+    outer_gaps = 8,        -- inset from the screen edge
+    accordion_padding = 40, -- stacked-window "peek": how far each window fans out
     -- "hyper" expands to this modifier set in keyspecs below.
     hyper = { "ctrl", "alt", "cmd" },
 })
@@ -23,8 +24,11 @@ agate.bind("hyper+shift+k", "move up")
 agate.bind("hyper+shift+l", "move right")
 
 -- Layout control.
-agate.bind("hyper+b", function() agate.layout("h_tiles") end) -- horizontal split
-agate.bind("hyper+v", function() agate.layout("v_tiles") end) -- vertical split
+agate.bind("hyper+b", function() agate.layout("h_tiles") end)      -- horizontal split
+agate.bind("hyper+v", function() agate.layout("v_tiles") end)      -- vertical split
+agate.bind("hyper+e", function() agate.layout("toggle") end)       -- swap split orientation
+agate.bind("hyper+s", function() agate.layout("accordion") end)    -- vertical stack (bottom peeks)
+agate.bind("hyper+shift+s", function() agate.layout("h_stack") end) -- horizontal stack
 
 -- Resize the focused tile.
 agate.bind("hyper+minus", function() agate.resize("left", 50) end)

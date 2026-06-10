@@ -33,6 +33,9 @@ pub const Config = struct {
     alloc: std.mem.Allocator,
     gaps: f64,
     outer_gaps: f64,
+    /// Accordion/stack peek inset (px): how far each stacked window is fanned
+    /// past the one in front. See `data.gaps.accordion`.
+    accordion_padding: f64,
     /// CGEventFlag mask for the "hyper" macro key.
     hyper_mods: u64,
     /// Virtual keycode of a physical key whose held state means "hyper". Needed
@@ -131,6 +134,14 @@ fn agateConfig(lua: *Lua) i32 {
     _ = lua.getField(1, "outer_gaps");
     if (lua.isNumber(-1)) cfg.outer_gaps = lua.toNumber(-1) catch cfg.outer_gaps;
     lua.pop(1);
+    // accordion_padding (accept "accordion_padding" or "accordion")
+    _ = lua.getField(1, "accordion_padding");
+    if (lua.isNil(-1)) {
+        lua.pop(1);
+        _ = lua.getField(1, "accordion");
+    }
+    if (lua.isNumber(-1)) cfg.accordion_padding = lua.toNumber(-1) catch cfg.accordion_padding;
+    lua.pop(1);
     // hyper: array of modifier strings {"ctrl","alt","cmd","shift"}
     _ = lua.getField(1, "hyper");
     if (lua.isTable(-1)) {
@@ -160,19 +171,20 @@ fn agateConfig(lua: *Lua) i32 {
     }
     lua.pop(1);
     // Apply gaps to every workspace in the tree
-    if (g_appstate) |app| if (app.tree) |root| applyGapsToTree(root, cfg.gaps, cfg.outer_gaps);
+    if (g_appstate) |app| if (app.tree) |root| applyGapsToTree(root, cfg.gaps, cfg.outer_gaps, cfg.accordion_padding);
     return 0;
 }
 
-fn applyGapsToTree(con: *data.Con, gaps: f64, outer_gaps: f64) void {
+fn applyGapsToTree(con: *data.Con, gaps: f64, outer_gaps: f64, accordion: f64) void {
     if (con.con_type == .Workspace) {
         con.gaps = .{
             .inner = @intFromFloat(@max(0, gaps)),
             .outer = @intFromFloat(@max(0, outer_gaps)),
             .top = 0, .bottom = 0, .left = 0, .right = 0,
+            .accordion = @intFromFloat(@max(0, accordion)),
         };
     }
-    for (con.children.items) |child| applyGapsToTree(child, gaps, outer_gaps);
+    for (con.children.items) |child| applyGapsToTree(child, gaps, outer_gaps, accordion);
 }
 
 fn agateBind(lua: *Lua) i32 {
@@ -216,17 +228,38 @@ fn agateFocus(lua: *Lua) i32 {
 fn agateLayout(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const name_z = lua.toString(1) catch return 0;
-    const name = std.mem.sliceTo(name_z, 0);
-    const layout: data.layouts = if (std.mem.eql(u8, name, "h_tiles") or std.mem.eql(u8, name, "h_split"))
-        .H_SPLIT
-    else if (std.mem.eql(u8, name, "v_tiles") or std.mem.eql(u8, name, "v_split"))
-        .V_SPLIT
-    else return 0;
-    const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return 0;
-    const ws = tree.findWorkspace(app.tree orelse return 0, sid) orelse return 0;
-    ws.layout = layout;
-    tree.flushActive(app);
+    setActiveLayout(app, std.mem.sliceTo(name_z, 0));
     return 0;
+}
+
+/// Map a layout name to a tiling mode. Accepts AeroSpace-ish synonyms.
+/// "toggle" is handled by `setActiveLayout` (it needs the current layout).
+fn layoutFromName(name: []const u8) ?data.layouts {
+    const eql = std.mem.eql;
+    if (eql(u8, name, "h_tiles") or eql(u8, name, "h_split") or eql(u8, name, "horizontal")) return .H_SPLIT;
+    if (eql(u8, name, "v_tiles") or eql(u8, name, "v_split") or eql(u8, name, "vertical")) return .V_SPLIT;
+    if (eql(u8, name, "h_stack") or eql(u8, name, "h_accordion")) return .H_STACK;
+    if (eql(u8, name, "v_stack") or eql(u8, name, "v_accordion") or
+        eql(u8, name, "accordion") or eql(u8, name, "stacking") or eql(u8, name, "stacked")) return .V_STACK;
+    if (eql(u8, name, "float") or eql(u8, name, "floating")) return .FLOAT;
+    return null;
+}
+
+/// Set the active workspace's layout by name and re-tile. "toggle" flips the
+/// split orientation (H_SPLIT ↔ V_SPLIT); anything else maps via `layoutFromName`.
+fn setActiveLayout(app: *state.AppState, name: []const u8) void {
+    const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
+    const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
+    if (std.mem.eql(u8, name, "toggle")) {
+        ws.layout = switch (ws.layout) {
+            .H_SPLIT => .V_SPLIT,
+            .V_SPLIT => .H_SPLIT,
+            else => .H_SPLIT, // from a stack/float, toggle returns to horizontal tiling
+        };
+    } else {
+        ws.layout = layoutFromName(name) orelse return;
+    }
+    tree.flushActive(app);
 }
 
 fn agateSpace(lua: *Lua) i32 {
@@ -328,6 +361,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .alloc = gpa,
         .gaps = 8,
         .outer_gaps = 8,
+        .accordion_padding = 40,
         .hyper_mods = MOD_CTRL | MOD_ALT | MOD_CMD | MOD_SHIFT,
         .hyper_key = 79, // kVK_F18 — common remapped-hyper trigger
         .bindings = .empty,
@@ -441,16 +475,7 @@ fn executeCommand(cmd: []const u8) void {
         const dir = parseDir(cmd[6..]) orelse return;
         _ = focus.focusDirection(app, dir);
     } else if (std.mem.startsWith(u8, cmd, "layout ")) {
-        const name = cmd[7..];
-        const layout: data.layouts = if (std.mem.eql(u8, name, "h_tiles") or std.mem.eql(u8, name, "h_split"))
-            .H_SPLIT
-        else if (std.mem.eql(u8, name, "v_tiles") or std.mem.eql(u8, name, "v_split"))
-            .V_SPLIT
-        else return;
-        const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
-        const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
-        ws.layout = layout;
-        tree.flushActive(app);
+        setActiveLayout(app, cmd[7..]);
     } else if (std.mem.startsWith(u8, cmd, "space ")) {
         const n = std.fmt.parseInt(usize, cmd[6..], 10) catch return;
         macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};

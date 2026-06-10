@@ -8,7 +8,7 @@ const state = @import("../state.zig");
 const Allocator = std.mem.Allocator;
 
 /// Default gaps applied to each workspace until config exists.
-const default_gaps: data.gaps = .{ .inner = 10, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0 };
+const default_gaps: data.gaps = .{ .inner = 10, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0, .accordion = 40 };
 
 /// Allocate and initialize a single Con node.
 fn makeCon(alloc: Allocator, con_type: data.Con.Type, parent: ?*data.Con, depth: u32, id: u64) !*data.Con {

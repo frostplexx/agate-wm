@@ -29,8 +29,17 @@ fn layoutChildren(con: *data.Con, area: Rect) void {
     const n = con.children.items.len;
     if (n == 0) return;
 
+    switch (con.layout) {
+        .H_STACK, .V_STACK => return layoutStack(con, area),
+        // FLOAT: leave each window filling the area (no real float model yet).
+        .FLOAT => {
+            for (con.children.items) |child| place(child, area);
+            return;
+        },
+        .H_SPLIT, .V_SPLIT => {},
+    }
+
     const horizontal = con.layout == .H_SPLIT;
-    const stacked = con.layout == .H_STACK or con.layout == .V_STACK or con.layout == .FLOAT;
     const gap: f64 = @floatFromInt(con.gaps.inner);
 
     var total_ratio: f64 = 0;
@@ -42,10 +51,6 @@ fn layoutChildren(con: *data.Con, area: Rect) void {
 
     var offset = if (horizontal) area.origin.x else area.origin.y;
     for (con.children.items) |child| {
-        if (stacked) {
-            place(child, area); // stacks/float: every child fills the area for now
-            continue;
-        }
         const extent = avail_main * (child.ratio / total_ratio);
         const rect: Rect = if (horizontal) .{
             .origin = .{ .x = offset, .y = area.origin.y },
@@ -56,6 +61,37 @@ fn layoutChildren(con: *data.Con, area: Rect) void {
         };
         place(child, rect);
         offset += extent + gap;
+    }
+}
+
+/// Accordion / stacked layout (AeroSpace-style): the children overlap, fanned by
+/// a fixed `accordion_peek` so each one's trailing edge shows past the one in
+/// front of it. `H_STACK` fans horizontally (right edges peek); `V_STACK` fans
+/// vertically (bottom edges peek). All windows share one size — the area shrunk
+/// by the total fan span — so none leave the area; the focused window is brought
+/// to the front by the focus engine (`AXRaise`), so it shows fully while the
+/// rest peek. The fan step is clamped so it never consumes more than half the
+/// area, keeping windows usable when the stack is deep.
+fn layoutStack(con: *data.Con, area: Rect) void {
+    const n = con.children.items.len;
+    const horizontal = con.layout == .H_STACK;
+    const nf: f64 = @floatFromInt(n);
+
+    const peek: f64 = @floatFromInt(con.gaps.accordion);
+    const main = if (horizontal) area.size.width else area.size.height;
+    const step: f64 = if (n > 1) @min(peek, (main * 0.5) / (nf - 1)) else 0;
+    const span = step * (nf - 1);
+
+    for (con.children.items, 0..) |child, i| {
+        const off = step * @as(f64, @floatFromInt(i));
+        const rect: Rect = if (horizontal) .{
+            .origin = .{ .x = area.origin.x + off, .y = area.origin.y },
+            .size = .{ .width = area.size.width - span, .height = area.size.height },
+        } else .{
+            .origin = .{ .x = area.origin.x, .y = area.origin.y + off },
+            .size = .{ .width = area.size.width, .height = area.size.height - span },
+        };
+        place(child, rect);
     }
 }
 
