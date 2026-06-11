@@ -353,8 +353,8 @@ fn postPhase(phase: GesturePhase, dir: SwipeDirection, progress: f64, vel_x: f64
 pub fn performSwitchGesture(dir: SwipeDirection) void {
     // Tiny progress means no visible drag — the high velocity on `ended` lets
     // the recognizer snap straight to the adjacent space (yabai #2781).
-    const tiny: f64 = std.math.floatTrueMin(f32);
-    const progress: f64 = if (dir == .right) tiny else -tiny;
+    const espilon: f64 = std.math.floatTrueMin(f32);
+    const progress: f64 = if (dir == .right) espilon else -espilon;
     const sign: f64 = if (dir == .right) 1.0 else -1.0;
     postPhase(.began, dir, progress, 0.0);
     postPhase(.ended, dir, progress, sign * 9999.0);
