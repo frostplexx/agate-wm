@@ -14,6 +14,15 @@ All configuration is Lua, loaded from `$WM_CONFIG`, `$XDG_CONFIG_HOME/agate/init
 | `hyper` | `string[]` | `{"ctrl","alt","cmd","shift"}` | Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. |
 | `hyper_key` | `string` | `"f18"` | Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables. |
 
+## `agate.rule{}` fields
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `app` | `string` | POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`. _(optional)_ |
+| `title` | `string` | POSIX extended regex matched against the window title. _(optional)_ |
+| `space` | `integer` | 1-based user-space index matched windows are sent to. Required. |
+| `follow` | `boolean` | Switch to that space along with the window (default `true`). Set `false` to route the window in the background. _(optional)_ |
+
 ## API
 
 ### `agate.config(config)`
@@ -81,6 +90,12 @@ Send the focused window to user space N (does not follow focus).
 
 - `n` (`integer`) — 1-based user-space index to send the window to.
 
+### `agate.rule(rule)`
+
+Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space when they appear. At least one of `app`/`title` is required; both must match when both are given. When several rules match a window, the last registered one wins.
+
+- `rule` (`agate.Rule`) — Rule table (see agate.Rule).
+
 ## Commands
 
 Strings passed as the second argument of `agate.bind` instead of a function:
@@ -124,4 +139,6 @@ agate.bind("hyper+l", function() agate.focus("right") end)
 agate.bind("hyper+shift+l", "move right")
 agate.bind("hyper+s", function() agate.layout("accordion") end)
 agate.bind("hyper+g", function() agate.join("right") end)
+agate.rule({ app = "^Music$", space = 5 })
+agate.rule({ app = "^Firefox$", title = "Library", space = 2, follow = false })
 ```

@@ -81,8 +81,25 @@ fn graceTimerFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void 
 /// therefore which left neighbour — a closed window vacated.
 fn childIndex(parent: ?*data.Con, child: *data.Con) usize {
     const p = parent orelse return 0;
-    for (p.children.items, 0..) |c2, i| if (c2 == child) return i;
-    return 0;
+    return tree.childIndexOf(p, child) orelse 0;
+}
+
+/// Schedule a one-shot CFRunLoopTimer on the current run loop, firing `delay`
+/// seconds from now in `mode`, passing `info` to `cb`. Returns false if the
+/// timer couldn't be created — the caller still owns `info` and must free it.
+/// Replaces the CFRunLoopTimerContext boilerplate every deferred action needs.
+fn scheduleOneShot(delay: f64, mode: c.CFStringRef, info: ?*anyopaque, cb: c.CFRunLoopTimerCallBack) bool {
+    var timer_ctx = c.CFRunLoopTimerContext{
+        .version = 0,
+        .info = info,
+        .retain = null,
+        .release = null,
+        .copyDescription = null,
+    };
+    const timer = c.CFRunLoopTimerCreate(null, c.CFAbsoluteTimeGetCurrent() + delay, 0, 0, 0, cb, &timer_ctx) orelse return false;
+    c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), timer, mode);
+    c.CFRelease(timer);
+    return true;
 }
 
 const Manager = struct {
@@ -124,6 +141,10 @@ var g_last_activation_input: f64 = 0;
 const kVK_Tab: u16 = 48;
 /// How long after a Cmd-Tab / click an activation still counts as user-driven.
 const activation_follow_window_s: f64 = 1.5;
+/// How long after a rule routes a window its app's activation must not follow
+/// it (the launch activation can land seconds after the window appears for a
+/// slow-starting app; a deliberate Cmd-Tab after this window follows normally).
+const rule_follow_suppress_s: f64 = 3.0;
 
 /// Set up create/destroy observers for every app that currently owns a managed
 /// window, then run the loop. Blocks until the run loop stops.
@@ -323,19 +344,8 @@ fn scheduleKeyAction(code: u16, flags: u64) void {
     const mgr = g_manager orelse return;
     const ctx = mgr.appState.gpa.create(KeyAction) catch return;
     ctx.* = .{ .code = code, .flags = flags };
-    var timer_ctx = c.CFRunLoopTimerContext{
-        .version = 0,
-        .info = ctx,
-        .retain = null,
-        .release = null,
-        .copyDescription = null,
-    };
-    // Fire immediately (next loop pass); interval 0 = one-shot.
-    const timer = c.CFRunLoopTimerCreate(null, c.CFAbsoluteTimeGetCurrent(), 0, 0, 0, keyActionFired, &timer_ctx);
-    if (timer) |t| {
-        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopCommonModes);
-        c.CFRelease(t);
-    } else {
+    // Fire immediately (next loop pass).
+    if (!scheduleOneShot(0, c.kCFRunLoopCommonModes, ctx, keyActionFired)) {
         mgr.appState.gpa.destroy(ctx);
     }
 }
@@ -666,6 +676,20 @@ fn shouldTile(el: *macos.Element, app: []const u8) bool {
     return hasEnabledButton(el, "AXFullScreenButton");
 }
 
+/// Run the user's assignment rules (`agate.rule`) on a newly tracked window:
+/// a match sends it to the rule's Space and re-homes its leaf (the rule logic
+/// lives in the config layer). The window's title is read here, at detection
+/// time, since rules can match on it. Callers re-flush the active space after.
+fn applyAssignmentRules(app: *state.AppState, leaf: *data.Con, el: *macos.Element) void {
+    var tbuf: [256]u8 = undefined;
+    var title: []const u8 = "";
+    if (el.copyString("AXTitle")) |t| {
+        defer t.release();
+        if (t.cstring(&tbuf)) |s| title = s;
+    }
+    lua_config.applyRulesToLeaf(app, leaf, title);
+}
+
 /// The Workspace Con for the Space window `wid` currently lives on, via
 /// `macos.spaces.spaceForWindow`. Null if the window has no resolvable space yet.
 fn workspaceForWindow(mgr: *Manager, wid: u32) ?*data.Con {
@@ -717,6 +741,7 @@ fn addApplicationWindows(mgr: *Manager, pid: i32, observer: ax.AXObserverRef) vo
         };
         if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
         std.debug.print("[observer] +window #{d} {s} (launch)\n", .{ wid, win.owner });
+        applyAssignmentRules(app, leaf, el);
         changed = true;
     }
     if (changed) tree.flushActive(app);
@@ -774,19 +799,7 @@ fn observeAndAddWindows(mgr: *Manager, pid: i32, attempt: u32) void {
 
     const ctx = mgr.appState.gpa.create(ObserveRetry) catch return;
     ctx.* = .{ .mgr = mgr, .pid = pid, .attempt = attempt + 1 };
-    var timer_ctx = c.CFRunLoopTimerContext{
-        .version = 0,
-        .info = ctx,
-        .retain = null,
-        .release = null,
-        .copyDescription = null,
-    };
-    const fire_at = c.CFAbsoluteTimeGetCurrent() + observe_retry_delay;
-    const timer = c.CFRunLoopTimerCreate(null, fire_at, 0, 0, 0, observeRetryFired, &timer_ctx);
-    if (timer) |t| {
-        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopDefaultMode);
-        c.CFRelease(t);
-    } else {
+    if (!scheduleOneShot(observe_retry_delay, c.kCFRunLoopDefaultMode, ctx, observeRetryFired)) {
         mgr.appState.gpa.destroy(ctx);
     }
 }
@@ -845,18 +858,7 @@ fn scheduleActivationFollow(pid: i32) void {
     const mgr = g_manager orelse return;
     const ctx = mgr.appState.gpa.create(ActivationFollow) catch return;
     ctx.* = .{ .pid = pid };
-    var timer_ctx = c.CFRunLoopTimerContext{
-        .version = 0,
-        .info = ctx,
-        .retain = null,
-        .release = null,
-        .copyDescription = null,
-    };
-    const timer = c.CFRunLoopTimerCreate(null, c.CFAbsoluteTimeGetCurrent(), 0, 0, 0, activationFollowFired, &timer_ctx);
-    if (timer) |t| {
-        c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopCommonModes);
-        c.CFRelease(t);
-    } else {
+    if (!scheduleOneShot(0, c.kCFRunLoopCommonModes, ctx, activationFollowFired)) {
         mgr.appState.gpa.destroy(ctx);
     }
 }
@@ -880,6 +882,18 @@ fn followActivation(mgr: *Manager, pid: i32) void {
     const focused = app_el.copyElement("AXFocusedWindow") orelse return;
     defer focused.release();
     const wid = focused.windowId() orelse return;
+
+    // An assignment rule just sent this window to its Space; the activation
+    // we're handling is the app's own launch activation, not the user asking to
+    // go there. The rule already handled the user's view (its own follow switch,
+    // or staying put for `follow = false`), so following here would only add a
+    // duplicate/unwanted switch. Time-bounded so a later Cmd-Tab still follows.
+    if (app.rule_moved) |rm| {
+        if (rm.wid == wid and c.CFAbsoluteTimeGetCurrent() - rm.at < rule_follow_suppress_s) {
+            app.rule_moved = null;
+            return;
+        }
+    }
 
     // Mask 0x7 returns the window's space only when it's *not* the visible one
     // (null here) — that null is the "nothing to follow" signal. The wide ~0
@@ -953,6 +967,7 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
 
     // `fromElement` already cached the AX element, so this just returns it.
     if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
+    applyAssignmentRules(app, leaf, el);
     tree.flushActive(app);
 }
 
@@ -1023,20 +1038,7 @@ fn onWindowDestroyed(mgr: *Manager, observer: ax.AXObserverRef, wid: u32) void {
             return;
         };
         ctx.* = .{ .mgr = mgr, .observer = observer, .wid = wid, .pid = pid, .frame = frame };
-        var timer_ctx = c.CFRunLoopTimerContext{
-            .version = 0,
-            .info = ctx,
-            .retain = null,
-            .release = null,
-            .copyDescription = null,
-        };
-        const fire_at = c.CFAbsoluteTimeGetCurrent() + 0.30;
-        const timer = c.CFRunLoopTimerCreate(null, fire_at, 0, 0, 0, graceTimerFired, &timer_ctx);
-        if (timer) |t| {
-            c.CFRunLoopAddTimer(c.CFRunLoopGetCurrent(), t, c.kCFRunLoopDefaultMode);
-            c.CFRelease(t);
-            return;
-        }
+        if (scheduleOneShot(0.30, c.kCFRunLoopDefaultMode, ctx, graceTimerFired)) return;
         app.gpa.destroy(ctx);
     }
 

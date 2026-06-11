@@ -8,7 +8,7 @@ const state = @import("../state.zig");
 const Allocator = std.mem.Allocator;
 
 /// Default gaps applied to each workspace until config exists.
-const default_gaps: data.gaps = .{ .inner = 10, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0, .accordion = 40 };
+const default_gaps: data.Gaps = .{ .inner = 10, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0, .accordion = 40 };
 
 /// Allocate and initialize a single Con node.
 fn makeCon(alloc: Allocator, con_type: data.Con.Type, parent: ?*data.Con, depth: u32, id: u64) !*data.Con {
@@ -149,13 +149,24 @@ pub fn removeWindowsForPid(con: *data.Con, pid: i32) bool {
 
 /// Whether a leaf for window `wid` already exists under `con`.
 pub fn hasWindow(con: *data.Con, wid: u64) bool {
-    for (con.children.items) |child| {
-        if (child.con_type == .Container) {
-            if (child.window) |w| if (w.id == wid) return true;
-        }
-        if (hasWindow(child, wid)) return true;
+    return findLeaf(con, wid) != null;
+}
+
+/// The index of `child` within `parent`'s children, or null if absent.
+pub fn childIndexOf(parent: *data.Con, child: *data.Con) ?usize {
+    for (parent.children.items, 0..) |c, i| if (c == child) return i;
+    return null;
+}
+
+/// The sibling adjacent to `con` in its parent's children — the next one if
+/// `forward`, else the previous — or null at the edge / for a parentless Con.
+pub fn adjacentSibling(con: *data.Con, forward: bool) ?*data.Con {
+    const parent = con.parent orelse return null;
+    const i = childIndexOf(parent, con) orelse return null;
+    if (forward) {
+        return if (i + 1 < parent.children.items.len) parent.children.items[i + 1] else null;
     }
-    return false;
+    return if (i > 0) parent.children.items[i - 1] else null;
 }
 
 /// Detach `leaf` from its current parent and append it to `dst`. The window is
@@ -164,14 +175,7 @@ pub fn hasWindow(con: *data.Con, wid: u64) bool {
 pub fn moveLeafToWorkspace(alloc: Allocator, leaf: *data.Con, dst: *data.Con) bool {
     const cur_parent = leaf.parent orelse return false;
     if (cur_parent == dst) return false;
-    var idx: ?usize = null;
-    for (cur_parent.children.items, 0..) |child, i| {
-        if (child == leaf) {
-            idx = i;
-            break;
-        }
-    }
-    const i = idx orelse return false;
+    const i = childIndexOf(cur_parent, leaf) orelse return false;
     _ = cur_parent.children.orderedRemove(i);
     leaf.parent = dst;
     leaf.depth = dst.depth + 1;
@@ -181,6 +185,8 @@ pub fn moveLeafToWorkspace(alloc: Allocator, leaf: *data.Con, dst: *data.Con) bo
         leaf.parent = cur_parent;
         return false;
     };
+    // A nested source container may now hold a single child — flatten it.
+    collapseIfDegenerate(cur_parent);
     return true;
 }
 
@@ -242,24 +248,6 @@ pub fn findLeaf(con: *data.Con, wid: u64) ?*data.Con {
     return null;
 }
 
-/// The previous / next sibling Con in the parent's children slice, or null.
-fn prevSibling(con: *data.Con) ?*data.Con {
-    const parent = con.parent orelse return null;
-    for (parent.children.items, 0..) |child, i| {
-        if (child == con) return if (i > 0) parent.children.items[i - 1] else null;
-    }
-    return null;
-}
-fn nextSibling(con: *data.Con) ?*data.Con {
-    const parent = con.parent orelse return null;
-    for (parent.children.items, 0..) |child, i| {
-        if (child == con) {
-            return if (i + 1 < parent.children.items.len) parent.children.items[i + 1] else null;
-        }
-    }
-    return null;
-}
-
 /// Combine `leaf` with its adjacent sibling (the next one if `forward`, else the
 /// previous) into a new nested split container with `layout`. This is how a
 /// workspace gets a *mixed* layout: e.g. an H_SPLIT row whose left slot is a
@@ -267,16 +255,12 @@ fn nextSibling(con: *data.Con) ?*data.Con {
 /// (so on-screen order is preserved) and their combined ratio; both windows are
 /// reparented under it with equal weight. Returns the new container, or null if
 /// there's no neighbour to join.
-pub fn joinWithNeighbor(alloc: Allocator, leaf: *data.Con, forward: bool, mode: data.layouts) ?*data.Con {
+pub fn joinWithNeighbor(alloc: Allocator, leaf: *data.Con, forward: bool, mode: data.Layout) ?*data.Con {
     const parent = leaf.parent orelse return null;
-    const nb = (if (forward) nextSibling(leaf) else prevSibling(leaf)) orelse return null;
+    const nb = adjacentSibling(leaf, forward) orelse return null;
 
-    var li: usize = 0;
-    var ni: usize = 0;
-    for (parent.children.items, 0..) |c, i| {
-        if (c == leaf) li = i;
-        if (c == nb) ni = i;
-    }
+    const li = childIndexOf(parent, leaf) orelse return null;
+    const ni = childIndexOf(parent, nb) orelse return null;
     const lo = @min(li, ni);
     const hi = @max(li, ni);
 
@@ -313,14 +297,7 @@ fn collapseIfDegenerate(con: *data.Con) void {
     if (con.con_type != .Container or con.window != null) return; // leaf / non-split
     if (con.children.items.len >= 2) return;
 
-    var idx: usize = 0;
-    var found = false;
-    for (parent.children.items, 0..) |c, i| if (c == con) {
-        idx = i;
-        found = true;
-        break;
-    };
-    if (!found) return;
+    const idx = childIndexOf(parent, con) orelse return;
 
     if (con.children.items.len == 1) {
         const only = con.children.items[0];
@@ -364,7 +341,7 @@ pub fn applyManualResize(leaf: *data.Con, frame: macos.window_list.Rect) bool {
     const delta = new_main - old_main;
     if (@abs(delta) < eps) return false; // no meaningful main-axis change
 
-    const neighbor = (if (leading_moved) prevSibling(leaf) else nextSibling(leaf)) orelse return false;
+    const neighbor = adjacentSibling(leaf, !leading_moved) orelse return false;
 
     // Pin every sibling's ratio to its current main extent so the weights share
     // the same (point) units, then move `delta` from the neighbour to the leaf.
@@ -419,16 +396,10 @@ pub fn applyManualMove(leaf: *data.Con, frame: macos.window_list.Rect) bool {
 /// so the windows swap size as well as place. Returns true if a swap happened.
 pub fn swapLeaf(leaf: *data.Con, forward: bool) bool {
     const parent = leaf.parent orelse return false;
-    const target = (if (forward) nextSibling(leaf) else prevSibling(leaf)) orelse return false;
+    const target = adjacentSibling(leaf, forward) orelse return false;
 
-    var li: ?usize = null;
-    var ti: ?usize = null;
-    for (parent.children.items, 0..) |c, i| {
-        if (c == leaf) li = i;
-        if (c == target) ti = i;
-    }
-    const a = li orelse return false;
-    const b = ti orelse return false;
+    const a = childIndexOf(parent, leaf) orelse return false;
+    const b = childIndexOf(parent, target) orelse return false;
     parent.children.items[a] = target;
     parent.children.items[b] = leaf;
     return true;
@@ -442,12 +413,266 @@ pub fn resizeLeaf(leaf: *data.Con, grow: bool, delta: f64) bool {
     const parent = leaf.parent orelse return false;
     if (parent.layout != .H_SPLIT and parent.layout != .V_SPLIT) return false;
     const horizontal = parent.layout == .H_SPLIT;
-    const nb = if (grow) nextSibling(leaf) else prevSibling(leaf);
-    const neighbor = nb orelse return false;
+    const neighbor = adjacentSibling(leaf, grow) orelse return false;
     const win = leaf.window orelse return false;
     pinExtents(parent, horizontal);
     const cur = if (horizontal) win.bounds.size.width else win.bounds.size.height;
     leaf.ratio = @max(cur + delta, min_extent);
     neighbor.ratio = @max(neighbor.ratio - delta, min_extent);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+fn testRect(x: f64, y: f64, w: f64, h: f64) macos.window_list.Rect {
+    return .{ .origin = .{ .x = x, .y = y }, .size = .{ .width = w, .height = h } };
+}
+
+fn testWindow(id: u32, pid: i32, bounds: macos.window_list.Rect) data.Window {
+    return .{ .id = id, .pid = pid, .owner = "test", .bounds = bounds };
+}
+
+test "addLeaf appends at the trailing edge with the average sibling ratio" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    try testing.expectEqual(1.0, a.ratio); // first leaf gets the neutral weight
+    a.ratio = 3.0;
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(0, 0, 100, 100)));
+    try testing.expectEqual(3.0, b.ratio); // average of the existing {3.0}
+    try testing.expectEqual(@as(usize, 2), ws.children.items.len);
+    try testing.expectEqual(ws, b.parent.?);
+    try testing.expectEqual(ws.depth + 1, b.depth);
+}
+
+test "findLeaf / findWorkspace / hasWindow / removeWindow" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const root = try makeCon(alloc, .Root, null, 0, 0);
+    const mon = try makeCon(alloc, .Monitor, root, 1, 0);
+    try root.children.append(alloc, mon);
+    const ws = try makeCon(alloc, .Workspace, mon, 2, 77);
+    try mon.children.append(alloc, ws);
+    _ = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(0, 0, 100, 100)));
+
+    try testing.expectEqual(ws, findWorkspace(root, 77).?);
+    try testing.expect(findWorkspace(root, 78) == null);
+    try testing.expectEqual(b, findLeaf(root, 2).?);
+    try testing.expect(hasWindow(root, 1));
+    try testing.expect(!hasWindow(root, 3));
+
+    try testing.expect(removeWindow(root, 1));
+    try testing.expect(!hasWindow(root, 1));
+    try testing.expect(!removeWindow(root, 1)); // already gone
+    try testing.expectEqual(@as(usize, 1), ws.children.items.len);
+}
+
+test "removeWindow collapses a now-single-child nested container" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const cont = try makeCon(alloc, .Container, ws, 1, 0);
+    cont.ratio = 2.0;
+    try ws.children.append(alloc, cont);
+    _ = try addLeaf(alloc, cont, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, cont, testWindow(2, 100, testRect(0, 0, 100, 100)));
+
+    try testing.expect(removeWindow(ws, 1));
+    // The survivor is promoted into the container's slot, inheriting its weight.
+    try testing.expectEqual(b, ws.children.items[0]);
+    try testing.expectEqual(ws, b.parent.?);
+    try testing.expectEqual(2.0, b.ratio);
+}
+
+test "removeWindowsForPid removes every window of the app" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    _ = try addLeaf(alloc, ws, testWindow(1, 10, testRect(0, 0, 100, 100)));
+    _ = try addLeaf(alloc, ws, testWindow(2, 20, testRect(0, 0, 100, 100)));
+    _ = try addLeaf(alloc, ws, testWindow(3, 10, testRect(0, 0, 100, 100)));
+
+    try testing.expect(removeWindowsForPid(ws, 10));
+    try testing.expectEqual(@as(usize, 1), ws.children.items.len);
+    try testing.expectEqual(@as(u32, 2), ws.children.items[0].window.?.id);
+    try testing.expect(!removeWindowsForPid(ws, 10));
+}
+
+test "childIndexOf and adjacentSibling" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(0, 0, 100, 100)));
+
+    try testing.expectEqual(@as(usize, 0), childIndexOf(ws, a).?);
+    try testing.expectEqual(@as(usize, 1), childIndexOf(ws, b).?);
+    try testing.expectEqual(b, adjacentSibling(a, true).?);
+    try testing.expectEqual(a, adjacentSibling(b, false).?);
+    try testing.expect(adjacentSibling(a, false) == null); // leading edge
+    try testing.expect(adjacentSibling(b, true) == null); // trailing edge
+    try testing.expect(adjacentSibling(ws, true) == null); // no parent
+}
+
+test "swapLeaf swaps node positions with its neighbour" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(0, 0, 100, 100)));
+    const c2 = try addLeaf(alloc, ws, testWindow(3, 100, testRect(0, 0, 100, 100)));
+
+    try testing.expect(swapLeaf(a, true));
+    try testing.expectEqual(b, ws.children.items[0]);
+    try testing.expectEqual(a, ws.children.items[1]);
+    try testing.expectEqual(c2, ws.children.items[2]);
+    try testing.expect(!swapLeaf(b, false)); // now at the leading edge
+}
+
+test "joinWithNeighbor nests the pair into a new container" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(0, 0, 100, 100)));
+    a.ratio = 1.5;
+    b.ratio = 0.5;
+    const c2 = try addLeaf(alloc, ws, testWindow(3, 100, testRect(0, 0, 100, 100)));
+
+    const cont = joinWithNeighbor(alloc, a, true, .V_STACK).?;
+    try testing.expectEqual(@as(usize, 2), ws.children.items.len);
+    try testing.expectEqual(cont, ws.children.items[0]); // takes the lower slot
+    try testing.expectEqual(c2, ws.children.items[1]);
+    try testing.expectEqual(data.Layout.V_STACK, cont.layout);
+    try testing.expectEqual(2.0, cont.ratio); // combined weight
+    try testing.expectEqual(a, cont.children.items[0]); // order preserved
+    try testing.expectEqual(b, cont.children.items[1]);
+    try testing.expectEqual(cont, a.parent.?);
+    try testing.expectEqual(1.0, a.ratio); // equal weight inside the new slot
+    try testing.expect(joinWithNeighbor(alloc, c2, true, .V_STACK) == null); // no neighbour
+}
+
+test "applyManualResize transfers the dragged delta to the edge neighbour" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1); // layout defaults to H_SPLIT
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(100, 0, 100, 100)));
+
+    // Trailing edge dragged: origin fixed, width grew 100 → 150.
+    try testing.expect(applyManualResize(a, testRect(0, 0, 150, 100)));
+    try testing.expectEqual(150.0, a.ratio);
+    try testing.expectEqual(50.0, b.ratio); // 100 - 50, conserved total
+
+    // No meaningful change is a no-op.
+    try testing.expect(!applyManualResize(a, testRect(0, 0, 100, 100)));
+}
+
+test "applyManualResize leading edge compensates the previous sibling" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(100, 0, 100, 100)));
+
+    // b's left edge dragged right: origin moved 100 → 150, width shrank to 50.
+    try testing.expect(applyManualResize(b, testRect(150, 0, 50, 100)));
+    try testing.expectEqual(50.0, b.ratio);
+    try testing.expectEqual(150.0, a.ratio); // absorbed the freed 50
+}
+
+test "applyManualMove swaps window payloads when the centre lands on a sibling" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(100, 0, 100, 100)));
+
+    // Dropped frame's centre (170, 50) is over b's slot → payloads swap.
+    try testing.expect(applyManualMove(a, testRect(120, 0, 100, 100)));
+    try testing.expectEqual(@as(u32, 2), a.window.?.id);
+    try testing.expectEqual(@as(u32, 1), b.window.?.id);
+    try testing.expectEqual(@as(u64, 2), a.id);
+
+    // Dropped where no sibling slot is (off in empty space) → nothing to swap.
+    try testing.expect(!applyManualMove(a, testRect(500, 500, 100, 100)));
+}
+
+test "resizeLeaf grows by delta at the neighbour's expense" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(100, 0, 100, 100)));
+
+    try testing.expect(resizeLeaf(a, true, 30));
+    try testing.expectEqual(130.0, a.ratio);
+    try testing.expectEqual(70.0, b.ratio);
+    try testing.expect(!resizeLeaf(b, true, 30)); // no trailing neighbour
+}
+
+test "moveLeafToWorkspace reparents the leaf and collapses the source" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws1 = try makeCon(alloc, .Workspace, null, 2, 1);
+    const ws2 = try makeCon(alloc, .Workspace, null, 2, 2);
+    const cont = try makeCon(alloc, .Container, ws1, 3, 0);
+    cont.ratio = 2.0;
+    try ws1.children.append(alloc, cont);
+    const a = try addLeaf(alloc, cont, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, cont, testWindow(2, 100, testRect(0, 0, 100, 100)));
+
+    try testing.expect(moveLeafToWorkspace(alloc, a, ws2));
+    try testing.expectEqual(ws2, a.parent.?);
+    try testing.expectEqual(ws2.depth + 1, a.depth);
+    try testing.expectEqual(a, ws2.children.items[0]);
+    // The source container went degenerate; its survivor took over its slot.
+    try testing.expectEqual(b, ws1.children.items[0]);
+    try testing.expectEqual(ws1, b.parent.?);
+
+    try testing.expect(!moveLeafToWorkspace(alloc, a, ws2)); // already there
+}
+
+test "findTabSibling matches same-pid windows at an identical frame" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 10, testRect(50, 50, 800, 600)));
+
+    try testing.expectEqual(a, findTabSibling(ws, 10, testRect(50, 50, 800, 600)).?);
+    try testing.expectEqual(a, findTabSibling(ws, 10, testRect(51, 50, 800, 600)).?); // within eps
+    try testing.expect(findTabSibling(ws, 11, testRect(50, 50, 800, 600)) == null); // other app
+    try testing.expect(findTabSibling(ws, 10, testRect(60, 50, 800, 600)) == null); // frame differs
 }

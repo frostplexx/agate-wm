@@ -122,23 +122,12 @@ pub fn focusDirection(appState: *state.AppState, dir: Direction) bool {
         else
             (parent.layout == .V_SPLIT or parent.layout == .V_STACK);
         if (!axis_matches) continue; // perpendicular split — keep climbing
-        if (siblingInDir(parent, node, forward)) |sib| {
+        if (tree.adjacentSibling(node, forward)) |sib| {
             return focusLeaf(descendToLeaf(sib, forward));
         }
         // Axis matches but `node` is at the edge — climb and try a higher level.
     }
     return false;
-}
-
-/// The previous (`forward=false`) or next (`forward=true`) child of `parent`
-/// adjacent to `child`, or null if `child` is at that edge.
-fn siblingInDir(parent: *data.Con, child: *data.Con, forward: bool) ?*data.Con {
-    for (parent.children.items, 0..) |c, i| {
-        if (c != child) continue;
-        if (forward) return if (i + 1 < parent.children.items.len) parent.children.items[i + 1] else null;
-        return if (i > 0) parent.children.items[i - 1] else null;
-    }
-    return null;
 }
 
 /// Descend `con` to a leaf. At each level prefer the container's last-focused

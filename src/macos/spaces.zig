@@ -349,3 +349,17 @@ fn isManageable(parent_wid: u32, attributes: u64, tags: u64) bool {
         visible;
     return branch_a or branch_b;
 }
+
+test "isManageable accepts yabai's two window shapes and rejects the rest" {
+    // Branch A: top-level (no parent), standard attribute bit, visible tag.
+    try std.testing.expect(isManageable(0, 0x2, 0x1));
+    // Alternate visibility form: tag 0x2 requires the 0x80000000 companion bit.
+    try std.testing.expect(isManageable(0, 0x2, 0x2 | 0x80000000));
+    try std.testing.expect(!isManageable(0, 0x2, 0x2)); // companion bit missing
+    // A child window (sheet/tab/popover) is rejected even with the right bits.
+    try std.testing.expect(!isManageable(42, 0x2, 0x1));
+    // Branch B: no attributes, but the special tag bits plus visibility.
+    try std.testing.expect(isManageable(0, 0x0, 0x1000000000000000 | 0x1));
+    // Invisible windows never pass.
+    try std.testing.expect(!isManageable(0, 0x2, 0x0));
+}

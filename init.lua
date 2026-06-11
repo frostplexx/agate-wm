@@ -94,4 +94,15 @@ end)
 agate.bind("hyper+n", function() agate.space_next() end)
 agate.bind("hyper+p", function() agate.space_prev() end)
 
+-- Window assignment rules (yabai-style): when a matching window appears, it is
+-- sent to the given space and the view follows it there (`follow = false` to
+-- route it in the background instead). `app`/`title` are POSIX extended regexes
+-- (at least one required). The last matching rule wins.
+agate.rule({ app = "^Ghostty$", space = 2 })
+agate.rule({ app = "^Zen$", space = 1 })
+agate.rule({ app = "^Obsidian$", space = 3 })
+agate.rule({ app = "^Things$", space = 3 })
+agate.rule({ app = "^Spotify$", space = 5 })
+agate.rule({ app = "^Vesktop$", space = 4 })
+
 print("agate: development config loaded")

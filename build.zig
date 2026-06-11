@@ -49,6 +49,10 @@ pub fn build(b: *std.Build) !void {
     // paths and links to the final exe as well keeps the linker happy and
     // matches how Ghostty applies it to every compile step.
     try linkMacOSFrameworks(b, exe.root_module);
+    // POSIX regex_t allocator shim for src/lib/regexp.zig (regex_t's layout is
+    // opaque to Zig, so it's malloc'd where sizeof is known).
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/lib/regex_slim.c") });
+    exe.root_module.link_libc = true;
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");
@@ -61,6 +65,11 @@ pub fn build(b: *std.Build) !void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+    // Tests only run for the module they live in, so the macos module needs its
+    // own test compile (its pure helpers, e.g. spaces.isManageable, test there).
+    const macos_tests = b.addTest(.{ .root_module = macos });
+    const run_macos_tests = b.addRunArtifact(macos_tests);
+    test_step.dependOn(&run_macos_tests.step);
 
     // `zig build docs` — regenerate the settings reference and the Lua type stub
     // from tools/gen_docs.zig, writing them back into the source tree. The

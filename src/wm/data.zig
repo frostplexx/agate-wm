@@ -1,5 +1,4 @@
 const macos = @import("macos");
-const regexp = @import("../lib/regexp.zig");
 const std = @import("std");
 
 // == This file contains data structures used by the window manager.
@@ -8,7 +7,7 @@ const std = @import("std");
 
 
 /// Tiling modes for windows. These determine how windows are arranged on the screen.
-pub const layouts = enum {
+pub const Layout = enum {
     V_SPLIT,
     H_SPLIT,
     FLOAT,
@@ -17,7 +16,7 @@ pub const layouts = enum {
 };
 
 /// Gaps between windows and screen edges. These can be configured by the user.
-pub const gaps = struct {
+pub const Gaps = struct {
     inner: u32,
     outer: u32,
     top: u32,
@@ -63,39 +62,6 @@ pub const Window = struct {
 
 };
 
-/// A "match" is a data structure which acts like a mask or expression to match
-/// certain windows or not. For example, when using commands, you can specify a
-/// command like this: [title="*Firefox*"] kill. The title member of the match
-/// data structure will then be filled and i3 will check each window using
-/// match_matches_window() to find the windows affected by this command.
-const Match = struct {
-    /// Match window title against this glob pattern, e.g. "*Firefox*". Optional.
-    title: ?regexp.Regex,
-    /// Match window class against this glob pattern. Optional.
-    class: ?regexp.Regex,
-    /// Application name, e.g. "Alacritty". Optional.
-    application: ?regexp.Regex,
-    /// Space index, 0-based. Optional.
-    space: ?u32,
-};
-
-
-/// An Assignment makes specific windows go to a specific workspace/output or
-/// run a command for that window. With this mechanism, the user can -- for
-/// example -- assign their browser to workspace "www". Checking if a window is
-/// assigned works by comparing the Match data structure with the window (see
-/// match_matches_window()).
-const Assignment = struct {
-    const assign_type = enum {
-        Workspace,
-        Output,
-        Command,
-    };
-
-    match: Match,
-};
-
-
 /// Con is the main data structure representing the root space container, down to individual windows.
 pub const Con = struct {
 
@@ -113,9 +79,9 @@ pub const Con = struct {
     /// The window contained in this Con, if it's a leaf node.
     window: ?Window = null,
     /// The tiling mode of this Con. Only relevant if it has children.
-    layout: layouts = .H_SPLIT,
+    layout: Layout = .H_SPLIT,
     /// The gaps for this Con. Only relevant if it has children.
-    gaps: gaps = .{ .inner = 0, .outer = 0, .top = 0, .bottom = 0, .left = 0, .right = 0 },
+    gaps: Gaps = .{ .inner = 0, .outer = 0, .top = 0, .bottom = 0, .left = 0, .right = 0 },
     /// parent of this Con. Null for the root Con.
     parent: ?*Con = null,
     /// Relative weight of this Con among its siblings along the parent's split

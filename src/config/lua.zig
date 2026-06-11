@@ -10,6 +10,7 @@ const state = @import("../state.zig");
 const focus = @import("../wm/focus/focus.zig");
 const tree = @import("../wm/tree.zig");
 const data = @import("../wm/data.zig");
+const regexp = @import("../lib/regexp.zig");
 
 // CGEventFlag modifier bits.
 pub const MOD_SHIFT: u64 = 0x0002_0000;
@@ -29,6 +30,23 @@ pub const Binding = struct {
     action: BindingAction,
 };
 
+/// A window assignment rule (`agate.rule{...}`), modelled on yabai's rules
+/// (koekeishiya/yabai, src/rule.c): regexes select windows, the effect sends
+/// them to a Space. Matching is AND across the present matchers; a rule with
+/// neither matcher is rejected at registration.
+pub const Rule = struct {
+    /// Matches the owning application's name (POSIX extended regex).
+    app: ?regexp.Regex = null,
+    /// Matches the window title (POSIX extended regex).
+    title: ?regexp.Regex = null,
+    /// 1-based user-space index to send matched windows to (0 = unset/invalid).
+    space: usize = 0,
+    /// Switch to the Space the window was sent to (the default: opening an
+    /// assigned app takes the user along). `follow = false` routes the window
+    /// in the background instead.
+    follow: bool = true,
+};
+
 pub const Config = struct {
     alloc: std.mem.Allocator,
     gaps: f64,
@@ -45,6 +63,9 @@ pub const Config = struct {
     /// Default 79 = kVK_F18. 0 disables the feature.
     hyper_key: u16,
     bindings: std.ArrayList(Binding),
+    /// Window assignment rules in registration order. All matching rules
+    /// combine; the last match wins (yabai's `rule_combine_effects` order).
+    rules: std.ArrayList(Rule),
     lua: *Lua,
 };
 
@@ -123,25 +144,25 @@ fn parseKeySpec(spec: []const u8, hyper_mods: u64) ?struct { mods: u64, keycode:
 // Lua C functions exposed as the `agate` global table
 // ---------------------------------------------------------------------------
 
+/// Read the numeric field `name` from the config table (stack index 1) into
+/// `dst`. Returns whether the field was present and numeric; `dst` is left
+/// unchanged otherwise.
+fn numberField(lua: *Lua, name: [:0]const u8, dst: *f64) bool {
+    _ = lua.getField(1, name);
+    defer lua.pop(1);
+    if (!lua.isNumber(-1)) return false;
+    dst.* = lua.toNumber(-1) catch return false;
+    return true;
+}
+
 fn agateConfig(lua: *Lua) i32 {
     const cfg = g_config orelse return 0;
     if (!lua.isTable(1)) return 0;
-    // gaps
-    _ = lua.getField(1, "gaps");
-    if (lua.isNumber(-1)) cfg.gaps = lua.toNumber(-1) catch cfg.gaps;
-    lua.pop(1);
-    // outer_gaps
-    _ = lua.getField(1, "outer_gaps");
-    if (lua.isNumber(-1)) cfg.outer_gaps = lua.toNumber(-1) catch cfg.outer_gaps;
-    lua.pop(1);
-    // accordion_padding (accept "accordion_padding" or "accordion")
-    _ = lua.getField(1, "accordion_padding");
-    if (lua.isNil(-1)) {
-        lua.pop(1);
-        _ = lua.getField(1, "accordion");
-    }
-    if (lua.isNumber(-1)) cfg.accordion_padding = lua.toNumber(-1) catch cfg.accordion_padding;
-    lua.pop(1);
+    _ = numberField(lua, "gaps", &cfg.gaps);
+    _ = numberField(lua, "outer_gaps", &cfg.outer_gaps);
+    // accept "accordion_padding" or the shorter "accordion"
+    if (!numberField(lua, "accordion_padding", &cfg.accordion_padding))
+        _ = numberField(lua, "accordion", &cfg.accordion_padding);
     // hyper: array of modifier strings {"ctrl","alt","cmd","shift"}
     _ = lua.getField(1, "hyper");
     if (lua.isTable(-1)) {
@@ -236,7 +257,7 @@ fn agateLayout(lua: *Lua) i32 {
 
 /// Map a layout name to a tiling mode. Accepts AeroSpace-ish synonyms.
 /// "toggle" is handled by `setActiveLayout` (it needs the current layout).
-fn layoutFromName(name: []const u8) ?data.layouts {
+fn layoutFromName(name: []const u8) ?data.Layout {
     const eql = std.mem.eql;
     if (eql(u8, name, "h_tiles") or eql(u8, name, "h_split") or eql(u8, name, "horizontal")) return .H_SPLIT;
     if (eql(u8, name, "v_tiles") or eql(u8, name, "v_split") or eql(u8, name, "vertical")) return .V_SPLIT;
@@ -276,7 +297,7 @@ fn agateJoin(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
     const dir = parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
-    var layout: data.layouts = .V_STACK;
+    var layout: data.Layout = .V_STACK;
     if (lua.isString(2)) {
         const lz = lua.toString(2) catch "";
         if (layoutFromName(std.mem.sliceTo(lz, 0))) |l| layout = l;
@@ -354,14 +375,132 @@ fn moveFocusedToSpace(app: *state.AppState, n: usize) void {
     if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
     const root = app.tree orelse return;
     const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
-    _ = tree.moveLeafToWorkspace(app.gpa, leaf, dst_ws);
-    tree.flushActive(app);        // re-tile the source we just shrank
-    tree.flushWorkspace(dst_ws);  // and slot the moved window into the destination's row
+    // The tree's children lists are arena-allocated — growing them with any
+    // other allocator would free arena memory through it (undefined behavior).
+    _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws);
+    tree.flushActive(app); // re-tile the source we just shrank
+    tree.flushWorkspace(dst_ws); // and slot the moved window into the destination's row
 
     // Keep the moved window selected once its Space is shown (yabai-style): the
     // space-change handler blanket-focuses a tile to pull the menu bar over, so
     // arm a pending focus on this window for the destination Space instead.
     app.pending_focus = .{ .wid = win.id, .sid = target_sid };
+}
+
+/// `agate.rule{ app = "...", title = "...", space = N, follow = bool }`
+/// Register a window assignment rule (yabai's `yabai -m rule --add app=...
+/// space=N`). `app`/`title` are POSIX extended regexes; at least one must be
+/// given. Matched windows are sent to user space N when they appear.
+fn agateRule(lua: *Lua) i32 {
+    const cfg = g_config orelse return 0;
+    if (!lua.isTable(1)) return 0;
+
+    var rule = Rule{};
+
+    _ = lua.getField(1, "space");
+    if (lua.isNumber(-1)) {
+        const n = lua.toInteger(-1) catch 0;
+        if (n >= 1) rule.space = @intCast(n);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "follow");
+    if (lua.isBoolean(-1)) rule.follow = lua.toBoolean(-1);
+    lua.pop(1);
+
+    _ = lua.getField(1, "app");
+    if (lua.isString(-1)) {
+        const pat = lua.toString(-1) catch "";
+        rule.app = regexp.Regex.init(pat) catch blk: {
+            std.debug.print("[config] rule: bad app regex: {s}\n", .{pat});
+            break :blk null;
+        };
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "title");
+    if (lua.isString(-1)) {
+        const pat = lua.toString(-1) catch "";
+        rule.title = regexp.Regex.init(pat) catch blk: {
+            std.debug.print("[config] rule: bad title regex: {s}\n", .{pat});
+            break :blk null;
+        };
+    }
+    lua.pop(1);
+
+    if (rule.space == 0 or (rule.app == null and rule.title == null)) {
+        std.debug.print("[config] rule needs a space >= 1 and an app or title matcher; ignored\n", .{});
+        freeRule(rule);
+        return 0;
+    }
+    cfg.rules.append(cfg.alloc, rule) catch freeRule(rule);
+    return 0;
+}
+
+fn freeRule(rule: Rule) void {
+    if (rule.app) |re| re.deinit();
+    if (rule.title) |re| re.deinit();
+}
+
+/// Match `re` against a non-sentinel slice by copying it into a stack buffer
+/// with a NUL (regexec wants a C string). Over-long input is truncated, which
+/// can only affect `$`-anchored patterns on pathological titles.
+fn regexMatches(re: regexp.Regex, s: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const len = @min(s.len, buf.len - 1);
+    @memcpy(buf[0..len], s[0..len]);
+    buf[len] = 0;
+    return re.matches(buf[0..len :0]);
+}
+
+/// The combined effect of every rule matching this window, or null if none
+/// does. Later rules override earlier ones, like yabai's effect combining.
+fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, follow: bool } {
+    const cfg = g_config orelse return null;
+    var space: usize = 0;
+    var follow = false;
+    for (cfg.rules.items) |r| {
+        if (r.app) |re| {
+            if (!regexMatches(re, app_name)) continue;
+        }
+        if (r.title) |re| {
+            if (!regexMatches(re, title)) continue;
+        }
+        space = r.space;
+        follow = r.follow;
+    }
+    if (space == 0) return null;
+    return .{ .space = space, .follow = follow };
+}
+
+/// Apply assignment rules to a freshly tracked window: if a rule matches, send
+/// the window to the rule's Space (same SPI path as `moveFocusedToSpace`) and
+/// relocate its leaf into the destination workspace. The caller is expected to
+/// re-flush the source workspace afterwards (the observer's create paths always
+/// do). `title` is the window's AX title at detection time.
+pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8) void {
+    const win = if (leaf.window) |w| w else return;
+    const eff = matchRules(win.owner, title) orelse return;
+    const cur_ws = leaf.parent orelse return; // new leaves sit directly under their Workspace
+    const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, eff.space) catch return) orelse return;
+    if (target_sid == cur_ws.id) return; // already on the assigned space
+    if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
+    const root = app.tree orelse return;
+    const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
+    _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws); // arena: see moveFocusedToSpace
+    tree.flushWorkspace(dst_ws);
+    std.debug.print("[rule] {s} #{d} -> space {d}\n", .{ win.owner, win.id, eff.space });
+    // Mute activation-follow for this window either way: the app activates
+    // around its own launch, and the follow chasing the window we just routed
+    // would switch the user a second time (racing the gesture below and able to
+    // overshoot) — or, for a follow-less rule, switch them against its intent.
+    app.rule_moved = .{ .wid = win.id, .at = macos.c.CFAbsoluteTimeGetCurrent() };
+    if (eff.follow) {
+        // The window is already moved and tiled (flushed above), so the user
+        // lands on a settled Space. Keep the window selected once it's shown.
+        app.pending_focus = .{ .wid = win.id, .sid = target_sid };
+        macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, target_sid) catch {};
+    }
 }
 
 const agate_fns = [_]zlua.FnReg{
@@ -376,6 +515,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
     .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
+    .{ .name = "rule",        .func = zlua.wrap(agateRule) },
 };
 
 // ---------------------------------------------------------------------------
@@ -394,6 +534,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .hyper_mods = MOD_CTRL | MOD_ALT | MOD_CMD | MOD_SHIFT,
         .hyper_key = 79, // kVK_F18 — common remapped-hyper trigger
         .bindings = .empty,
+        .rules = .empty,
         .lua = try Lua.init(gpa),
     };
     g_config = cfg;
@@ -428,6 +569,8 @@ pub fn deinit(cfg: *Config) void {
         }
     }
     cfg.bindings.deinit(cfg.alloc);
+    for (cfg.rules.items) |r| freeRule(r);
+    cfg.rules.deinit(cfg.alloc);
     cfg.lua.deinit();
     cfg.alloc.destroy(cfg);
     g_config = null;
@@ -524,12 +667,59 @@ fn executeCommand(cmd: []const u8) void {
     }
 }
 
+// `std.Io.Dir.access` needs the `Io` handle from main; plain `access(2)` is
+// enough for an existence probe and keeps the config layer Io-free.
 fn fileExists(path: []const u8) bool {
     var buf: [4096]u8 = undefined;
     if (path.len >= buf.len) return false;
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     return std.c.access(@ptrCast(&buf), 0) == 0; // F_OK = 0
+}
+
+// ---------------------------------------------------------------------------
+// Tests (pure parsing helpers — no Lua state or OS interaction)
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "parseKeySpec parses modifiers and key" {
+    const p = parseKeySpec("ctrl+shift+h", 0).?;
+    try testing.expectEqual(MOD_CTRL | MOD_SHIFT, p.mods);
+    try testing.expectEqual(@as(u16, 4), p.keycode); // kVK_ANSI_H
+
+    const plain = parseKeySpec("space", 0).?;
+    try testing.expectEqual(@as(u64, 0), plain.mods);
+    try testing.expectEqual(@as(u16, 49), plain.keycode);
+}
+
+test "parseKeySpec expands hyper to the configured modifier set" {
+    const hyper = MOD_CMD | MOD_ALT;
+    const p = parseKeySpec("hyper+l", hyper).?;
+    try testing.expectEqual(hyper, p.mods);
+    try testing.expectEqual(@as(u16, 37), p.keycode); // kVK_ANSI_L
+}
+
+test "parseKeySpec rejects unknown or missing keys" {
+    try testing.expect(parseKeySpec("ctrl+notakey", 0) == null);
+    try testing.expect(parseKeySpec("ctrl+shift", 0) == null); // modifiers only
+}
+
+test "layoutFromName maps names and synonyms" {
+    try testing.expectEqual(data.Layout.H_SPLIT, layoutFromName("h_tiles").?);
+    try testing.expectEqual(data.Layout.H_SPLIT, layoutFromName("horizontal").?);
+    try testing.expectEqual(data.Layout.V_SPLIT, layoutFromName("vertical").?);
+    try testing.expectEqual(data.Layout.H_STACK, layoutFromName("h_accordion").?);
+    try testing.expectEqual(data.Layout.V_STACK, layoutFromName("accordion").?);
+    try testing.expectEqual(data.Layout.V_STACK, layoutFromName("stacking").?);
+    try testing.expectEqual(data.Layout.FLOAT, layoutFromName("floating").?);
+    try testing.expect(layoutFromName("bogus") == null);
+}
+
+test "parseDir maps direction names" {
+    try testing.expectEqual(focus.Direction.left, parseDir("left").?);
+    try testing.expectEqual(focus.Direction.down, parseDir("down").?);
+    try testing.expect(parseDir("sideways") == null);
 }
 
 fn findConfigPath(alloc: std.mem.Allocator) ?[]u8 {

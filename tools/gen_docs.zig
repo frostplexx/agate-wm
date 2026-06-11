@@ -47,6 +47,14 @@ const settings = [_]Setting{
     .{ .name = "hyper_key", .ty = "string", .default = "\"f18\"", .doc = "Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `\"f18\"`; empty disables." },
 };
 
+// Fields of the table passed to `agate.rule{}`.
+const rule_fields = [_]Param{
+    .{ .name = "app", .ty = "string", .doc = "POSIX extended regex matched against the owning application's name, e.g. `\"^Music$\"`.", .optional = true },
+    .{ .name = "title", .ty = "string", .doc = "POSIX extended regex matched against the window title.", .optional = true },
+    .{ .name = "space", .ty = "integer", .doc = "1-based user-space index matched windows are sent to. Required." },
+    .{ .name = "follow", .ty = "boolean", .doc = "Switch to that space along with the window (default `true`). Set `false` to route the window in the background.", .optional = true },
+};
+
 const aliases = [_]Alias{
     .{ .name = "agate.Direction", .values = &.{ "left", "right", "up", "down" }, .doc = "A focus/move/resize direction." },
     .{ .name = "agate.Layout", .values = &.{ "h_tiles", "v_tiles", "h_stack", "v_stack", "accordion", "float", "toggle" }, .doc = "A layout mode. Synonyms: `h_split`/`horizontal` = `h_tiles`; `v_split`/`vertical` = `v_tiles`; `v_accordion`/`stacking`/`stacked` = `v_stack`/`accordion`; `floating` = `float`. `toggle` flips the split orientation." },
@@ -111,6 +119,11 @@ const funcs = [_]Func{
         .name = "move_to_space",
         .params = &.{.{ .name = "n", .ty = "integer", .doc = "1-based user-space index to send the window to." }},
         .doc = "Send the focused window to user space N (does not follow focus).",
+    },
+    .{
+        .name = "rule",
+        .params = &.{.{ .name = "rule", .ty = "agate.Rule", .doc = "Rule table (see agate.Rule)." }},
+        .doc = "Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space when they appear. At least one of `app`/`title` is required; both must match when both are given. When several rules match a window, the last registered one wins.",
     },
 };
 
@@ -179,6 +192,15 @@ fn emitMarkdown(b: *Buf) void {
     }
     b.w("\n", .{});
 
+    b.w("## `agate.rule{{}}` fields\n\n", .{});
+    b.w("| Key | Type | Description |\n", .{});
+    b.w("| --- | --- | --- |\n", .{});
+    for (rule_fields) |p| {
+        const opt = if (p.optional) " _(optional)_" else "";
+        b.w("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, opt });
+    }
+    b.w("\n", .{});
+
     b.w("## API\n\n", .{});
     for (funcs) |f| {
         b.w("### `agate.{s}{s}`\n\n", .{ f.name, signature(b.alloc, f, true) });
@@ -205,7 +227,7 @@ fn emitMarkdown(b: *Buf) void {
         b.w("\n", .{});
     }
 
-    b.w("## Example\n\n```lua\nagate.config({{ gaps = 8, accordion_padding = 40, hyper = {{ \"ctrl\", \"alt\", \"cmd\" }} }})\nagate.bind(\"hyper+l\", function() agate.focus(\"right\") end)\nagate.bind(\"hyper+shift+l\", \"move right\")\nagate.bind(\"hyper+s\", function() agate.layout(\"accordion\") end)\nagate.bind(\"hyper+g\", function() agate.join(\"right\") end)\n```\n", .{});
+    b.w("## Example\n\n```lua\nagate.config({{ gaps = 8, accordion_padding = 40, hyper = {{ \"ctrl\", \"alt\", \"cmd\" }} }})\nagate.bind(\"hyper+l\", function() agate.focus(\"right\") end)\nagate.bind(\"hyper+shift+l\", \"move right\")\nagate.bind(\"hyper+s\", function() agate.layout(\"accordion\") end)\nagate.bind(\"hyper+g\", function() agate.join(\"right\") end)\nagate.rule({{ app = \"^Music$\", space = 5 }})\nagate.rule({{ app = \"^Firefox$\", title = \"Library\", space = 2, follow = false }})\n```\n", .{});
 }
 
 fn emitLua(b: *Buf) void {
@@ -222,6 +244,13 @@ fn emitLua(b: *Buf) void {
     b.w("---@class agate.Config\n", .{});
     for (settings) |s| {
         b.w("---@field {s}? {s} {s} (default `{s}`)\n", .{ s.name, s.ty, s.doc, s.default });
+    }
+    b.w("\n", .{});
+
+    b.w("---@class agate.Rule\n", .{});
+    for (rule_fields) |p| {
+        const opt = if (p.optional) "?" else "";
+        b.w("---@field {s}{s} {s} {s}\n", .{ p.name, opt, p.ty, p.doc });
     }
     b.w("\n", .{});
 

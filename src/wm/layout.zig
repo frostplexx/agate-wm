@@ -15,25 +15,42 @@ const Rect = macos.window_list.Rect;
 /// Lay out and apply a workspace's windows within `area` (the display's usable
 /// frame, AX coordinates). The workspace's `outer` gap insets the whole area;
 /// children are then split per the container's layout with the `inner` gap
-/// between them.
+/// between them. The whole pass runs with `AXEnhancedUserInterface` disabled
+/// per *application* (see `EuiGuard`) instead of toggling it per window.
 pub fn flushWorkspace(ws: *data.Con, area: Rect) void {
-    layoutChildren(ws, inset(area, @floatFromInt(ws.gaps.outer)));
+    var eui = EuiGuard{};
+    eui.disableUnder(ws);
+    defer eui.restore();
+    assignFrames(ws, area, applySink);
+}
+
+/// Compute each leaf's frame under `con` within `area` and hand it to `sink`.
+/// The frame *math* lives here; what happens with a computed frame is the
+/// sink's business — `flushWorkspace` pushes it onto the real window, tests
+/// record it. `sink` is comptime so the recursion stays a plain call.
+pub fn assignFrames(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
+    layoutChildren(con, inset(area, @floatFromInt(con.gaps.outer)), sink);
+}
+
+/// The production sink: apply the computed frame to the leaf's real window.
+fn applySink(leaf: *data.Con, area: Rect) void {
+    applyFrame(&leaf.window.?, area);
 }
 
 /// Split `area` among `con`'s children according to its layout, recursing into
-/// nested split containers and applying frames at the leaves. The main axis
+/// nested split containers and emitting frames at the leaves. The main axis
 /// (width for H_SPLIT, height for V_SPLIT) is divided in proportion to each
 /// child's `ratio`; the cross axis fills the area. (Like yabai's view, each leaf
 /// gets its exact computed area — no readback.)
-fn layoutChildren(con: *data.Con, area: Rect) void {
+fn layoutChildren(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
     const n = con.children.items.len;
     if (n == 0) return;
 
     switch (con.layout) {
-        .H_STACK, .V_STACK => return layoutStack(con, area),
+        .H_STACK, .V_STACK => return layoutStack(con, area, sink),
         // FLOAT: leave each window filling the area (no real float model yet).
         .FLOAT => {
-            for (con.children.items) |child| place(child, area);
+            for (con.children.items) |child| place(child, area, sink);
             return;
         },
         .H_SPLIT, .V_SPLIT => {},
@@ -59,7 +76,7 @@ fn layoutChildren(con: *data.Con, area: Rect) void {
             .origin = .{ .x = area.origin.x, .y = offset },
             .size = .{ .width = area.size.width, .height = extent },
         };
-        place(child, rect);
+        place(child, rect, sink);
         offset += extent + gap;
     }
 }
@@ -72,7 +89,7 @@ fn layoutChildren(con: *data.Con, area: Rect) void {
 /// to the front by the focus engine (`AXRaise`), so it shows fully while the
 /// rest peek. The fan step is clamped so it never consumes more than half the
 /// area, keeping windows usable when the stack is deep.
-fn layoutStack(con: *data.Con, area: Rect) void {
+fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
     const n = con.children.items.len;
     const horizontal = con.layout == .H_STACK;
     const nf: f64 = @floatFromInt(n);
@@ -91,16 +108,16 @@ fn layoutStack(con: *data.Con, area: Rect) void {
             .origin = .{ .x = area.origin.x, .y = area.origin.y + off },
             .size = .{ .width = area.size.width, .height = area.size.height - span },
         };
-        place(child, rect);
+        place(child, rect, sink);
     }
 }
 
-/// Apply `area` to a leaf window, or recurse if it's a nested split container.
-fn place(con: *data.Con, area: Rect) void {
+/// Emit `area` for a leaf window, or recurse if it's a nested split container.
+fn place(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
     if (con.window != null) {
-        applyFrame(&con.window.?, area);
+        sink(con, area);
     } else {
-        layoutChildren(con, area);
+        layoutChildren(con, area, sink);
     }
 }
 
@@ -109,26 +126,63 @@ fn place(con: *data.Con, area: Rect) void {
 /// (koekeishiya/yabai, src/window_manager.c): apply size → position → size.
 /// macOS clamps a window to the visible area, so the size may need setting both
 /// before the move (so the position isn't clamped to the old, larger extent) and
-/// after it. The whole sequence runs with `AXEnhancedUserInterface` disabled
-/// (yabai's `AX_ENHANCED_UI_WORKAROUND`, src/misc/helpers.h) — that attribute,
-/// which macOS turns on for any app an assistive client attaches to, makes
-/// AppKit *animate* AX-driven frame changes; turning it off makes them instant.
+/// after it. Runs inside `flushWorkspace`'s `EuiGuard` window, so AppKit applies
+/// the change instantly instead of animating it.
 fn applyFrame(win: *data.Window, area: Rect) void {
     const el = window.resolveElement(win) orelse return;
-
-    // The attribute lives on the *application* element, not the window.
-    const app = macos.Element.createApplication(@intCast(win.pid));
-    defer if (app) |a| a.release();
-    const eui = if (app) |a| a.enhancedUserInterface() else false;
-    if (eui) app.?.setEnhancedUserInterface(false);
-
     _ = el.setSize(area.size);
     _ = el.setPosition(area.origin);
     _ = el.setSize(area.size);
-
-    if (eui) app.?.setEnhancedUserInterface(true);
     win.bounds = area; // keep the model in sync with what we requested
 }
+
+/// How many distinct apps one flush will toggle EUI for. Past the cap, the
+/// extra apps keep their setting (their windows may animate — harmless).
+const max_eui_apps = 32;
+
+/// Per-flush batching of yabai's `AX_ENHANCED_UI_WORKAROUND` (src/misc/helpers.h):
+/// `AXEnhancedUserInterface` — which macOS turns on for any app an assistive
+/// client attaches to — makes AppKit *animate* AX-driven frame changes. The
+/// attribute lives on the *application* element, so disabling it once per app
+/// for the whole flush (instead of around every window, as before) saves an
+/// app-element create plus a get/set/set AX round-trip per extra window of the
+/// same app.
+const EuiGuard = struct {
+    pids: [max_eui_apps]i32 = undefined,
+    /// Retained app elements that had EUI on (to restore); null = was off.
+    apps: [max_eui_apps]?*macos.Element = undefined,
+    count: usize = 0,
+
+    /// Disable EUI for every distinct app owning a window under `con`.
+    fn disableUnder(self: *EuiGuard, con: *data.Con) void {
+        if (con.window) |w| self.disablePid(w.pid);
+        for (con.children.items) |child| self.disableUnder(child);
+    }
+
+    fn disablePid(self: *EuiGuard, pid: i32) void {
+        for (self.pids[0..self.count]) |p| if (p == pid) return; // already handled
+        if (self.count == max_eui_apps) return;
+        const app = macos.Element.createApplication(pid) orelse return;
+        if (app.enhancedUserInterface()) {
+            app.setEnhancedUserInterface(false);
+            self.apps[self.count] = app; // keep retained for restore()
+        } else {
+            app.release();
+            self.apps[self.count] = null;
+        }
+        self.pids[self.count] = pid;
+        self.count += 1;
+    }
+
+    fn restore(self: *EuiGuard) void {
+        for (self.apps[0..self.count]) |maybe_app| {
+            const app = maybe_app orelse continue;
+            app.setEnhancedUserInterface(true);
+            app.release();
+        }
+        self.count = 0;
+    }
+};
 
 /// Shrink a rect inward by `by` on every side.
 fn inset(r: Rect, by: f64) Rect {
@@ -136,4 +190,129 @@ fn inset(r: Rect, by: f64) Rect {
         .origin = .{ .x = r.origin.x + by, .y = r.origin.y + by },
         .size = .{ .width = r.size.width - 2 * by, .height = r.size.height - 2 * by },
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests — drive `assignFrames` with a sink that records each leaf's computed
+// frame into its window bounds, so no Accessibility calls happen.
+// ---------------------------------------------------------------------------
+
+const std = @import("std");
+const testing = std.testing;
+
+fn recordSink(leaf: *data.Con, area: Rect) void {
+    leaf.window.?.bounds = area;
+}
+
+fn testRect(x: f64, y: f64, w: f64, h: f64) Rect {
+    return .{ .origin = .{ .x = x, .y = y }, .size = .{ .width = w, .height = h } };
+}
+
+fn testLeaf(alloc: std.mem.Allocator, parent: *data.Con, id: u32, ratio: f64) !*data.Con {
+    const con = try alloc.create(data.Con);
+    con.* = .{
+        .id = id,
+        .con_type = .Container,
+        .parent = parent,
+        .depth = parent.depth + 1,
+        .ratio = ratio,
+        .window = .{ .id = id, .pid = 1, .owner = "test", .bounds = testRect(0, 0, 0, 0) },
+    };
+    try parent.children.append(alloc, con);
+    return con;
+}
+
+fn testContainer(alloc: std.mem.Allocator, con_type: data.Con.Type, layout: data.Layout) !*data.Con {
+    const con = try alloc.create(data.Con);
+    con.* = .{ .id = 0, .con_type = con_type, .layout = layout };
+    return con;
+}
+
+fn expectRect(expected: Rect, actual: Rect) !void {
+    try testing.expectApproxEqAbs(expected.origin.x, actual.origin.x, 0.001);
+    try testing.expectApproxEqAbs(expected.origin.y, actual.origin.y, 0.001);
+    try testing.expectApproxEqAbs(expected.size.width, actual.size.width, 0.001);
+    try testing.expectApproxEqAbs(expected.size.height, actual.size.height, 0.001);
+}
+
+test "H_SPLIT divides the width by ratio with inner gaps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .H_SPLIT);
+    ws.gaps = .{ .inner = 10, .outer = 0, .top = 0, .bottom = 0, .left = 0, .right = 0 };
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 3.0);
+
+    assignFrames(ws, testRect(0, 0, 410, 200), recordSink);
+    // 410 minus one 10px gap = 400 to share 1:3 → 100 and 300.
+    try expectRect(testRect(0, 0, 100, 200), a.window.?.bounds);
+    try expectRect(testRect(110, 0, 300, 200), b.window.?.bounds);
+}
+
+test "V_SPLIT divides the height; outer gap insets the whole area" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .V_SPLIT);
+    ws.gaps = .{ .inner = 0, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0 };
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+
+    assignFrames(ws, testRect(0, 0, 100, 220), recordSink);
+    // Outer gap shrinks the area to (10,10,80,200); halves stack vertically.
+    try expectRect(testRect(10, 10, 80, 100), a.window.?.bounds);
+    try expectRect(testRect(10, 110, 80, 100), b.window.?.bounds);
+}
+
+test "nested split container subdivides its slot" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .H_SPLIT);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const sub = try testContainer(alloc, .Container, .V_SPLIT);
+    sub.parent = ws;
+    sub.depth = ws.depth + 1;
+    try ws.children.append(alloc, sub);
+    const b1 = try testLeaf(alloc, sub, 2, 1.0);
+    const b2 = try testLeaf(alloc, sub, 3, 1.0);
+
+    assignFrames(ws, testRect(0, 0, 200, 100), recordSink);
+    try expectRect(testRect(0, 0, 100, 100), a.window.?.bounds);
+    try expectRect(testRect(100, 0, 100, 50), b1.window.?.bounds);
+    try expectRect(testRect(100, 50, 100, 50), b2.window.?.bounds);
+}
+
+test "V_STACK fans by the accordion peek, clamped to half the area" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .V_STACK);
+    ws.gaps.accordion = 40;
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    const c2 = try testLeaf(alloc, ws, 3, 1.0);
+
+    assignFrames(ws, testRect(0, 0, 100, 100), recordSink);
+    // peek 40 clamps to (100*0.5)/2 = 25 per step; span 50; all share height 50.
+    try expectRect(testRect(0, 0, 100, 50), a.window.?.bounds);
+    try expectRect(testRect(0, 25, 100, 50), b.window.?.bounds);
+    try expectRect(testRect(0, 50, 100, 50), c2.window.?.bounds);
+}
+
+test "single window fills the workspace area" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .H_SPLIT);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+
+    assignFrames(ws, testRect(0, 25, 1512, 920), recordSink);
+    try expectRect(testRect(0, 25, 1512, 920), a.window.?.bounds);
 }

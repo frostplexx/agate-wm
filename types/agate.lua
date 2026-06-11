@@ -24,6 +24,12 @@
 ---@field hyper? string[] Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. (default `{"ctrl","alt","cmd","shift"}`)
 ---@field hyper_key? string Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables. (default `"f18"`)
 
+---@class agate.Rule
+---@field app? string POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.
+---@field title? string POSIX extended regex matched against the window title.
+---@field space integer 1-based user-space index matched windows are sent to. Required.
+---@field follow? boolean Switch to that space along with the window (default `true`). Set `false` to route the window in the background.
+
 ---@class Agate
 agate = {}
 
@@ -71,5 +77,9 @@ function agate.space_prev() end
 ---Send the focused window to user space N (does not follow focus).
 ---@param n integer 1-based user-space index to send the window to.
 function agate.move_to_space(n) end
+
+---Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space when they appear. At least one of `app`/`title` is required; both must match when both are given. When several rules match a window, the last registered one wins.
+---@param rule agate.Rule Rule table (see agate.Rule).
+function agate.rule(rule) end
 
 return agate
