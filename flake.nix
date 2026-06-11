@@ -1,10 +1,8 @@
 {
-  description = "C project with Lua";
+  description = "agate — a tiling window manager for macOS, scripted in Lua";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-
-    # zig.url = "github:mitchellh/zig-overlay";
   };
 
   outputs =
@@ -13,17 +11,38 @@
       nixpkgs,
     }:
     let
-      systems = [
+      lib = nixpkgs.lib;
+      darwinSystems = [
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
+      allSystems = darwinSystems ++ [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
       ];
-
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
+      forSystems = systems: f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      devShells = forAllSystems (pkgs: {
+      packages = forSystems darwinSystems (pkgs: rec {
+        agate = pkgs.callPackage ./nix/package.nix { };
+        default = agate;
+      });
+
+      # `services.agate.enable = true;` — see nix/module.nix for all options.
+      darwinModules = rec {
+        agate = import ./nix/module.nix self;
+        default = agate;
+      };
+
+      overlays.default = final: prev: {
+        agate = final.callPackage ./nix/package.nix { };
+      };
+
+      checks = forSystems darwinSystems (pkgs: {
+        package = self.packages.${pkgs.stdenv.hostPlatform.system}.agate;
+      });
+
+      devShells = forSystems allSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
             lua

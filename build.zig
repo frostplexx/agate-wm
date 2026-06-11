@@ -108,12 +108,17 @@ fn linkMacOSFrameworks(b: *std.Build, m: *std.Build.Module) !void {
     m.linkFramework("SkyLight", .{});
 }
 
-/// Add the PrivateFrameworks path from the installed Xcode SDK so the linker
-/// can find SkyLight.tbd (not included in the zig-build-macos-sdk bundle).
+/// Add the PrivateFrameworks path from the macOS SDK so the linker can find
+/// SkyLight.tbd (not included in the zig-build-macos-sdk bundle). `$SDKROOT`
+/// is preferred — Nix's darwin stdenv sets it and its sandbox has no xcrun —
+/// with the installed Xcode SDK (via xcrun) as the fallback.
 fn addPrivateFrameworkPath(b: *std.Build, m: *std.Build.Module) !void {
     const target = m.resolved_target.?.result;
     if (!target.os.tag.isDarwin()) return;
-    const sdk_path = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target)
-        orelse return error.XcodeMacOSSDKNotFound;
+    const sdk_path: []const u8 = if (std.c.getenv("SDKROOT")) |p|
+        std.mem.span(p)
+    else
+        std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target) orelse
+            return error.XcodeMacOSSDKNotFound;
     m.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "/System/Library/PrivateFrameworks" }) });
 }

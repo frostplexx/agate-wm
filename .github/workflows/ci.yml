@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, zig]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: zig build & test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build
+        run: zig build --summary all
+
+      - name: Test
+        run: zig build test --summary all
+
+      - name: Generated docs are up to date
+        run: |
+          zig build docs
+          git diff --exit-code docs/configuration.md types/agate.lua
+
+  nix:
+    name: nix package
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build package
+        run: nix build .#agate --print-build-logs
