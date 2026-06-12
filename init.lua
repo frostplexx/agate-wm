@@ -26,9 +26,6 @@ agate.config({
     -- position glides over (60 Hz, ease-out). Off = exact snapping.
     animations = true,
     animation_duration = 150, -- milliseconds; lower = faster, 0 disables
-    -- How much of the Space-switch transition plays: "fast", "very_fast",
-    -- or "instant" (no perceptible animation).
-    space_animation = "instant",
 })
 
 -- Trackpad gestures (the smooth-trackpad half of Small Screen Mode): a

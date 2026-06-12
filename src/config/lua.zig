@@ -276,6 +276,7 @@ fn agateConfig(lua: *Lua) i32 {
     boolField(lua, 1, "space_indicator", &cfg.space_indicator);
     boolField(lua, 1, "drag_preview", &cfg.drag_preview);
     // space_animation: how much of the Space-switch transition plays.
+    // TODO: Remove this option
     _ = lua.getField(1, "space_animation");
     if (lua.isString(-1)) {
         const s = std.mem.sliceTo(lua.toString(-1) catch "", 0);
