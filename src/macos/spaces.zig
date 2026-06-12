@@ -192,6 +192,25 @@ pub fn userSpaceIdAt(alloc: Allocator, cid: sl.ConnectionID, n: usize) !?u64 {
     return null;
 }
 
+/// The 1-based user-space index of the currently active Space on the focused
+/// display (the number `agate.space(n)` would use to reach it) — what the
+/// menu-bar indicator shows. Null when it can't be resolved or the active
+/// Space isn't a user Space (e.g. a native-fullscreen Space).
+pub fn activeUserIndex(alloc: Allocator, cid: sl.ConnectionID) ?usize {
+    const order = (focusedDisplayOrder(alloc, cid) catch return null) orelse return null;
+    defer alloc.free(order.spaces);
+    var seen: usize = 0;
+    for (order.spaces, 0..) |sp, i| {
+        if (sp.type != 0) {
+            if (i == order.active_pos) return null;
+            continue;
+        }
+        seen += 1;
+        if (i == order.active_pos) return seen;
+    }
+    return null;
+}
+
 /// Switch to the previous user Space on the focused display (no wrap).
 pub fn switchPrev(alloc: Allocator, cid: sl.ConnectionID) !void {
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;

@@ -9,7 +9,39 @@ agate.config({
     accordion_padding = 20, -- stacked-window "peek": how far each window fans out
     -- "hyper" expands to this modifier set in keyspecs below.
     hyper = { "ctrl", "alt", "cmd" },
+    -- Small Screen Mode: on the built-in display (or any display narrower than
+    -- max_width points, when set), workspaces still on the default split layout
+    -- become a horizontal accordion — splitting a tiny screen isn't useful.
+    -- layout = "tabs" stacks windows full-size with no peek instead.
+    -- Plugging in a big external display switches the workspaces back.
+    small_screen = {
+        enabled = true,
+        layout = "h_accordion", -- or "tabs", "v_accordion", ...
+        max_width = 0,          -- 0 = built-in display detection only
+    },
+    -- UX.
+    drag_preview = true,        -- highlight the slot a dragged window will land in
+    space_indicator = true,     -- active space number in the menu bar
+    -- Animate tiling frame changes: the final size applies instantly, the
+    -- position glides over (60 Hz, ease-out). Off = exact snapping.
+    animations = true,
+    animation_duration = 150, -- milliseconds; lower = faster, 0 disables
+    -- How much of the Space-switch transition plays: "fast", "very_fast",
+    -- or "instant" (no perceptible animation).
+    space_animation = "instant",
 })
+
+-- Trackpad gestures (the smooth-trackpad half of Small Screen Mode): a
+-- three-finger swipe steps through the accordion, wrapping at the ends. A long
+-- swipe keeps stepping, Hyprland-style. Works in any layout, not just small
+-- mode. (Three-finger swipes must be free: set the system Mission Control /
+-- page gestures to four fingers, or off, in Trackpad settings.)
+agate.gesture("3:right", function() agate.cycle("next") end)
+agate.gesture("3:left", function() agate.cycle("prev") end)
+
+-- The same cycling from the keyboard.
+agate.bind("hyper+tab", function() agate.cycle("next") end)
+agate.bind("hyper+shift+tab", function() agate.cycle("prev") end)
 
 -- Focus movement (i3-style hjkl).
 agate.bind("hyper+h", function() agate.focus("left") end)

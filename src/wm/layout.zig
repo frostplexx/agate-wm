@@ -9,19 +9,51 @@
 const macos = @import("macos");
 const data = @import("data.zig");
 const window = @import("window.zig");
+const animation = @import("animate.zig");
 
 const Rect = macos.window_list.Rect;
+
+/// Whether frame changes should animate. Set from the Lua config
+/// (`agate.config{ animations = true }`); speed comes from
+/// `animation.duration_ms` (`animation_duration`, milliseconds). See
+/// `animate.zig` for how (and within which platform limits) the sweep runs.
+pub var animate: bool = false;
 
 /// Lay out and apply a workspace's windows within `area` (the display's usable
 /// frame, AX coordinates). The workspace's `outer` gap insets the whole area;
 /// children are then split per the container's layout with the `inner` gap
 /// between them. The whole pass runs with `AXEnhancedUserInterface` disabled
-/// per *application* (see `EuiGuard`) instead of toggling it per window.
+/// per *application* (see `EuiGuard`) instead of toggling it per window, so
+/// every real frame lands instantly and exactly.
+///
+/// With `animate` on, changed windows get their final SIZE applied here and
+/// their position swept over by the animator, which also takes over the EUI
+/// guard until the sweep lands (AppKit must not ease the ticks).
 pub fn flushWorkspace(ws: *data.Con, area: Rect) void {
     var eui = EuiGuard{};
     eui.disableUnder(ws);
+    if (animate and animation.enabled()) {
+        animation.begin();
+        assignFrames(ws, area, animateSink);
+        animation.commit(eui); // guard ownership moves to the animator
+        return;
+    }
     defer eui.restore();
     assignFrames(ws, area, applySink);
+}
+
+/// The animated-flush sink: perceptible frame changes get the final size now
+/// (the expensive, relayout-causing half) and a position sweep via the
+/// animator; everything else (no real change / animator full / unresolvable
+/// element) is applied directly like `applySink`.
+fn animateSink(leaf: *data.Con, area: Rect) void {
+    const win = &leaf.window.?;
+    const from = win.bounds;
+    if (!animation.shouldAnimate(from, area)) return applyFrame(win, area);
+    const el = window.resolveElement(win) orelse return applyFrame(win, area);
+    if (!animation.add(el, from, area)) return applyFrame(win, area);
+    _ = el.setSize(area.size); // final size at the old position; ticks glide it over
+    win.bounds = area; // tree state is the final frame, same as applyFrame
 }
 
 /// Compute each leaf's frame under `con` within `area` and hand it to `sink`.
@@ -147,14 +179,14 @@ const max_eui_apps = 32;
 /// for the whole flush (instead of around every window, as before) saves an
 /// app-element create plus a get/set/set AX round-trip per extra window of the
 /// same app.
-const EuiGuard = struct {
+pub const EuiGuard = struct {
     pids: [max_eui_apps]i32 = undefined,
     /// Retained app elements that had EUI on (to restore); null = was off.
     apps: [max_eui_apps]?*macos.Element = undefined,
     count: usize = 0,
 
     /// Disable EUI for every distinct app owning a window under `con`.
-    fn disableUnder(self: *EuiGuard, con: *data.Con) void {
+    pub fn disableUnder(self: *EuiGuard, con: *data.Con) void {
         if (con.window) |w| self.disablePid(w.pid);
         for (con.children.items) |child| self.disableUnder(child);
     }
@@ -174,7 +206,7 @@ const EuiGuard = struct {
         self.count += 1;
     }
 
-    fn restore(self: *EuiGuard) void {
+    pub fn restore(self: *EuiGuard) void {
         for (self.apps[0..self.count]) |maybe_app| {
             const app = maybe_app orelse continue;
             app.setEnhancedUserInterface(true);

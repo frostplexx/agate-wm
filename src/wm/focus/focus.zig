@@ -130,6 +130,28 @@ pub fn focusDirection(appState: *state.AppState, dir: Direction) bool {
     return false;
 }
 
+/// Cycle focus to the next (`forward`) or previous sibling of the focused
+/// window, wrapping at the edges — the Small-Screen-Mode motion: in an
+/// accordion every window is one swipe step away, and unlike `focusDirection`
+/// it never dead-ends at the edge. Cycles within the focused leaf's parent
+/// (the workspace for a flat layout, the sub-container for a nested stack).
+/// With nothing focused, falls back to the first leaf of the active workspace.
+pub fn cycleFocus(appState: *state.AppState, forward: bool) bool {
+    const cur = currentFocusedLeaf(appState) orelse {
+        const root = appState.tree orelse return false;
+        const sid = macos.spaces.activeSpace(appState.skylight_cid) orelse return false;
+        const ws = tree.findWorkspace(root, sid) orelse return false;
+        if (ws.children.items.len == 0) return false;
+        return focusLeaf(descendToLeaf(ws.children.items[0], true));
+    };
+    const parent = cur.parent orelse return false;
+    const n = parent.children.items.len;
+    if (n < 2) return false;
+    const i = tree.childIndexOf(parent, cur) orelse return false;
+    const next = if (forward) (i + 1) % n else (i + n - 1) % n;
+    return focusLeaf(descendToLeaf(parent.children.items[next], forward));
+}
+
 /// Descend `con` to a leaf. At each level prefer the container's last-focused
 /// child (so re-entering restores the most-recently-active window); otherwise,
 /// when we reached it moving `forward`, take the first child (else the last).

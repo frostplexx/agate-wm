@@ -45,6 +45,19 @@ const settings = [_]Setting{
     .{ .name = "accordion_padding", .ty = "number", .default = "40", .doc = "Stacked-window \"peek\": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`." },
     .{ .name = "hyper", .ty = "string[]", .default = "{\"ctrl\",\"alt\",\"cmd\",\"shift\"}", .doc = "Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`." },
     .{ .name = "hyper_key", .ty = "string", .default = "\"f18\"", .doc = "Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `\"f18\"`; empty disables." },
+    .{ .name = "small_screen", .ty = "agate.SmallScreen", .default = "{ enabled = true, layout = \"h_accordion\", max_width = 0 }", .doc = "Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over." },
+    .{ .name = "drag_preview", .ty = "boolean", .default = "true", .doc = "While dragging a window, highlight the tile it will swap into on drop with a translucent overlay." },
+    .{ .name = "space_indicator", .ty = "boolean", .default = "true", .doc = "Show the active space's number as a menu-bar status item." },
+    .{ .name = "animations", .ty = "boolean", .default = "false", .doc = "Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`." },
+    .{ .name = "animation_duration", .ty = "number", .default = "150", .doc = "Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`." },
+    .{ .name = "space_animation", .ty = "string", .default = "\"instant\"", .doc = "How much of the Space-switch transition plays: `\"fast\"`, `\"very_fast\"`, or `\"instant\"` (no perceptible animation)." },
+};
+
+// Fields of the `small_screen` table inside `agate.config{}`.
+const small_screen_fields = [_]Param{
+    .{ .name = "enabled", .ty = "boolean", .doc = "Master switch (default `true`).", .optional = true },
+    .{ .name = "layout", .ty = "string", .doc = "Layout small workspaces get: any layout name (default `\"h_accordion\"`), or `\"tabs\"` for a zero-peek stack — full-area windows flipped through like tabs.", .optional = true },
+    .{ .name = "max_width", .ty = "number", .doc = "Width (points) at or under which a display counts as small, in addition to the built-in panel. `0` (default) = built-in display detection only.", .optional = true },
 };
 
 // Fields of the table passed to `agate.rule{}`.
@@ -76,6 +89,19 @@ const funcs = [_]Func{
             .{ .name = "action", .ty = "fun()|string", .doc = "A Lua callback, or a string command (see Commands below)." },
         },
         .doc = "Bind a key chord to an action.",
+    },
+    .{
+        .name = "gesture",
+        .params = &.{
+            .{ .name = "spec", .ty = "string", .doc = "Finger count (3 or 4) and direction, e.g. `\"3:left\"` or `\"4:up\"`." },
+            .{ .name = "action", .ty = "fun()|string", .doc = "A Lua callback, or a string command (see Commands below)." },
+        },
+        .doc = "Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.",
+    },
+    .{
+        .name = "cycle",
+        .params = &.{.{ .name = "dir", .ty = "\"next\"|\"prev\"", .doc = "Cycle direction." }},
+        .doc = "Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.",
     },
     .{
         .name = "focus",
@@ -132,6 +158,7 @@ const Command = struct { form: []const u8, doc: []const u8 };
 const commands = [_]Command{
     .{ .form = "move <dir>", .doc = "Same as `agate.move(dir)`." },
     .{ .form = "focus <dir>", .doc = "Same as `agate.focus(dir)`." },
+    .{ .form = "cycle <next|prev>", .doc = "Same as `agate.cycle(dir)`." },
     .{ .form = "layout <mode>", .doc = "Same as `agate.layout(mode)`." },
     .{ .form = "space <n>", .doc = "Same as `agate.space(n)`." },
     .{ .form = "move_to_space <n>", .doc = "Same as `agate.move_to_space(n)`." },
@@ -192,6 +219,16 @@ fn emitMarkdown(b: *Buf) void {
     }
     b.w("\n", .{});
 
+    b.w("## `small_screen` fields (Small Screen Mode)\n\n", .{});
+    b.w("On a small main display (the built-in panel, or anything at or under `max_width` points), workspaces still on the default split layout switch to `layout` — a straight tiling split is not useful on a tiny screen. They switch back when a big display takes over (dock/undock re-evaluates). Workspaces whose layout was set by hand are left alone in both directions. Pair with `agate.gesture` for trackpad-driven window cycling.\n\n", .{});
+    b.w("| Key | Type | Description |\n", .{});
+    b.w("| --- | --- | --- |\n", .{});
+    for (small_screen_fields) |p| {
+        const opt = if (p.optional) " _(optional)_" else "";
+        b.w("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, opt });
+    }
+    b.w("\n", .{});
+
     b.w("## `agate.rule{{}}` fields\n\n", .{});
     b.w("| Key | Type | Description |\n", .{});
     b.w("| --- | --- | --- |\n", .{});
@@ -244,6 +281,13 @@ fn emitLua(b: *Buf) void {
     b.w("---@class agate.Config\n", .{});
     for (settings) |s| {
         b.w("---@field {s}? {s} {s} (default `{s}`)\n", .{ s.name, s.ty, s.doc, s.default });
+    }
+    b.w("\n", .{});
+
+    b.w("---@class agate.SmallScreen\n", .{});
+    for (small_screen_fields) |p| {
+        const opt = if (p.optional) "?" else "";
+        b.w("---@field {s}{s} {s} {s}\n", .{ p.name, opt, p.ty, p.doc });
     }
     b.w("\n", .{});
 

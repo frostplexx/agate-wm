@@ -11,6 +11,9 @@ const focus = @import("../wm/focus/focus.zig");
 const tree = @import("../wm/tree.zig");
 const data = @import("../wm/data.zig");
 const regexp = @import("../lib/regexp.zig");
+const gestures = @import("../wm/gestures.zig");
+const wm_layout = @import("../wm/layout.zig");
+const wm_animate = @import("../wm/animate.zig");
 
 // CGEventFlag modifier bits.
 pub const MOD_SHIFT: u64 = 0x0002_0000;
@@ -27,6 +30,14 @@ pub const BindingAction = union(enum) {
 pub const Binding = struct {
     keycode: u16,
     modifiers: u64,
+    action: BindingAction,
+};
+
+/// A trackpad gesture binding (`agate.gesture("3:left", fn)`): an N-finger
+/// swipe step in a direction, recognized by `wm/gestures.zig`.
+pub const GestureBinding = struct {
+    fingers: u8,
+    dir: gestures.Swipe,
     action: BindingAction,
 };
 
@@ -62,7 +73,28 @@ pub const Config = struct {
     /// them: we instead watch this key go down/up and synthesize `hyper_mods`.
     /// Default 79 = kVK_F18. 0 disables the feature.
     hyper_key: u16,
+    /// Small Screen Mode: on a small main display (the built-in panel, or any
+    /// display at or under `small_screen_max_width` points), workspaces still
+    /// on the default split layout are switched to `small_screen_layout`
+    /// (an accordion/stack suits a screen too tiny to split), and back when a
+    /// big display takes over. See `applySmallScreenMode`.
+    small_screen_enabled: bool,
+    /// Width threshold (points) for "small" — 0 means "built-in display only".
+    small_screen_max_width: f64,
+    /// The layout small workspaces get. Default `.H_STACK` (horizontal accordion).
+    small_screen_layout: data.Layout,
+    /// "tabs" variant: the small-screen stack gets zero accordion peek, so every
+    /// window is full-area and swipes/cycling flip between them like tabs.
+    small_screen_tabs: bool,
+    /// Animate AX-driven frame changes (AppKit's window slide) instead of
+    /// snapping. Mirrored into `wm_layout.animate` on config load.
+    animations: bool,
+    /// Show the active space number as a menu-bar status item.
+    space_indicator: bool,
+    /// Show the translucent target-slot overlay while dragging a window.
+    drag_preview: bool,
     bindings: std.ArrayList(Binding),
+    gesture_bindings: std.ArrayList(GestureBinding),
     /// Window assignment rules in registration order. All matching rules
     /// combine; the last match wins (yabai's `rule_combine_effects` order).
     rules: std.ArrayList(Rule),
@@ -155,6 +187,14 @@ fn numberField(lua: *Lua, name: [:0]const u8, dst: *f64) bool {
     return true;
 }
 
+/// Read the boolean field `name` from the table at `idx` into `dst` (left
+/// unchanged when absent or non-boolean).
+fn boolField(lua: *Lua, idx: i32, name: [:0]const u8, dst: *bool) void {
+    _ = lua.getField(idx, name);
+    defer lua.pop(1);
+    if (lua.isBoolean(-1)) dst.* = lua.toBoolean(-1);
+}
+
 fn agateConfig(lua: *Lua) i32 {
     const cfg = g_config orelse return 0;
     if (!lua.isTable(1)) return 0;
@@ -189,6 +229,65 @@ fn agateConfig(lua: *Lua) i32 {
     if (lua.isString(-1)) {
         const s = lua.toString(-1) catch "";
         if (lookupKeycode(std.mem.sliceTo(s, 0))) |code| cfg.hyper_key = code;
+    }
+    lua.pop(1);
+    // small_screen: { enabled = bool, max_width = number, layout = string }.
+    // `layout` accepts every layoutFromName name plus "tabs"/"tabbed" (a
+    // zero-peek stack: full-area windows flipped through like tabs).
+    _ = lua.getField(1, "small_screen");
+    if (lua.isTable(-1)) {
+        _ = lua.getField(-1, "enabled");
+        if (lua.isBoolean(-1)) cfg.small_screen_enabled = lua.toBoolean(-1);
+        lua.pop(1);
+        _ = lua.getField(-1, "max_width");
+        if (lua.isNumber(-1)) cfg.small_screen_max_width = lua.toNumber(-1) catch 0;
+        lua.pop(1);
+        _ = lua.getField(-1, "layout");
+        if (lua.isString(-1)) {
+            const s = std.mem.sliceTo(lua.toString(-1) catch "", 0);
+            if (std.mem.eql(u8, s, "tabs") or std.mem.eql(u8, s, "tabbed")) {
+                cfg.small_screen_layout = .H_STACK;
+                cfg.small_screen_tabs = true;
+            } else if (layoutFromName(s)) |l| {
+                cfg.small_screen_layout = l;
+                cfg.small_screen_tabs = false;
+            } else {
+                std.debug.print("[config] small_screen: unknown layout {s}\n", .{s});
+            }
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+    // UX toggles.
+    boolField(lua, 1, "animations", &cfg.animations);
+    wm_layout.animate = cfg.animations;
+    // animation_duration: milliseconds per frame animation — the speed knob.
+    var anim_dur: f64 = wm_animate.duration_ms;
+    if (numberField(lua, "animation_duration", &anim_dur)) {
+        // The knob used to be seconds; a sub-5 value can only be the old unit
+        // (a 5 ms animation is invisible) — convert instead of silently
+        // disabling animations for configs written against the old docs.
+        if (anim_dur > 0 and anim_dur < 5) {
+            std.debug.print("[config] animation_duration is in milliseconds now; treating {d} as {d} ms\n", .{ anim_dur, anim_dur * 1000 });
+            anim_dur *= 1000;
+        }
+        wm_animate.duration_ms = @max(0, anim_dur);
+    }
+    boolField(lua, 1, "space_indicator", &cfg.space_indicator);
+    boolField(lua, 1, "drag_preview", &cfg.drag_preview);
+    // space_animation: how much of the Space-switch transition plays.
+    _ = lua.getField(1, "space_animation");
+    if (lua.isString(-1)) {
+        const s = std.mem.sliceTo(lua.toString(-1) catch "", 0);
+        if (std.mem.eql(u8, s, "fast")) {
+            macos.event_tap.switch_speed = .fast;
+        } else if (std.mem.eql(u8, s, "very_fast")) {
+            macos.event_tap.switch_speed = .very_fast;
+        } else if (std.mem.eql(u8, s, "instant")) {
+            macos.event_tap.switch_speed = .instant;
+        } else {
+            std.debug.print("[config] space_animation: unknown speed {s}\n", .{s});
+        }
     }
     lua.pop(1);
     // Apply gaps to every workspace in the tree
@@ -240,6 +339,82 @@ fn agateBind(lua: *Lua) i32 {
     return 0;
 }
 
+/// Parse a gesture spec like `"3:left"` / `"swipe+3+up"`: a finger count
+/// (3 or 4) and a direction, in any order, separated by `:`, `+` or `-`.
+/// A literal `swipe` token is allowed and ignored. Null if either is missing.
+fn parseGestureSpec(spec: []const u8) ?struct { fingers: u8, dir: gestures.Swipe } {
+    var fingers: u8 = 0;
+    var dir: ?gestures.Swipe = null;
+    var it = std.mem.splitAny(u8, spec, ":+-");
+    while (it.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, "swipe")) continue;
+        if (part.len == 1 and part[0] >= '0' and part[0] <= '9') {
+            fingers = part[0] - '0';
+        } else if (std.mem.eql(u8, part, "left")) {
+            dir = .left;
+        } else if (std.mem.eql(u8, part, "right")) {
+            dir = .right;
+        } else if (std.mem.eql(u8, part, "up")) {
+            dir = .up;
+        } else if (std.mem.eql(u8, part, "down")) {
+            dir = .down;
+        } else {
+            return null;
+        }
+    }
+    if (fingers < 3 or fingers > 4) return null;
+    return .{ .fingers = fingers, .dir = dir orelse return null };
+}
+
+/// `agate.gesture(spec, action)` — bind an N-finger trackpad swipe (e.g.
+/// `"3:left"`) to a Lua function or string command, like `agate.bind` does for
+/// key chords. One step fires per threshold of swipe travel, so holding a long
+/// swipe repeats the action (Hyprland-style continuous cycling).
+fn agateGesture(lua: *Lua) i32 {
+    const cfg = g_config orelse return 0;
+    const spec_z = lua.toString(1) catch return 0;
+    const spec = std.mem.sliceTo(spec_z, 0);
+
+    const parsed = parseGestureSpec(spec) orelse {
+        std.debug.print("[config] bad gesture spec: {s} (want e.g. \"3:left\")\n", .{spec});
+        return 0;
+    };
+
+    if (lua.isFunction(2)) {
+        lua.pushValue(2);
+        const fn_ref = lua.ref(zlua.registry_index);
+        cfg.gesture_bindings.append(cfg.alloc, .{
+            .fingers = parsed.fingers,
+            .dir = parsed.dir,
+            .action = .{ .lua_fn = fn_ref },
+        }) catch {};
+    } else if (lua.isString(2)) {
+        const cmd_z = lua.toString(2) catch return 0;
+        const cmd = cfg.alloc.dupe(u8, std.mem.sliceTo(cmd_z, 0)) catch return 0;
+        cfg.gesture_bindings.append(cfg.alloc, .{
+            .fingers = parsed.fingers,
+            .dir = parsed.dir,
+            .action = .{ .cmd = cmd },
+        }) catch {
+            cfg.alloc.free(cmd);
+        };
+    }
+    return 0;
+}
+
+/// `agate.cycle("next"|"prev")` — focus the next/previous window among the
+/// focused window's siblings, wrapping at the edges. The accordion motion:
+/// on a small screen every window is one cycle step away.
+fn agateCycle(lua: *Lua) i32 {
+    const app = g_appstate orelse return 0;
+    const dir_z = lua.toString(1) catch return 0;
+    const dir = std.mem.sliceTo(dir_z, 0);
+    const forward = !(std.mem.eql(u8, dir, "prev") or std.mem.eql(u8, dir, "previous") or
+        std.mem.eql(u8, dir, "back") or std.mem.eql(u8, dir, "backward"));
+    _ = focus.cycleFocus(app, forward);
+    return 0;
+}
+
 fn agateFocus(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -286,6 +461,7 @@ fn setActiveLayout(app: *state.AppState, name: []const u8) void {
     } else {
         target.layout = layoutFromName(name) orelse return;
     }
+    target.auto_small = false; // an explicit choice — Small Screen Mode keeps off it
     tree.flushActive(app);
 }
 
@@ -506,6 +682,8 @@ pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8
 const agate_fns = [_]zlua.FnReg{
     .{ .name = "config",      .func = zlua.wrap(agateConfig) },
     .{ .name = "bind",        .func = zlua.wrap(agateBind) },
+    .{ .name = "gesture",     .func = zlua.wrap(agateGesture) },
+    .{ .name = "cycle",       .func = zlua.wrap(agateCycle) },
     .{ .name = "focus",       .func = zlua.wrap(agateFocus) },
     .{ .name = "layout",      .func = zlua.wrap(agateLayout) },
     .{ .name = "space",       .func = zlua.wrap(agateSpace) },
@@ -533,7 +711,15 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .accordion_padding = 40,
         .hyper_mods = MOD_CTRL | MOD_ALT | MOD_CMD | MOD_SHIFT,
         .hyper_key = 79, // kVK_F18 — common remapped-hyper trigger
+        .small_screen_enabled = true,
+        .small_screen_max_width = 0, // built-in display detection only
+        .small_screen_layout = .H_STACK,
+        .small_screen_tabs = false,
+        .animations = false,
+        .space_indicator = true,
+        .drag_preview = true,
         .bindings = .empty,
+        .gesture_bindings = .empty,
         .rules = .empty,
         .lua = try Lua.init(gpa),
     };
@@ -545,6 +731,8 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
 
     const config_path = findConfigPath(gpa) orelse {
         std.debug.print("[config] no init.lua found; using defaults\n", .{});
+        // Small Screen Mode is on by default, so it applies config or not.
+        if (applySmallScreenMode(app)) tree.flushActive(app);
         return cfg;
     };
     defer gpa.free(config_path);
@@ -558,7 +746,95 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         cfg.lua.pop(1);
     };
 
+    // With the config settled, put workspaces into (or out of) Small Screen
+    // Mode for the current display and re-tile so it shows immediately.
+    if (applySmallScreenMode(app)) tree.flushActive(app);
+
     return cfg;
+}
+
+// ---------------------------------------------------------------------------
+// Small Screen Mode
+// ---------------------------------------------------------------------------
+
+/// Whether the screen being worked on counts as "small": the built-in panel
+/// is the *only* display (a MacBook on the go — the case the mode exists for),
+/// or the visible frame is at or under the configured width threshold (for
+/// users who call e.g. a 13" external small). The only-display test matters:
+/// keying on "is the primary display built-in" while an external monitor is
+/// attached used to flip the accordion on for the big screen too.
+fn isSmallScreen(cfg: *const Config) bool {
+    if (macos.display.builtinIsOnlyDisplay()) return true;
+    if (cfg.small_screen_max_width > 0) {
+        if (macos.display.mainVisibleFrame()) |frame| {
+            return frame.size.width <= cfg.small_screen_max_width;
+        }
+    }
+    return false;
+}
+
+/// Re-evaluate Small Screen Mode against the current display and rewrite
+/// workspace layouts accordingly. Returns true if any workspace changed (the
+/// caller re-flushes). Called after config load and on every display
+/// reconfiguration (clamshell, dock/undock) — the moments "which screen am I
+/// on" can change.
+pub fn applySmallScreenMode(app: *state.AppState) bool {
+    const cfg = g_config orelse return false;
+    if (!cfg.small_screen_enabled) return false;
+    const root = app.tree orelse return false;
+    const peek: u32 = if (cfg.small_screen_tabs) 0 else @intFromFloat(@max(0, cfg.accordion_padding));
+    const normal_peek: u32 = @intFromFloat(@max(0, cfg.accordion_padding));
+    return applySmallLayoutToTree(root, isSmallScreen(cfg), cfg.small_screen_layout, peek, normal_peek);
+}
+
+/// The tree rewrite behind `applySmallScreenMode`, OS-free for testability.
+/// Entering small mode moves workspaces from the stock `.H_SPLIT` to `layout`
+/// (with `small_peek` as the accordion fan — 0 for the tabs variant), marking
+/// them `auto_small`; leaving it reverts exactly the marked ones. A layout the
+/// user picked by hand (float, v_split, a manual accordion — anything via
+/// `agate.layout`, which clears the mark) survives mode flips. Returns true if
+/// anything changed.
+fn applySmallLayoutToTree(con: *data.Con, small: bool, layout: data.Layout, small_peek: u32, normal_peek: u32) bool {
+    var changed = false;
+    if (con.con_type == .Workspace) {
+        if (small and con.layout == .H_SPLIT) {
+            con.layout = layout;
+            con.gaps.accordion = small_peek;
+            con.auto_small = true;
+            changed = true;
+        } else if (!small and con.auto_small) {
+            con.layout = .H_SPLIT;
+            con.gaps.accordion = normal_peek;
+            con.auto_small = false;
+            changed = true;
+        }
+    }
+    for (con.children.items) |child| {
+        if (applySmallLayoutToTree(child, small, layout, small_peek, normal_peek)) changed = true;
+    }
+    return changed;
+}
+
+/// Dispatch a recognized trackpad swipe against the registered gesture
+/// bindings (`agate.gesture`). Runs on the main run loop (see
+/// `wm/gestures.zig` for the marshalling) — safe to call Lua and the tree.
+/// Returns true if a binding matched.
+pub fn handleGesture(fingers: u8, dir: gestures.Swipe) bool {
+    const cfg = g_config orelse return false;
+    for (cfg.gesture_bindings.items) |b| {
+        if (b.fingers != fingers or b.dir != dir) continue;
+        switch (b.action) {
+            .lua_fn => |r| {
+                _ = cfg.lua.getIndexRaw(zlua.registry_index, r);
+                cfg.lua.protectedCall(.{ .args = 0, .results = 0 }) catch |err| {
+                    std.debug.print("[config] gesture binding error: {}\n", .{err});
+                };
+            },
+            .cmd => |cmd| executeCommand(cmd),
+        }
+        return true;
+    }
+    return false;
 }
 
 pub fn deinit(cfg: *Config) void {
@@ -569,6 +845,13 @@ pub fn deinit(cfg: *Config) void {
         }
     }
     cfg.bindings.deinit(cfg.alloc);
+    for (cfg.gesture_bindings.items) |b| {
+        switch (b.action) {
+            .lua_fn => |r| cfg.lua.unref(zlua.registry_index, r),
+            .cmd => |s| cfg.alloc.free(s),
+        }
+    }
+    cfg.gesture_bindings.deinit(cfg.alloc);
     for (cfg.rules.items) |r| freeRule(r);
     cfg.rules.deinit(cfg.alloc);
     cfg.lua.deinit();
@@ -589,6 +872,18 @@ pub fn hyperMods() u64 {
 pub fn hyperKey() u16 {
     const cfg = g_config orelse return 0;
     return cfg.hyper_key;
+}
+
+/// Whether the menu-bar space indicator is enabled (config `space_indicator`).
+pub fn spaceIndicatorEnabled() bool {
+    const cfg = g_config orelse return true;
+    return cfg.space_indicator;
+}
+
+/// Whether the drag-preview overlay is enabled (config `drag_preview`).
+pub fn dragPreviewEnabled() bool {
+    const cfg = g_config orelse return true;
+    return cfg.drag_preview;
 }
 
 /// Cheap test: does any registered binding match this chord? Called from inside
@@ -656,6 +951,11 @@ fn executeCommand(cmd: []const u8) void {
     } else if (std.mem.startsWith(u8, cmd, "focus ")) {
         const dir = parseDir(cmd[6..]) orelse return;
         _ = focus.focusDirection(app, dir);
+    } else if (std.mem.startsWith(u8, cmd, "cycle ")) {
+        const arg = cmd[6..];
+        const forward = !(std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous") or
+            std.mem.eql(u8, arg, "back") or std.mem.eql(u8, arg, "backward"));
+        _ = focus.cycleFocus(app, forward);
     } else if (std.mem.startsWith(u8, cmd, "layout ")) {
         setActiveLayout(app, cmd[7..]);
     } else if (std.mem.startsWith(u8, cmd, "space ")) {
@@ -714,6 +1014,61 @@ test "layoutFromName maps names and synonyms" {
     try testing.expectEqual(data.Layout.V_STACK, layoutFromName("stacking").?);
     try testing.expectEqual(data.Layout.FLOAT, layoutFromName("floating").?);
     try testing.expect(layoutFromName("bogus") == null);
+}
+
+test "parseGestureSpec parses finger count and direction" {
+    const p = parseGestureSpec("3:left").?;
+    try testing.expectEqual(@as(u8, 3), p.fingers);
+    try testing.expectEqual(gestures.Swipe.left, p.dir);
+
+    const q = parseGestureSpec("swipe+4+up").?; // alternate separators, swipe token
+    try testing.expectEqual(@as(u8, 4), q.fingers);
+    try testing.expectEqual(gestures.Swipe.up, q.dir);
+
+    const r = parseGestureSpec("right:3").? ; // order-insensitive
+    try testing.expectEqual(gestures.Swipe.right, r.dir);
+
+    try testing.expect(parseGestureSpec("2:left") == null); // 2 fingers is scrolling
+    try testing.expect(parseGestureSpec("5:left") == null); // unsupported count
+    try testing.expect(parseGestureSpec("3") == null); // no direction
+    try testing.expect(parseGestureSpec("3:sideways") == null); // bad direction
+}
+
+test "applySmallLayoutToTree flips default workspaces in and out of small mode" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const root = try alloc.create(data.Con);
+    root.* = .{ .id = 0, .con_type = .Root };
+    const ws_default = try alloc.create(data.Con);
+    ws_default.* = .{ .id = 1, .con_type = .Workspace, .parent = root };
+    ws_default.gaps.accordion = 40;
+    const ws_manual = try alloc.create(data.Con);
+    ws_manual.* = .{ .id = 2, .con_type = .Workspace, .parent = root, .layout = .FLOAT };
+    try root.children.append(alloc, ws_default);
+    try root.children.append(alloc, ws_manual);
+
+    // Enter small mode (tabs variant: zero peek): only the default ws changes.
+    try testing.expect(applySmallLayoutToTree(root, true, .H_STACK, 0, 40));
+    try testing.expectEqual(data.Layout.H_STACK, ws_default.layout);
+    try testing.expect(ws_default.auto_small);
+    try testing.expectEqual(@as(u32, 0), ws_default.gaps.accordion);
+    try testing.expectEqual(data.Layout.FLOAT, ws_manual.layout);
+
+    // Already small — applying again is a no-op.
+    try testing.expect(!applySmallLayoutToTree(root, true, .H_STACK, 0, 40));
+
+    // Leave small mode: the auto-set workspace reverts, peek restored.
+    try testing.expect(applySmallLayoutToTree(root, false, .H_STACK, 0, 40));
+    try testing.expectEqual(data.Layout.H_SPLIT, ws_default.layout);
+    try testing.expect(!ws_default.auto_small);
+    try testing.expectEqual(@as(u32, 40), ws_default.gaps.accordion);
+
+    // A user-chosen H_STACK (no auto_small mark) is never reverted.
+    ws_manual.layout = .H_STACK;
+    try testing.expect(!applySmallLayoutToTree(root, false, .H_STACK, 0, 40));
+    try testing.expectEqual(data.Layout.H_STACK, ws_manual.layout);
 }
 
 test "parseDir maps direction names" {

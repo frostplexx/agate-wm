@@ -80,6 +80,10 @@ pub const Con = struct {
     window: ?Window = null,
     /// The tiling mode of this Con. Only relevant if it has children.
     layout: Layout = .H_SPLIT,
+    /// Whether `layout` was set automatically by Small Screen Mode (so a later
+    /// display reconfiguration may revert it). A manual `agate.layout(...)`
+    /// clears it — user choices survive mode flips.
+    auto_small: bool = false,
     /// The gaps for this Con. Only relevant if it has children.
     gaps: Gaps = .{ .inner = 0, .outer = 0, .top = 0, .bottom = 0, .left = 0, .right = 0 },
     /// parent of this Con. Null for the root Con.

@@ -35,6 +35,12 @@ pub const clock = @import("clock.zig");
 pub const event_tap = @import("event_tap.zig");
 /// NSWorkspace app launch/terminate notifications (event-driven, real-time).
 pub const app_watch = @import("app_watch.zig");
+/// Raw trackpad touches via the private MultitouchSupport framework (dlopen'd).
+pub const multitouch = @import("multitouch.zig");
+/// Menu-bar Space indicator (NSStatusItem via the Obj-C runtime).
+pub const statusbar = @import("statusbar.zig");
+/// Drag-preview overlay window (borderless translucent NSWindow).
+pub const overlay = @import("overlay.zig");
 
 // Common conveniences re-exported at the top level.
 pub const String = foundation.String;

@@ -343,19 +343,44 @@ fn postPhase(phase: GesturePhase, dir: SwipeDirection, progress: f64, vel_x: f64
     CGEventPost(kCGSessionEventTap, new_ev);
 }
 
+/// How fast a synthetic Space switch completes. The gesture recognizer animates
+/// the remaining transition at the velocity carried by the `ended` phase, so the
+/// velocity is the speed knob: enormous velocity ≈ no visible animation.
+pub const SwitchSpeed = enum {
+    /// Quick but visibly animated slide.
+    fast,
+    /// A blink of a slide.
+    very_fast,
+    /// Snap with no perceptible animation (yabai #2781 behaviour).
+    instant,
+
+    fn velocity(self: SwitchSpeed) f64 {
+        return switch (self) {
+            .fast => 1.5,
+            .very_fast => 4.0,
+            .instant => 9999.0,
+        };
+    }
+};
+
+/// The speed used for every synthetic Space switch. Set from the Lua config
+/// (`agate.config{ space_animation = "fast" | "very_fast" | "instant" }`).
+pub var switch_speed: SwitchSpeed = .instant;
+
 /// Synthesize a began→ended Dock-swipe gesture sequence that switches one
-/// Space in `dir`. Matches yabai's technique (#2781): two phases only, high
-/// velocity so the transition animation is skipped. Uses the field 4205
-/// IOHIDSystemQueueElement injection required by macOS 27 / Golden Gate.
+/// Space in `dir`. Matches yabai's technique (#2781): two phases only, the
+/// `ended` velocity (see `switch_speed`) deciding how much transition
+/// animation plays. Uses the field 4205 IOHIDSystemQueueElement injection
+/// required by macOS 27 / Golden Gate.
 ///
 /// `dir == .right` → positive progress → higher Mission Control index (next space).
 /// `dir == .left`  → negative progress → lower Mission Control index (prev space).
 pub fn performSwitchGesture(dir: SwipeDirection) void {
-    // Tiny progress means no visible drag — the high velocity on `ended` lets
-    // the recognizer snap straight to the adjacent space (yabai #2781).
+    // Tiny progress means no visible drag — the velocity on `ended` carries
+    // the recognizer the rest of the way to the adjacent space (yabai #2781).
     const espilon: f64 = std.math.floatTrueMin(f32);
     const progress: f64 = if (dir == .right) espilon else -espilon;
     const sign: f64 = if (dir == .right) 1.0 else -1.0;
     postPhase(.began, dir, progress, 0.0);
-    postPhase(.ended, dir, progress, sign * 9999.0);
+    postPhase(.ended, dir, progress, sign * switch_speed.velocity());
 }

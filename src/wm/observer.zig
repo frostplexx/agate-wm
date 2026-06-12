@@ -27,6 +27,7 @@ const data = @import("data.zig");
 const tree = @import("tree.zig");
 const window = @import("window.zig");
 const focus = @import("focus/focus.zig");
+const gestures = @import("gestures.zig");
 const state = @import("../state.zig");
 const lua_config = @import("../config/lua.zig");
 
@@ -63,7 +64,7 @@ fn graceTimerFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void 
     const root = mgr.appState.tree orelse return;
     const leaf = tree.findLeaf(root, ctx.wid) orelse return; // already removed/re-paired
 
-    if (repairTabLeaf(ctx.observer, leaf, ctx.pid, ctx.frame, ctx.wid)) {
+    if (repairTabLeaf(ctx.observer, root, leaf, ctx.pid, ctx.frame, ctx.wid)) {
         tree.flushActive(mgr.appState);
         return;
     }
@@ -115,6 +116,13 @@ const Manager = struct {
     ktap: macos.event_tap.MachPortRef = null,
     /// Whether the mouse actually moved since mouse-down (a drag, not a click).
     dragging: bool = false,
+    /// Window id of the leaf identified as being dragged (0 = none yet). Found
+    /// by the preview's deferred scan; looked up via `tree.findLeaf` each tick
+    /// so a window closing mid-drag can't leave a dangling pointer.
+    drag_wid: u32 = 0,
+    /// Whether a coalesced drag-preview update is already scheduled (drag
+    /// events arrive at device rate; the preview repaints at ~20 Hz).
+    preview_pending: bool = false,
     /// Pending debounce timer for a display-reconfiguration re-tile (null when
     /// none is armed). A single configuration change (clamshell, dock/undock)
     /// emits a burst of per-display callbacks; we coalesce them into one flush.
@@ -231,6 +239,16 @@ pub fn run(appState: *state.AppState) !void {
         std.debug.print("[observer] keyboard tap unavailable; keybindings disabled\n", .{});
     }
 
+    // Menu-bar space indicator. The config is already loaded (wm.zig runs
+    // lua_config.init before us), so the toggle is settled by now.
+    if (lua_config.spaceIndicatorEnabled()) {
+        if (macos.statusbar.init()) {
+            macos.statusbar.setSpaceNumber(macos.spaces.activeUserIndex(appState.gpa, appState.skylight_cid));
+        } else {
+            std.debug.print("[observer] status bar unavailable; space indicator disabled\n", .{});
+        }
+    }
+
     // Re-tile whenever the user switches Mission Control spaces.
     _ = macos.skylight.CGSRegisterNotifyProc(
         onSpaceChanged,
@@ -238,12 +256,27 @@ pub fn run(appState: *state.AppState) !void {
         mgr,
     );
 
+    // Trackpad swipe gestures (Small Screen Mode's window cycling, and any
+    // other `agate.gesture` binding). Recognition runs on MultitouchSupport's
+    // thread; dispatch lands back on this run loop. Missing framework or no
+    // trackpad just leaves gestures off.
+    _ = gestures.start();
+
     // Re-tile when the display layout changes (clamshell, dock/undock, a
     // resolution change). The visible frame we tile to moves with it, but no
     // window event fires, so without this the layout keeps the old geometry.
     _ = macos.display.CGDisplayRegisterReconfigurationCallback(onDisplayReconfigured, mgr);
 
-    c.CFRunLoopRun();
+    // With a status item, clicks on it are NSEvents delivered to this process,
+    // and only [NSApp run] dispatches those safely — a bare CFRunLoopRun left
+    // AppKit half-launched and the first click crashed in an uncaught
+    // exception. NSApp's loop pumps the same main CFRunLoop, so every source
+    // installed above behaves identically.
+    if (macos.statusbar.active()) {
+        macos.statusbar.runApp();
+    } else {
+        c.CFRunLoopRun();
+    }
 }
 
 /// Walk the tree and ensure every leaf window's app is observed for creates and
@@ -422,6 +455,9 @@ fn onSpaceChanged(
 ) callconv(.c) void {
     const mgr: *Manager = @ptrCast(@alignCast(userdata orelse return));
     tree.flushActive(mgr.appState);
+    // Keep the menu-bar indicator on the space the user now sees (no-op when
+    // the status item was never created).
+    macos.statusbar.setSpaceNumber(macos.spaces.activeUserIndex(mgr.appState.gpa, mgr.appState.skylight_cid));
     // A SkyLight space switch leaves the previous space's app frontmost, so the
     // menu bar keeps showing (and overlapping with) its menus. The menu bar
     // tracks the frontmost app, so activate a window on the now-active space to
@@ -480,6 +516,10 @@ fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) v
         c.CFRelease(t);
         mgr.display_timer = null;
     }
+    // The main display may have changed class (built-in vs external): move
+    // workspaces into or out of Small Screen Mode before tiling to the new
+    // geometry, so undocking lands straight in the accordion.
+    _ = lua_config.applySmallScreenMode(mgr.appState);
     tree.flushActive(mgr.appState);
     std.debug.print("[observer] display reconfigured → retiled\n", .{});
 }
@@ -534,11 +574,61 @@ fn mouseTap(
             // resolves to "no off-screen space" and is a no-op anyway.
             g_last_activation_input = c.CFAbsoluteTimeGetCurrent();
         },
-        macos.event_tap.kCGEventLeftMouseDragged => mgr.dragging = true,
+        macos.event_tap.kCGEventLeftMouseDragged => {
+            mgr.dragging = true;
+            schedulePreviewUpdate(mgr);
+        },
         macos.event_tap.kCGEventLeftMouseUp => onMouseUp(mgr),
         else => {},
     }
     return event; // listen-only: pass the event through unchanged
+}
+
+/// What a scan of the active workspace found out of place: the first window
+/// whose real size no longer matches the tree (a resize), and the first whose
+/// position moved with its size intact (a move).
+const DragScan = struct {
+    resized: ?*data.Con = null,
+    resized_frame: macos.window_list.Rect = undefined,
+    moved: ?*data.Con = null,
+    moved_frame: macos.window_list.Rect = undefined,
+};
+
+/// Recursively compare every leaf's real AX frame under `con` against the tree
+/// bounds, classifying mismatches into `s` (yabai's `mouse_window_info_populate`
+/// field-change test). Recursing — rather than only walking the workspace's
+/// direct children, as this used to — lets windows inside nested containers be
+/// dragged and previewed too.
+fn scanChangedWindows(con: *data.Con, s: *DragScan) void {
+    const eps: f64 = 2;
+    if (con.window) |*win| {
+        const el = window.resolveElement(win) orelse return;
+        const pos = el.position() orelse return;
+        const sz = el.size() orelse return;
+        const frame = macos.window_list.Rect{ .origin = pos, .size = sz };
+
+        const size_changed = @abs(sz.width - win.bounds.size.width) > eps or
+            @abs(sz.height - win.bounds.size.height) > eps;
+        const pos_changed = @abs(pos.x - win.bounds.origin.x) > eps or
+            @abs(pos.y - win.bounds.origin.y) > eps;
+
+        // A size mismatch only counts as a user resize where a resize is
+        // possible: a split parent. In stacks/accordions (and for apps that
+        // clamp their size, e.g. terminals snapping to the cell grid) the
+        // mismatch is permanent noise — recording it would make every later
+        // drag classify as a "resize" of that window and swallow the real move.
+        const parent_layout = if (con.parent) |p| p.layout else data.Layout.H_SPLIT;
+        const resizable = parent_layout == .H_SPLIT or parent_layout == .V_SPLIT;
+        if (size_changed and resizable and s.resized == null) {
+            s.resized = con;
+            s.resized_frame = frame;
+        } else if (pos_changed and !size_changed and s.moved == null) {
+            s.moved = con;
+            s.moved_frame = frame;
+        }
+        return;
+    }
+    for (con.children.items) |child| scanChangedWindows(child, s);
 }
 
 /// A drag ended. Find which managed window on the active Space actually changed
@@ -549,43 +639,113 @@ fn mouseTap(
 fn onMouseUp(mgr: *Manager) void {
     if (!mgr.dragging) return; // a plain click, not a drag
     mgr.dragging = false;
+    mgr.drag_wid = 0;
+    macos.overlay.hide();
 
     const app = mgr.appState;
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
-    const eps: f64 = 2;
 
-    var moved: ?*data.Con = null;
-    var moved_frame: macos.window_list.Rect = undefined;
+    var scan = DragScan{};
+    scanChangedWindows(ws, &scan);
 
-    for (ws.children.items) |leaf| {
-        const win = if (leaf.window) |*w| w else continue;
-        const el = window.resolveElement(win) orelse continue;
-        const pos = el.position() orelse continue;
-        const sz = el.size() orelse continue;
-        const final = macos.window_list.Rect{ .origin = pos, .size = sz };
-
-        const size_changed = @abs(sz.width - win.bounds.size.width) > eps or
-            @abs(sz.height - win.bounds.size.height) > eps;
-        const pos_changed = @abs(pos.x - win.bounds.origin.x) > eps or
-            @abs(pos.y - win.bounds.origin.y) > eps;
-
-        if (size_changed) {
-            // Resize wins over a move (a leading-edge resize changes both).
-            _ = tree.applyManualResize(leaf, final);
-            tree.flushActive(app);
-            return;
-        }
-        if (pos_changed and moved == null) {
-            moved = leaf;
-            moved_frame = final;
-        }
+    // Resize wins over a move (a leading-edge resize changes both).
+    if (scan.resized) |leaf| {
+        _ = tree.applyManualResize(leaf, scan.resized_frame);
+        tree.flushActive(app);
+        return;
     }
-
-    if (moved) |leaf| {
-        _ = tree.applyManualMove(leaf, moved_frame);
+    if (scan.moved) |leaf| {
+        _ = tree.applyManualMove(leaf, scan.moved_frame);
         tree.flushActive(app);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Drag preview (the "where will it tile" overlay)
+// ---------------------------------------------------------------------------
+
+/// Arm one coalesced preview tick. Drag events arrive at device rate (60+ Hz);
+/// the preview repaints from a one-shot timer so the tap callback stays cheap
+/// (the AX frame reads happen off the callback) and at most one update is in
+/// flight.
+fn schedulePreviewUpdate(mgr: *Manager) void {
+    if (!lua_config.dragPreviewEnabled()) return;
+    if (mgr.preview_pending) return;
+    mgr.preview_pending = true;
+    if (!scheduleOneShot(0.05, c.kCFRunLoopCommonModes, mgr, previewUpdateFired)) {
+        mgr.preview_pending = false;
+    }
+}
+
+fn previewUpdateFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const mgr: *Manager = @ptrCast(@alignCast(info orelse return));
+    mgr.preview_pending = false;
+    if (!mgr.dragging) {
+        macos.overlay.hide();
+        return;
+    }
+    updateDragPreview(mgr);
+}
+
+/// One preview tick: identify the window being dragged (the leaf whose real
+/// position left its tree slot with its size intact), then highlight the
+/// sibling slot its centre is currently over — the exact slot
+/// `tree.applyManualMove` will swap it into on mouse-up. No target (dragging
+/// in place, or a resize) hides the overlay.
+fn updateDragPreview(mgr: *Manager) void {
+    const app = mgr.appState;
+    const root = app.tree orelse return;
+    const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
+    const ws = tree.findWorkspace(root, sid) orelse return;
+
+    // Resolve the dragged leaf: the one identified on an earlier tick (if it
+    // still exists and is still displaced), else a fresh scan.
+    var leaf: ?*data.Con = null;
+    var frame: macos.window_list.Rect = undefined;
+    if (mgr.drag_wid != 0) {
+        if (tree.findLeaf(root, mgr.drag_wid)) |l| {
+            var scan = DragScan{};
+            scanChangedWindows(l, &scan);
+            if (scan.moved) |m| {
+                leaf = m;
+                frame = scan.moved_frame;
+            }
+        }
+    }
+    if (leaf == null) {
+        var scan = DragScan{};
+        scanChangedWindows(ws, &scan);
+        if (scan.moved) |m| {
+            leaf = m;
+            frame = scan.moved_frame;
+            mgr.drag_wid = @intCast(m.id);
+        }
+    }
+    const dragged = leaf orelse {
+        macos.overlay.hide();
+        return;
+    };
+
+    // Same hit test as tree.applyManualMove: the sibling whose slot contains
+    // the dragged window's centre is where it will land.
+    const parent = dragged.parent orelse {
+        macos.overlay.hide();
+        return;
+    };
+    const cx = frame.origin.x + frame.size.width / 2;
+    const cy = frame.origin.y + frame.size.height / 2;
+    for (parent.children.items) |child| {
+        if (child == dragged) continue;
+        const b = (child.window orelse continue).bounds;
+        if (cx >= b.origin.x and cx < b.origin.x + b.size.width and
+            cy >= b.origin.y and cy < b.origin.y + b.size.height)
+        {
+            macos.overlay.show(b);
+            return;
+        }
+    }
+    macos.overlay.hide();
 }
 
 /// yabai's `window_is_standard` (koekeishiya/yabai, src/window.c): a window we
@@ -947,7 +1107,19 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     // group one shared frame). Replace the group's leaf with the new front tab
     // instead of adding a second tile — the window server has no tab concept, so
     // this frame-identity test is how we collapse a tab group to one window.
-    if (tree.findTabSibling(ws, win.pid, win.bounds)) |leaf| {
+    //
+    // ONLY in split layouts: in a stack/accordion (and FLOAT) windows
+    // legitimately share frames — terminals even open new windows at the
+    // previous window's exact frame — so the frame-identity signal is
+    // meaningless there and used to *swallow* the existing leaf, leaving its
+    // window untracked at full size. In those layouts a genuine new native tab
+    // simply gets its own (harmlessly overlapping) leaf.
+    const frame_identity_is_tab = ws.layout == .H_SPLIT or ws.layout == .V_SPLIT;
+    const frame_sibling: ?*data.Con = if (frame_identity_is_tab)
+        tree.findTabSibling(ws, win.pid, win.bounds)
+    else
+        null;
+    if (frame_sibling) |leaf| {
         leaf.window.?.deinit();
         leaf.window = win;
         leaf.id = win.id;
@@ -969,6 +1141,13 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
     applyAssignmentRules(app, leaf, el);
     tree.flushActive(app);
+
+    // In a stack/accordion the tiles overlap almost entirely; make sure the
+    // new window is the one in front, not a sliver peeking out behind the
+    // previous tile. (Skip if a rule just re-homed the leaf to another Space.)
+    if (leaf.parent == ws and (ws.layout == .H_STACK or ws.layout == .V_STACK)) {
+        _ = focus.focusLeaf(leaf);
+    }
 }
 
 /// Re-pair `leaf` onto a surviving sibling tab after the tab it tracked was
@@ -977,8 +1156,14 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
 /// just promoted to front. When one is found, swap the leaf onto it (and
 /// re-register the destroy hook for the new window id) so the group keeps its
 /// tile instead of collapsing. Returns true if the leaf was re-paired.
+///
+/// A sibling that already has its own leaf under `root` is never a tab: it's
+/// just another tiled window sharing the frame (stack/accordion layouts put
+/// every window at near-identical frames; "tabs" at *identical* ones). Pairing
+/// onto it would put the same window id on two leaves and corrupt the tree.
 fn repairTabLeaf(
     observer: ax.AXObserverRef,
+    root: *data.Con,
     leaf: *data.Con,
     pid: i32,
     frame: macos.window_list.Rect,
@@ -990,6 +1175,12 @@ fn repairTabLeaf(
 
     const eps: f64 = 2;
     const sib = app_el.windowMatchingFrame(frame, eps, dead_wid) orelse return false;
+    if (sib.windowId()) |sib_wid| {
+        if (tree.hasWindow(root, sib_wid)) {
+            sib.release();
+            return false;
+        }
+    }
     // Reuse the old window's owner string (arena-allocated, outlives the swap).
     const owner = leaf.window.?.owner;
     const win = window.fromElement(sib, owner) orelse {
@@ -1024,7 +1215,7 @@ fn onWindowDestroyed(mgr: *Manager, observer: ax.AXObserverRef, wid: u32) void {
 
     // Fast path: the promoted sibling tab is already sitting at the closed tab's
     // frame — keep the tile by swapping the leaf onto it.
-    if (repairTabLeaf(observer, leaf, pid, frame, wid)) {
+    if (repairTabLeaf(observer, root, leaf, pid, frame, wid)) {
         tree.flushActive(app);
         return;
     }

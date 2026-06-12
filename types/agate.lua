@@ -23,6 +23,17 @@
 ---@field accordion_padding? number Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`. (default `40`)
 ---@field hyper? string[] Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. (default `{"ctrl","alt","cmd","shift"}`)
 ---@field hyper_key? string Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables. (default `"f18"`)
+---@field small_screen? agate.SmallScreen Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over. (default `{ enabled = true, layout = "h_accordion", max_width = 0 }`)
+---@field drag_preview? boolean While dragging a window, highlight the tile it will swap into on drop with a translucent overlay. (default `true`)
+---@field space_indicator? boolean Show the active space's number as a menu-bar status item. (default `true`)
+---@field animations? boolean Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`. (default `false`)
+---@field animation_duration? number Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`. (default `150`)
+---@field space_animation? string How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation). (default `"instant"`)
+
+---@class agate.SmallScreen
+---@field enabled? boolean Master switch (default `true`).
+---@field layout? string Layout small workspaces get: any layout name (default `"h_accordion"`), or `"tabs"` for a zero-peek stack — full-area windows flipped through like tabs.
+---@field max_width? number Width (points) at or under which a display counts as small, in addition to the built-in panel. `0` (default) = built-in display detection only.
 
 ---@class agate.Rule
 ---@field app? string POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.
@@ -41,6 +52,15 @@ function agate.config(config) end
 ---@param spec string Key chord, e.g. `"hyper+shift+l"`.
 ---@param action fun()|string A Lua callback, or a string command (see Commands below).
 function agate.bind(spec, action) end
+
+---Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
+---@param spec string Finger count (3 or 4) and direction, e.g. `"3:left"` or `"4:up"`.
+---@param action fun()|string A Lua callback, or a string command (see Commands below).
+function agate.gesture(spec, action) end
+
+---Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.
+---@param dir "next"|"prev" Cycle direction.
+function agate.cycle(dir) end
 
 ---Move focus to the nearest window in a direction, descending into and ascending out of nested containers (i3-style). Left/right traverse horizontal splits/stacks; up/down vertical ones.
 ---@param dir agate.Direction Direction to move focus.

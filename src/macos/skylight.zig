@@ -72,6 +72,40 @@ pub extern fn SLSTransactionSetManagedDisplayCurrentSpace(txn: TransactionRef, d
 pub extern fn SLSTransactionSpaceRebuildMenuBar(txn: TransactionRef, space: u64) void;
 pub extern fn SLSTransactionCommit(txn: TransactionRef, options: c_int) CGError;
 
+// --- Window transforms (visual-only move/scale) — DEAD END for foreign windows
+//
+// The window server positions every window through an affine transform mapping
+// *screen* points to *window-local* points: a window resting at frame F
+// carries `translate(-F.x, -F.y)` (scale 1). Overriding it would redraw the
+// window anywhere without involving the owning app — yabai's animation
+// primitive (koekeishiya/yabai, src/window_manager.c).
+//
+// PROBED on this machine (macOS 27, tools/transform_probe.m, June 2026):
+// both `SLSSetWindowTransform` and `SLSTransactionSetWindowTransform`+commit
+// return success for windows of OTHER processes but the write is silently
+// IGNORED (read-back unchanged; own-window writes store and apply). No
+// `SLSBridged*` per-window transform operation exists either (all bridged ops
+// are space-level). This is why yabai's animations need its Dock-injected
+// scripting addition. agate's animations therefore interpolate via AX
+// (`wm/animate.zig`) instead. Declarations kept for the probe and future RE.
+
+/// CGAffineTransform (CoreGraphics/CGAffineTransform.h — hand-declared; the
+/// header isn't in our @cImport). Maps p' = (a·x + c·y + tx, b·x + d·y + ty).
+pub const CGAffineTransform = extern struct {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    tx: f64,
+    ty: f64,
+};
+
+/// Set window `wid`'s screen→window transform. Returns 0 even when ignored —
+/// success is NOT evidence the write landed (see probe note above); verify
+/// with `SLSGetWindowTransform` read-back.
+pub extern fn SLSSetWindowTransform(cid: ConnectionID, wid: WindowID, transform: CGAffineTransform) CGError;
+pub extern fn SLSGetWindowTransform(cid: ConnectionID, wid: WindowID, out: *CGAffineTransform) CGError;
+
 // --- Window enumeration / iteration ----------------------------------------
 
 /// All spaces across every display: an array of per-display dictionaries, each

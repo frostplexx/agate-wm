@@ -26,6 +26,27 @@ pub fn mainVisibleFrame() ?Rect {
     };
 }
 
+// --- Small-screen detection -------------------------------------------------
+
+extern fn CGMainDisplayID() u32;
+extern fn CGDisplayIsBuiltin(display: u32) i32;
+extern fn CGGetActiveDisplayList(maxDisplays: u32, activeDisplays: ?[*]u32, displayCount: *u32) i32;
+
+/// Whether the built-in panel is the *only* active display — the actual
+/// "working on the MacBook screen" situation Small Screen Mode is for.
+///
+/// Deliberately NOT "is the main display built-in": `CGMainDisplayID` is the
+/// arrangement-primary display, which often stays the built-in panel while the
+/// user works on an external monitor beside it — keying on it put every
+/// workspace into the accordion on a big screen. With one display there is no
+/// ambiguity.
+pub fn builtinIsOnlyDisplay() bool {
+    var count: u32 = 0;
+    if (CGGetActiveDisplayList(0, null, &count) != 0) return false;
+    if (count != 1) return false;
+    return CGDisplayIsBuiltin(CGMainDisplayID()) != 0;
+}
+
 // --- Display reconfiguration (clamshell, dock/undock, resolution change) ---
 //
 // CoreGraphics posts a reconfiguration callback whenever the display layout

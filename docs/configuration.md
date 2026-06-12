@@ -13,6 +13,22 @@ All configuration is Lua, loaded from `$WM_CONFIG`, `$XDG_CONFIG_HOME/agate/init
 | `accordion_padding` | `number` | `40` | Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`. |
 | `hyper` | `string[]` | `{"ctrl","alt","cmd","shift"}` | Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. |
 | `hyper_key` | `string` | `"f18"` | Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables. |
+| `small_screen` | `agate.SmallScreen` | `{ enabled = true, layout = "h_accordion", max_width = 0 }` | Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over. |
+| `drag_preview` | `boolean` | `true` | While dragging a window, highlight the tile it will swap into on drop with a translucent overlay. |
+| `space_indicator` | `boolean` | `true` | Show the active space's number as a menu-bar status item. |
+| `animations` | `boolean` | `false` | Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`. |
+| `animation_duration` | `number` | `150` | Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`. |
+| `space_animation` | `string` | `"instant"` | How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation). |
+
+## `small_screen` fields (Small Screen Mode)
+
+On a small main display (the built-in panel, or anything at or under `max_width` points), workspaces still on the default split layout switch to `layout` — a straight tiling split is not useful on a tiny screen. They switch back when a big display takes over (dock/undock re-evaluates). Workspaces whose layout was set by hand are left alone in both directions. Pair with `agate.gesture` for trackpad-driven window cycling.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `enabled` | `boolean` | Master switch (default `true`). _(optional)_ |
+| `layout` | `string` | Layout small workspaces get: any layout name (default `"h_accordion"`), or `"tabs"` for a zero-peek stack — full-area windows flipped through like tabs. _(optional)_ |
+| `max_width` | `number` | Width (points) at or under which a display counts as small, in addition to the built-in panel. `0` (default) = built-in display detection only. _(optional)_ |
 
 ## `agate.rule{}` fields
 
@@ -37,6 +53,19 @@ Bind a key chord to an action.
 
 - `spec` (`string`) — Key chord, e.g. `"hyper+shift+l"`.
 - `action` (`fun()|string`) — A Lua callback, or a string command (see Commands below).
+
+### `agate.gesture(spec, action)`
+
+Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
+
+- `spec` (`string`) — Finger count (3 or 4) and direction, e.g. `"3:left"` or `"4:up"`.
+- `action` (`fun()|string`) — A Lua callback, or a string command (see Commands below).
+
+### `agate.cycle(dir)`
+
+Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.
+
+- `dir` (`"next"|"prev"`) — Cycle direction.
 
 ### `agate.focus(dir)`
 
@@ -104,6 +133,7 @@ Strings passed as the second argument of `agate.bind` instead of a function:
 | --- | --- |
 | `move <dir>` | Same as `agate.move(dir)`. |
 | `focus <dir>` | Same as `agate.focus(dir)`. |
+| `cycle <next|prev>` | Same as `agate.cycle(dir)`. |
 | `layout <mode>` | Same as `agate.layout(mode)`. |
 | `space <n>` | Same as `agate.space(n)`. |
 | `move_to_space <n>` | Same as `agate.move_to_space(n)`. |
