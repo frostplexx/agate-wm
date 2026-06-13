@@ -316,6 +316,13 @@ fn observeApp(mgr: *Manager, pid: i32) ?Entry {
         foundation.CFRelease(observer);
         return null; // app not ready — caller retries
     }
+    // Track the app's front window changing — notably a native tab switch, which
+    // swaps which window is front without any create/destroy event. We pin a tab
+    // group to a single tracked window id, so without this the leaf would point
+    // at a stale background tab and every later focus/flush would raise THAT tab
+    // over the one the user switched to. Best-effort (not all apps emit these).
+    _ = addAppNotification(observer, app, "AXFocusedWindowChanged");
+    _ = addAppNotification(observer, app, "AXMainWindowChanged");
     c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), ax.AXObserverGetRunLoopSource(observer), c.kCFRunLoopDefaultMode);
 
     const entry = Entry{ .observer = observer, .app = app };
@@ -361,7 +368,62 @@ fn axCallback(
         onWindowCreated(mgr, observer, element);
     } else if (std.mem.eql(u8, name, "AXUIElementDestroyed")) {
         if (refcon) |r| onWindowDestroyed(mgr, observer, @intCast(@intFromPtr(r)));
+    } else if (std.mem.eql(u8, name, "AXFocusedWindowChanged") or
+        std.mem.eql(u8, name, "AXMainWindowChanged"))
+    {
+        onFrontWindowChanged(mgr, observer, element);
     }
+}
+
+/// The app's front window changed. If it's a window we already track, this is an
+/// ordinary focus change — nothing to do. If it's an *untracked* window of the
+/// app sitting at the exact frame of one of our leaves, the user switched to a
+/// different native tab in that group (background tabs aren't ordered-in, so
+/// they're never separate leaves): re-point the leaf at the now-front tab so
+/// later focus/flush operate on the tab the user actually has showing, not the
+/// stale one the group was created with. Same identical-frame + same-pid signal
+/// `findTabSibling` uses (the window server has no tab concept).
+fn onFrontWindowChanged(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIElementRef) void {
+    const app = mgr.appState;
+    const root = app.tree orelse return;
+    const el = macos.Element.fromRef(element) orelse return;
+    const wid = el.windowId() orelse return; // non-window front element: ignore
+    if (tree.hasWindow(root, wid)) return; // tracked window — ordinary focus change
+
+    const pid = el.pid() orelse return;
+    const pos = el.position() orelse return;
+    const sz = el.size() orelse return;
+    const frame = macos.window_list.Rect{ .origin = pos, .size = sz };
+    if (frame.size.width == 0 and frame.size.height == 0) return;
+
+    const leaf = findLeafAtFrame(root, pid, frame) orelse return; // not a tab of a tracked group
+    // Re-point the tab-group leaf at the front tab. Reuse the arena-owned owner
+    // string (outlives the swap), release the stale element, re-arm destroy.
+    const owner = (leaf.window orelse return).owner;
+    const win = window.fromElement(el, owner) orelse return;
+    leaf.window.?.deinit();
+    leaf.window = win;
+    leaf.id = win.id;
+    leaf.window.?.is_tabbed = true;
+    if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, win.id);
+    std.debug.print("[observer] ~tab #{d} {s} now front\n", .{ win.id, owner });
+}
+
+/// A leaf under `con` owned by `pid` whose window occupies (within a tight
+/// epsilon) `frame`. Identical frame + same app is the native-tab signal.
+fn findLeafAtFrame(con: *data.Con, pid: i32, frame: macos.window_list.Rect) ?*data.Con {
+    if (con.window) |w| {
+        const eps: f64 = 2;
+        if (w.pid == pid and
+            @abs(w.bounds.origin.x - frame.origin.x) < eps and
+            @abs(w.bounds.origin.y - frame.origin.y) < eps and
+            @abs(w.bounds.size.width - frame.size.width) < eps and
+            @abs(w.bounds.size.height - frame.size.height) < eps) return con;
+    }
+    for (con.children.items) |child| {
+        if (findLeafAtFrame(child, pid, frame)) |found| return found;
+    }
+    return null;
 }
 
 /// Heap context (gpa) carrying a matched key chord from the tap callback to the
@@ -535,10 +597,9 @@ fn focusActiveSpace(app: *state.AppState) void {
     const ws = tree.findWorkspace(root, sid) orelse return;
 
     // A window was just moved to this Space and the user followed it over → keep
-    // *that* window selected instead of the first tile (yabai keeps a moved
-    // window focused). Only consume the request when its target Space is the one
-    // now active, so the intermediate notifications of a multi-step switch don't
-    // discard it. Falls through to the first tile if the window is gone.
+    // *that* window selected (yabai keeps a moved window focused). Only consume
+    // the request when its target Space is the one now active, so the
+    // intermediate notifications of a multi-step switch don't discard it.
     if (app.pending_focus) |pf| {
         if (pf.sid == sid) {
             app.pending_focus = null;
@@ -548,9 +609,17 @@ fn focusActiveSpace(app: *state.AppState) void {
         }
     }
 
-    for (ws.children.items) |child| {
-        if (focus.focusLeaf(child)) return; // first window that accepts focus
+    // If the frontmost app already owns a window on this Space, macOS has
+    // restored focus correctly — leave it. Overriding here used to force a
+    // stacked tile to the front, and to raise a native tab group's *tracked*
+    // window rather than the tab the user actually had showing (the tree tracks
+    // one window id per tab group, not the live front tab). Only the stale case
+    // — the previous Space's app still frontmost after the switch — needs us to
+    // pull the menu bar over, which we then do via the most-recently-used tile.
+    if (macos.workspace.frontmostAppPid()) |pid| {
+        if (focus.pidHasWindowUnder(ws, pid)) return;
     }
+    _ = focus.focusMostRecent(ws);
 }
 
 /// Listen-only mouse tap (the drag driver). Mirrors yabai's `mouse_handler`

@@ -114,6 +114,27 @@ fn firstLeafForPid(con: *data.Con, pid: i32) ?*data.Con {
     return null;
 }
 
+/// Whether `pid` owns any window leaf under `con`. Used to decide whether focus
+/// is already on the right space (so the WM shouldn't override it).
+pub fn pidHasWindowUnder(con: *data.Con, pid: i32) bool {
+    return firstLeafForPid(con, pid) != null;
+}
+
+/// Focus the most-recently-used window under workspace `ws` (descending through
+/// each container's `last_focused_child`), falling back to the first tile that
+/// accepts focus. Unlike focusing `children[0]` blindly, this restores the
+/// window the user last had here rather than forcing a fixed tile to the front.
+/// Returns false only if nothing under `ws` accepts focus.
+pub fn focusMostRecent(ws: *data.Con) bool {
+    if (ws.children.items.len == 0) return false;
+    const start = validLastFocused(ws) orelse ws.children.items[0];
+    if (focusLeaf(descendToLeaf(start, true))) return true;
+    for (ws.children.items) |child| {
+        if (focusLeaf(descendToLeaf(child, true))) return true;
+    }
+    return false;
+}
+
 /// Move focus to the nearest window in `dir`, descending into and ascending out
 /// of nested containers (i3-style directional focus). Left/right traverse
 /// horizontal splits/stacks; up/down traverse vertical ones. From the focused
