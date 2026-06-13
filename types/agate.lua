@@ -8,6 +8,14 @@
 ---| '"up"'
 ---| '"down"'
 
+---@alias agate.MonitorDir
+---| '"next"'
+---| '"prev"'
+---| '"left"'
+---| '"right"'
+---| '"up"'
+---| '"down"'
+
 ---@alias agate.Layout
 ---| '"h_tiles"'
 ---| '"v_tiles"'
@@ -94,9 +102,18 @@ function agate.space_next() end
 ---Switch to the previous user space on the focused display.
 function agate.space_prev() end
 
----Send the focused window to user space N (does not follow focus).
+---Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
 ---@param n integer 1-based user-space index to send the window to.
-function agate.move_to_space(n) end
+---@param monitor? integer 1-based monitor (display order) the space belongs to. Omit for the focused display — pass it to assign the window to a space on another monitor.
+function agate.move_to_space(n, monitor) end
+
+---Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.
+---@param dir agate.MonitorDir Which display to focus.
+function agate.focus_monitor(dir) end
+
+---Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.
+---@param dir agate.MonitorDir Which display to move the window to.
+function agate.move_to_monitor(dir) end
 
 ---Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space when they appear. At least one of `app`/`title` is required; both must match when both are given. When several rules match a window, the last registered one wins.
 ---@param rule agate.Rule Rule table (see agate.Rule).

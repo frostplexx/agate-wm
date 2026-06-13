@@ -199,22 +199,122 @@ pub fn findWorkspace(con: *data.Con, sid: u64) ?*data.Con {
     return null;
 }
 
-/// Lay out the currently active Space's workspace onto its real windows.
-/// Non-visible Spaces are left alone (deferred, as yabai does).
+/// The Monitor ancestor of `con` (or `con` itself if it is one), else null.
+pub fn monitorOf(con: *data.Con) ?*data.Con {
+    var node: ?*data.Con = con;
+    while (node) |n| : (node = n.parent) {
+        if (n.con_type == .Monitor) return n;
+    }
+    return null;
+}
+
+/// The Workspace ancestor of `con` (or `con` itself if it is one), else null.
+pub fn workspaceOf(con: *data.Con) ?*data.Con {
+    var node: ?*data.Con = con;
+    while (node) |n| : (node = n.parent) {
+        if (n.con_type == .Workspace) return n;
+    }
+    return null;
+}
+
+/// The usable (visible) frame of the display that owns `ws`, in AX coordinates.
+/// Each Monitor Con's `id` is its `display_index`; we map that to the display's
+/// UUID via `managedDisplays`, then to its geometry via `displayFrames`. Falls
+/// back to the main display when the mapping can't be resolved (single-display
+/// machines, or a display added after the tree was built).
+pub fn areaForWorkspace(appState: *state.AppState, ws: *data.Con) macos.window_list.Rect {
+    if (resolveMonitorFrame(appState, monitorOf(ws))) |area| return area;
+    return macos.display.mainVisibleFrame() orelse zero_rect;
+}
+
+const zero_rect: macos.window_list.Rect = .{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = 0, .height = 0 } };
+
+/// Resolve the visible frame of Monitor Con `mon` from the live display layout.
+fn resolveMonitorFrame(appState: *state.AppState, mon: ?*data.Con) ?macos.window_list.Rect {
+    const monitor = mon orelse return null;
+    const idx: usize = @intCast(monitor.id); // Monitor.id == display_index
+    const mds = macos.spaces.managedDisplays(appState.gpa, appState.skylight_cid) catch return null;
+    defer appState.gpa.free(mds);
+    if (idx >= mds.len) return null;
+    const frames = macos.display.displayFrames(appState.gpa) catch return null;
+    defer appState.gpa.free(frames);
+    return macos.display.frameForUUID(frames, mds[idx].uuidSlice());
+}
+
+/// Lay out the focused display's currently active Space onto its real windows,
+/// using that display's own visible frame. Non-visible Spaces are left alone
+/// (deferred, as yabai does). Use `flushAllVisible` to re-tile every monitor.
 pub fn flushActive(appState: *state.AppState) void {
     const sid = macos.spaces.activeSpace(appState.skylight_cid) orelse return;
     const ws = findWorkspace(appState.tree orelse return, sid) orelse return;
-    const area = macos.display.mainVisibleFrame() orelse return;
-    layout.flushWorkspace(ws, area);
+    flushWorkspace(appState, ws);
 }
 
-/// Lay out `ws` regardless of whether its Space is currently active. Used when
-/// we move a window into an inactive Space: AX setSize/setPosition on cached
-/// elements still applies even on Spaces the user isn't looking at, so the
-/// destination's tiling row is correct before they swipe over.
-pub fn flushWorkspace(ws: *data.Con) void {
-    const area = macos.display.mainVisibleFrame() orelse return;
-    layout.flushWorkspace(ws, area);
+/// Lay out the visible Space of *every* display, each within its own frame.
+/// Called when a change can affect more than the focused monitor (a Space
+/// switch, a display reconfiguration, a window moved across monitors).
+pub fn flushAllVisible(appState: *state.AppState) void {
+    const root = appState.tree orelse return;
+    const mds = macos.spaces.managedDisplays(appState.gpa, appState.skylight_cid) catch
+        return flushActive(appState);
+    defer appState.gpa.free(mds);
+    const frames = macos.display.displayFrames(appState.gpa) catch
+        return flushActive(appState);
+    defer appState.gpa.free(frames);
+
+    for (mds) |md| {
+        if (md.current_space == 0) continue;
+        const ws = findWorkspace(root, md.current_space) orelse continue;
+        const area = macos.display.frameForUUID(frames, md.uuidSlice()) orelse
+            macos.display.mainVisibleFrame() orelse continue;
+        layout.flushWorkspace(ws, area);
+    }
+}
+
+/// Lay out `ws` regardless of whether its Space is currently active, within its
+/// own display's frame. Used when we move a window into an inactive Space (or a
+/// Space on another monitor): AX setSize/setPosition on cached elements still
+/// applies even on Spaces the user isn't looking at, so the destination's
+/// tiling row is correct before they swipe (or glance) over.
+pub fn flushWorkspace(appState: *state.AppState, ws: *data.Con) void {
+    layout.flushWorkspace(ws, areaForWorkspace(appState, ws));
+}
+
+/// One Monitor Con with its resolved geometry and current visible Space.
+pub const MonitorInfo = struct {
+    con: *data.Con,
+    frame: macos.window_list.Rect,
+    current_space: u64,
+};
+
+/// Fill `out` with one entry per Monitor Con that resolves to a live display,
+/// in display order. Returns the count written (capped at `out.len`). Lets the
+/// focus engine pick an adjacent monitor without each caller re-querying the OS.
+pub fn collectMonitors(appState: *state.AppState, out: []MonitorInfo) usize {
+    const root = appState.tree orelse return 0;
+    const mds = macos.spaces.managedDisplays(appState.gpa, appState.skylight_cid) catch return 0;
+    defer appState.gpa.free(mds);
+    const frames = macos.display.displayFrames(appState.gpa) catch return 0;
+    defer appState.gpa.free(frames);
+
+    var count: usize = 0;
+    for (root.children.items) |mon| {
+        if (count >= out.len) break;
+        if (mon.con_type != .Monitor) continue;
+        const idx: usize = @intCast(mon.id);
+        if (idx >= mds.len) {
+            std.debug.print("[monitor] con {d} has no managed display ({d} known)\n", .{ idx, mds.len });
+            continue;
+        }
+        const area = macos.display.frameForUUID(frames, mds[idx].uuidSlice()) orelse {
+            std.debug.print("[monitor] con {d}: no NSScreen frame for managed uuid={s}\n", .{ idx, mds[idx].uuidSlice() });
+            for (frames) |f| std.debug.print("[monitor]   available screen uuid={s}\n", .{f.uuidSlice()});
+            continue;
+        };
+        out[count] = .{ .con = mon, .frame = area, .current_space = mds[idx].current_space };
+        count += 1;
+    }
+    return count;
 }
 
 /// An existing leaf under `ws` belonging to `pid` whose window occupies the same

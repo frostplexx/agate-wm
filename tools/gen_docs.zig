@@ -70,6 +70,7 @@ const rule_fields = [_]Param{
 
 const aliases = [_]Alias{
     .{ .name = "agate.Direction", .values = &.{ "left", "right", "up", "down" }, .doc = "A focus/move/resize direction." },
+    .{ .name = "agate.MonitorDir", .values = &.{ "next", "prev", "left", "right", "up", "down" }, .doc = "A monitor selector: `next`/`prev` cycle displays in window-server order; `left`/`right`/`up`/`down` step to the physically adjacent display." },
     .{ .name = "agate.Layout", .values = &.{ "h_tiles", "v_tiles", "h_stack", "v_stack", "accordion", "float", "toggle" }, .doc = "A layout mode. Synonyms: `h_split`/`horizontal` = `h_tiles`; `v_split`/`vertical` = `v_tiles`; `v_accordion`/`stacking`/`stacked` = `v_stack`/`accordion`; `floating` = `float`. `toggle` flips the split orientation." },
 };
 
@@ -143,8 +144,21 @@ const funcs = [_]Func{
     .{ .name = "space_prev", .doc = "Switch to the previous user space on the focused display." },
     .{
         .name = "move_to_space",
-        .params = &.{.{ .name = "n", .ty = "integer", .doc = "1-based user-space index to send the window to." }},
-        .doc = "Send the focused window to user space N (does not follow focus).",
+        .params = &.{
+            .{ .name = "n", .ty = "integer", .doc = "1-based user-space index to send the window to." },
+            .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the space belongs to. Omit for the focused display — pass it to assign the window to a space on another monitor.", .optional = true },
+        },
+        .doc = "Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.",
+    },
+    .{
+        .name = "focus_monitor",
+        .params = &.{.{ .name = "dir", .ty = "agate.MonitorDir", .doc = "Which display to focus." }},
+        .doc = "Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.",
+    },
+    .{
+        .name = "move_to_monitor",
+        .params = &.{.{ .name = "dir", .ty = "agate.MonitorDir", .doc = "Which display to move the window to." }},
+        .doc = "Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.",
     },
     .{
         .name = "rule",
@@ -162,6 +176,8 @@ const commands = [_]Command{
     .{ .form = "layout <mode>", .doc = "Same as `agate.layout(mode)`." },
     .{ .form = "space <n>", .doc = "Same as `agate.space(n)`." },
     .{ .form = "move_to_space <n>", .doc = "Same as `agate.move_to_space(n)`." },
+    .{ .form = "focus_monitor <dir>", .doc = "Same as `agate.focus_monitor(dir)`." },
+    .{ .form = "move_to_monitor <dir>", .doc = "Same as `agate.move_to_monitor(dir)`." },
 };
 
 // --- Output -----------------------------------------------------------------

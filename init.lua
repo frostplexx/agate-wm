@@ -123,6 +123,17 @@ end)
 agate.bind("hyper+n", function() agate.space_next() end)
 agate.bind("hyper+p", function() agate.space_prev() end)
 
+-- Multi-monitor. Windows on every display are tiled within that display's own
+-- frame. Focus another monitor (its most-recently-used window becomes key), and
+-- move the focused window to an adjacent monitor where it gets tiled too.
+-- Directions: "next"/"prev" (cycle) or "left"/"right"/"up"/"down" (spatial).
+agate.bind("hyper+comma", function() agate.focus_monitor("prev") end)
+agate.bind("hyper+period", function() agate.focus_monitor("next") end)
+agate.bind("hyper+shift+comma", function() agate.move_to_monitor("prev") end)
+agate.bind("hyper+shift+period", function() agate.move_to_monitor("next") end)
+-- A window can also be assigned to a specific space on a specific monitor:
+-- agate.move_to_space(2, 2) sends it to space 2 of the second display.
+
 -- Window assignment rules (yabai-style): when a matching window appears, it is
 -- sent to the given space and the view follows it there (`follow = false` to
 -- route it in the background instead). `app`/`title` are POSIX extended regexes
@@ -134,4 +145,4 @@ agate.rule({ app = "^Things$", space = 3 })
 agate.rule({ app = "^Spotify$", space = 5 })
 agate.rule({ app = "^Vesktop$", space = 4 })
 
-print("agate: development config loaded")
+print("agate: development config 420")

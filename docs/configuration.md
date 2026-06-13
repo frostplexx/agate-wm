@@ -113,11 +113,24 @@ Switch to the next user space on the focused display.
 
 Switch to the previous user space on the focused display.
 
-### `agate.move_to_space(n)`
+### `agate.move_to_space(n, monitor?)`
 
-Send the focused window to user space N (does not follow focus).
+Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
 
 - `n` (`integer`) — 1-based user-space index to send the window to.
+- `monitor` (`integer`) _(optional)_ — 1-based monitor (display order) the space belongs to. Omit for the focused display — pass it to assign the window to a space on another monitor.
+
+### `agate.focus_monitor(dir)`
+
+Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.
+
+- `dir` (`agate.MonitorDir`) — Which display to focus.
+
+### `agate.move_to_monitor(dir)`
+
+Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.
+
+- `dir` (`agate.MonitorDir`) — Which display to move the window to.
 
 ### `agate.rule(rule)`
 
@@ -137,6 +150,8 @@ Strings passed as the second argument of `agate.bind` instead of a function:
 | `layout <mode>` | Same as `agate.layout(mode)`. |
 | `space <n>` | Same as `agate.space(n)`. |
 | `move_to_space <n>` | Same as `agate.move_to_space(n)`. |
+| `focus_monitor <dir>` | Same as `agate.focus_monitor(dir)`. |
+| `move_to_monitor <dir>` | Same as `agate.move_to_monitor(dir)`. |
 
 ## Enumerations
 
@@ -144,6 +159,17 @@ Strings passed as the second argument of `agate.bind` instead of a function:
 
 A focus/move/resize direction.
 
+- `"left"`
+- `"right"`
+- `"up"`
+- `"down"`
+
+### `agate.MonitorDir`
+
+A monitor selector: `next`/`prev` cycle displays in window-server order; `left`/`right`/`up`/`down` step to the physically adjacent display.
+
+- `"next"`
+- `"prev"`
 - `"left"`
 - `"right"`
 - `"up"`

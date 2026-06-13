@@ -132,6 +132,8 @@ const key_table = [_]KeyEntry{
     .{ .name = "m", .code = 46 },   .{ .name = "tab", .code = 48 },
     .{ .name = "space", .code = 49 }, .{ .name = "grave", .code = 50 },
     .{ .name = "delete", .code = 51 }, .{ .name = "escape", .code = 53 },
+    .{ .name = "comma", .code = 43 }, .{ .name = "period", .code = 47 },
+    .{ .name = "slash", .code = 44 }, .{ .name = "semicolon", .code = 41 },
     .{ .name = "left", .code = 123 }, .{ .name = "right", .code = 124 },
     .{ .name = "down", .code = 125 }, .{ .name = "up", .code = 126 },
     // Function keys commonly used as a remapped "hyper" trigger.
@@ -531,23 +533,47 @@ fn agateMove(lua: *Lua) i32 {
     return 0;
 }
 
+/// `agate.move_to_space(n [, monitor])`: send the focused window to user space
+/// `n`. With a second argument it targets space `n` on monitor `monitor`
+/// (1-based, in display order) — so a window can be assigned to a Space on
+/// another display; without it, the focused display.
 fn agateMoveToSpace(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const n = lua.toInteger(1) catch return 0;
     if (n < 1) return 0;
+    if (lua.isNumber(2)) {
+        const mon = lua.toInteger(2) catch 0;
+        if (mon >= 1) {
+            moveFocusedToSpaceOnMonitor(app, @intCast(mon), @intCast(n));
+            return 0;
+        }
+    }
     moveFocusedToSpace(app, @intCast(n));
     return 0;
 }
 
-/// Move the focused window to the Nth user space on the focused display via
-/// the SkyLight reassignment SPI, then sync our tree by relocating the leaf
-/// into the destination workspace and relaying out the (now-shrunk) source.
-/// No-op when the window is already on the target space.
+/// Move the focused window to the Nth user space on the focused display.
 fn moveFocusedToSpace(app: *state.AppState, n: usize) void {
+    const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, n) catch return) orelse return;
+    moveFocusedToSpaceId(app, target_sid);
+}
+
+/// Move the focused window to user space `n` on the display at `monitor`
+/// (1-based, display order). Lets the window land on another monitor's Space.
+fn moveFocusedToSpaceOnMonitor(app: *state.AppState, monitor: usize, n: usize) void {
+    if (monitor < 1) return;
+    const target_sid = (macos.spaces.userSpaceIdOnDisplay(app.gpa, app.skylight_cid, monitor - 1, n) catch return) orelse return;
+    moveFocusedToSpaceId(app, target_sid);
+}
+
+/// Reassign the focused window to space `target_sid` via the SkyLight SPI, then
+/// sync our tree by relocating the leaf into the destination workspace and
+/// relaying out both the (now-shrunk) source and the destination — within each
+/// one's own display frame. No-op when the window is already there.
+fn moveFocusedToSpaceId(app: *state.AppState, target_sid: u64) void {
     const leaf = focus.currentFocusedLeaf(app) orelse return;
     const win = if (leaf.window) |w| w else return;
     const cur_ws = leaf.parent orelse return; // Workspace Con; .id == SkyLight sid
-    const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, n) catch return) orelse return;
     if (target_sid == cur_ws.id) return; // already there — don't issue the SPI
     if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
     const root = app.tree orelse return;
@@ -556,12 +582,67 @@ fn moveFocusedToSpace(app: *state.AppState, n: usize) void {
     // other allocator would free arena memory through it (undefined behavior).
     _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws);
     tree.flushActive(app); // re-tile the source we just shrank
-    tree.flushWorkspace(dst_ws); // and slot the moved window into the destination's row
+    tree.flushWorkspace(app, dst_ws); // and slot the moved window into the destination's row
 
     // Keep the moved window selected once its Space is shown (yabai-style): the
     // space-change handler blanket-focuses a tile to pull the menu bar over, so
     // arm a pending focus on this window for the destination Space instead.
     app.pending_focus = .{ .wid = win.id, .sid = target_sid };
+}
+
+/// `agate.focus_monitor(dir)`: move keyboard focus to another display
+/// (`next`/`prev`, or `left`/`right`/`up`/`down`).
+fn agateFocusMonitor(lua: *Lua) i32 {
+    const app = g_appstate orelse return 0;
+    const dir_z = lua.toString(1) catch return 0;
+    const dir = parseMonitorDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    _ = focus.focusMonitor(app, dir);
+    return 0;
+}
+
+/// `agate.move_to_monitor(dir)`: move the focused window to the visible Space
+/// of an adjacent display and tile it there, following it over.
+fn agateMoveToMonitor(lua: *Lua) i32 {
+    const app = g_appstate orelse return 0;
+    const dir_z = lua.toString(1) catch return 0;
+    const dir = parseMonitorDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    moveFocusedToMonitor(app, dir);
+    return 0;
+}
+
+/// Move the focused window to the visible Space of the display `dir` selects,
+/// re-tile both displays, and follow focus to the window on its new monitor.
+/// Because the destination Space is already on-screen there, the window appears
+/// and can be focused immediately (no deferred `pending_focus`).
+fn moveFocusedToMonitor(app: *state.AppState, dir: focus.MonitorDir) void {
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    const win = if (leaf.window) |w| w else return;
+
+    var buf: [focus.max_monitors]tree.MonitorInfo = undefined;
+    const count = tree.collectMonitors(app, &buf);
+    if (count < 2) return;
+    const mons = buf[0..count];
+
+    const cur_mon = tree.monitorOf(leaf) orelse (focus.currentMonitor(app) orelse return);
+    var ci: usize = 0;
+    for (mons, 0..) |m, i| if (m.con == cur_mon) {
+        ci = i;
+        break;
+    };
+    const ti = focus.monitorTarget(mons, ci, dir) orelse return;
+    if (ti == ci) return;
+
+    const target_sid = mons[ti].current_space;
+    if (target_sid == 0) return;
+    const root = app.tree orelse return;
+    const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
+    if (dst_ws == leaf.parent) return;
+    if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
+
+    _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws);
+    tree.flushActive(app); // re-tile the source we shrank
+    tree.flushWorkspace(app, dst_ws); // tile the destination
+    _ = focus.focusLeaf(leaf); // the window is visible there now — follow it
 }
 
 /// `agate.rule{ app = "...", title = "...", space = N, follow = bool }`
@@ -665,7 +746,7 @@ pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8
     const root = app.tree orelse return;
     const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
     _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws); // arena: see moveFocusedToSpace
-    tree.flushWorkspace(dst_ws);
+    tree.flushWorkspace(app, dst_ws);
     std.debug.print("[rule] {s} #{d} -> space {d}\n", .{ win.owner, win.id, eff.space });
     // Mute activation-follow for this window either way: the app activates
     // around its own launch, and the follow chasing the window we just routed
@@ -693,6 +774,8 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "resize",      .func = zlua.wrap(agateResize) },
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
     .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
+    .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },
+    .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
 };
@@ -733,7 +816,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
     const config_path = findConfigPath(gpa) orelse {
         std.debug.print("[config] no init.lua found; using defaults\n", .{});
         // Small Screen Mode is on by default, so it applies config or not.
-        if (applySmallScreenMode(app)) tree.flushActive(app);
+        if (applySmallScreenMode(app)) tree.flushAllVisible(app);
         return cfg;
     };
     defer gpa.free(config_path);
@@ -749,7 +832,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
 
     // With the config settled, put workspaces into (or out of) Small Screen
     // Mode for the current display and re-tile so it shows immediately.
-    if (applySmallScreenMode(app)) tree.flushActive(app);
+    if (applySmallScreenMode(app)) tree.flushAllVisible(app);
 
     return cfg;
 }
@@ -932,6 +1015,16 @@ fn parseDir(s: []const u8) ?focus.Direction {
     return null;
 }
 
+fn parseMonitorDir(s: []const u8) ?focus.MonitorDir {
+    if (std.mem.eql(u8, s, "next")) return .next;
+    if (std.mem.eql(u8, s, "prev") or std.mem.eql(u8, s, "previous")) return .prev;
+    if (std.mem.eql(u8, s, "left")) return .left;
+    if (std.mem.eql(u8, s, "right")) return .right;
+    if (std.mem.eql(u8, s, "up")) return .up;
+    if (std.mem.eql(u8, s, "down")) return .down;
+    return null;
+}
+
 fn executeCommand(cmd: []const u8) void {
     const app = g_appstate orelse return;
     if (std.mem.startsWith(u8, cmd, "move ")) {
@@ -965,6 +1058,12 @@ fn executeCommand(cmd: []const u8) void {
     } else if (std.mem.startsWith(u8, cmd, "move_to_space ")) {
         const n = std.fmt.parseInt(usize, cmd[14..], 10) catch return;
         moveFocusedToSpace(app, n);
+    } else if (std.mem.startsWith(u8, cmd, "focus_monitor ")) {
+        const dir = parseMonitorDir(cmd[14..]) orelse return;
+        _ = focus.focusMonitor(app, dir);
+    } else if (std.mem.startsWith(u8, cmd, "move_to_monitor ")) {
+        const dir = parseMonitorDir(cmd[16..]) orelse return;
+        moveFocusedToMonitor(app, dir);
     }
 }
 

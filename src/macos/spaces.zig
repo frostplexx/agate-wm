@@ -17,6 +17,7 @@ const sl = @import("skylight.zig");
 const foundation = @import("foundation.zig");
 const String = foundation.String;
 const event_tap = @import("event_tap.zig");
+const display = @import("display.zig");
 const objc = @import("objc");
 
 pub const Space = struct {
@@ -27,6 +28,67 @@ pub const Space = struct {
     /// Index into the managed-display list this space belongs to.
     display_index: usize,
 };
+
+/// A physical display as the window server sees it: its UUID (matching
+/// `display.DisplayFrame.uuid`), and the Space currently visible on it. The
+/// array index returned by `managedDisplays` equals the `display_index` of the
+/// Spaces on that display (both walk `SLSCopyManagedDisplaySpaces` in order).
+pub const ManagedDisplay = struct {
+    uuid: [64]u8 = undefined,
+    uuid_len: usize = 0,
+    /// The space id currently shown on this display (its visible workspace).
+    current_space: u64 = 0,
+
+    pub fn uuidSlice(self: *const ManagedDisplay) []const u8 {
+        return self.uuid[0..self.uuid_len];
+    }
+};
+
+/// Whether `s` is a canonical UUID string (36 chars with dashes at 8/13/18/23),
+/// distinguishing a real "Display Identifier" UUID from the literal "Main".
+fn looksLikeUUID(s: []const u8) bool {
+    if (s.len != 36) return false;
+    return s[8] == '-' and s[13] == '-' and s[18] == '-' and s[23] == '-';
+}
+
+/// Every managed display in window-server order, each with its UUID and the
+/// Space currently visible on it. Mirrors yabai's display enumeration
+/// (koekeishiya/yabai, src/display_manager.c). Caller owns the slice.
+pub fn managedDisplays(alloc: Allocator, cid: sl.ConnectionID) ![]ManagedDisplay {
+    const displays = sl.SLSCopyManagedDisplaySpaces(cid) orelse return &.{};
+    defer foundation.CFRelease(displays);
+
+    const key_disp = try String.createUtf8("Display Identifier");
+    defer key_disp.release();
+
+    var list: std.ArrayList(ManagedDisplay) = .empty;
+    errdefer list.deinit(alloc);
+
+    const ndisp: usize = @intCast(c.CFArrayGetCount(displays));
+    var di: usize = 0;
+    while (di < ndisp) : (di += 1) {
+        const ddict: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(displays, @intCast(di)));
+        var md = ManagedDisplay{};
+        if (c.CFDictionaryGetValue(ddict, key_disp.ref())) |v| {
+            const uuid_ref: c.CFStringRef = @ptrCast(v);
+            if (String.fromRef(uuid_ref)) |s| {
+                if (s.cstring(&md.uuid)) |slice| md.uuid_len = slice.len;
+            }
+            // Resolve the live current space from SkyLight's own identifier
+            // (more reliable across macOS versions than the dict's "Current
+            // Space"). SLS understands its identifier even when it's "Main".
+            md.current_space = sl.SLSManagedDisplayGetCurrentSpace(cid, uuid_ref);
+            // The main display's identifier may be the literal "Main" rather
+            // than a UUID; the NSScreen-derived frames are keyed by UUID, so
+            // substitute the main display's canonical UUID for matching.
+            if (!looksLikeUUID(md.uuidSlice())) {
+                md.uuid_len = if (display.mainDisplayUUID(&md.uuid)) |slice| slice.len else 0;
+            }
+        }
+        try list.append(alloc, md);
+    }
+    return list.toOwnedSlice(alloc);
+}
 
 /// The currently active Space id on the focused display (the one owning the
 /// active menu bar). Null if it can't be determined.
@@ -185,6 +247,25 @@ pub fn userSpaceIdAt(alloc: Allocator, cid: sl.ConnectionID, n: usize) !?u64 {
     defer alloc.free(order.spaces);
     var seen: usize = 0;
     for (order.spaces) |sp| {
+        if (sp.type != 0) continue;
+        seen += 1;
+        if (seen == n) return sp.id;
+    }
+    return null;
+}
+
+/// The SkyLight space id of the 1-based user-space `n` (counting only
+/// `type == 0` Spaces) on the display at `display_index`. Unlike
+/// `userSpaceIdAt`, this addresses any display, not just the focused one — so a
+/// window can be assigned to a Space on another monitor. Null if `n` is out of
+/// range on that display.
+pub fn userSpaceIdOnDisplay(alloc: Allocator, cid: sl.ConnectionID, display_index: usize, n: usize) !?u64 {
+    if (n == 0) return null;
+    const all = try allSpaces(alloc, cid);
+    defer alloc.free(all);
+    var seen: usize = 0;
+    for (all) |sp| {
+        if (sp.display_index != display_index) continue;
         if (sp.type != 0) continue;
         seen += 1;
         if (seen == n) return sp.id;

@@ -454,7 +454,10 @@ fn onSpaceChanged(
     userdata: ?*anyopaque,
 ) callconv(.c) void {
     const mgr: *Manager = @ptrCast(@alignCast(userdata orelse return));
-    tree.flushActive(mgr.appState);
+    // A Space switch on any display can change which workspace is visible on
+    // that display, so re-tile every monitor's visible Space, not just the
+    // focused one.
+    tree.flushAllVisible(mgr.appState);
     // Keep the menu-bar indicator on the space the user now sees (no-op when
     // the status item was never created).
     macos.statusbar.setSpaceNumber(macos.spaces.activeUserIndex(mgr.appState.gpa, mgr.appState.skylight_cid));
@@ -520,7 +523,8 @@ fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) v
     // workspaces into or out of Small Screen Mode before tiling to the new
     // geometry, so undocking lands straight in the accordion.
     _ = lua_config.applySmallScreenMode(mgr.appState);
-    tree.flushActive(mgr.appState);
+    // Geometry changed for potentially every display — re-tile them all.
+    tree.flushAllVisible(mgr.appState);
     std.debug.print("[observer] display reconfigured → retiled\n", .{});
 }
 
@@ -643,22 +647,82 @@ fn onMouseUp(mgr: *Manager) void {
     macos.overlay.hide();
 
     const app = mgr.appState;
-    const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
-    const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
+    const root = app.tree orelse return;
+
+    // Scan every *visible* workspace (each monitor's current Space), not just
+    // the focused display's: dropping a window onto another monitor makes that
+    // monitor the focused one, yet the dragged leaf is still tracked under the
+    // source monitor's workspace — scanning only the active Space would miss it.
+    var mbuf: [focus.max_monitors]tree.MonitorInfo = undefined;
+    const nmon = tree.collectMonitors(app, &mbuf);
 
     var scan = DragScan{};
-    scanChangedWindows(ws, &scan);
+    if (nmon == 0) {
+        const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
+        if (tree.findWorkspace(root, sid)) |ws| scanChangedWindows(ws, &scan);
+    } else {
+        for (mbuf[0..nmon]) |mi| {
+            const ws = tree.findWorkspace(root, mi.current_space) orelse continue;
+            scanChangedWindows(ws, &scan);
+        }
+    }
 
-    // Resize wins over a move (a leading-edge resize changes both).
+    // A displaced window whose centre now sits on another display is a
+    // cross-monitor drag — handle that first (checked for both the resize and
+    // move classifications, since a drop onto a smaller display can resize too).
     if (scan.resized) |leaf| {
+        if (moveDraggedAcrossMonitors(app, leaf, scan.resized_frame)) return;
         _ = tree.applyManualResize(leaf, scan.resized_frame);
         tree.flushActive(app);
         return;
     }
     if (scan.moved) |leaf| {
+        if (moveDraggedAcrossMonitors(app, leaf, scan.moved_frame)) return;
         _ = tree.applyManualMove(leaf, scan.moved_frame);
         tree.flushActive(app);
     }
+}
+
+/// If the dropped window's centre landed on a display other than its own,
+/// re-home its leaf to that display's visible workspace, tile both displays,
+/// and follow focus to it. Returns true if a cross-monitor move happened.
+fn moveDraggedAcrossMonitors(
+    app: *state.AppState,
+    leaf: *data.Con,
+    frame: macos.window_list.Rect,
+) bool {
+    var buf: [focus.max_monitors]tree.MonitorInfo = undefined;
+    const count = tree.collectMonitors(app, &buf);
+    if (count < 2) return false;
+    const mons = buf[0..count];
+
+    const src_mon = tree.monitorOf(leaf);
+    const src_ws = tree.workspaceOf(leaf);
+    const cx = frame.origin.x + frame.size.width / 2;
+    const cy = frame.origin.y + frame.size.height / 2;
+
+    for (mons) |m| {
+        if (src_mon != null and m.con == src_mon.?) continue;
+        const f = m.frame;
+        const inside = cx >= f.origin.x and cx < f.origin.x + f.size.width and
+            cy >= f.origin.y and cy < f.origin.y + f.size.height;
+        if (!inside) continue;
+        if (m.current_space == 0) return false;
+
+        const root = app.tree orelse return false;
+        const dst_ws = tree.findWorkspace(root, m.current_space) orelse return false;
+        if (dst_ws == leaf.parent) return false;
+        const win = if (leaf.window) |w| w else return false;
+
+        _ = macos.spaces.moveWindowToSpace(win.id, m.current_space); // idempotent
+        _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws);
+        if (src_ws) |sw| tree.flushWorkspace(app, sw); // re-tile the source we shrank
+        tree.flushWorkspace(app, dst_ws); // tile the destination
+        _ = focus.focusLeaf(leaf);
+        std.debug.print("[observer] window #{d} dragged to monitor {d}\n", .{ win.id, m.con.id });
+        return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,12 @@
 //! Display geometry via AppKit's `NSScreen` (through the Objective-C runtime).
 //! The window-server / AX coordinate space is top-left origin, but AppKit is
 //! bottom-left, so the visible frame is flipped here before it's handed out.
+const std = @import("std");
 const c = @import("c.zig").c;
 const objc = @import("objc");
+const foundation = @import("foundation.zig");
+
+const Allocator = std.mem.Allocator;
 
 pub const Rect = c.CGRect;
 
@@ -24,6 +28,110 @@ pub fn mainVisibleFrame() ?Rect {
         },
         .size = vis.size,
     };
+}
+
+// --- Per-display geometry (keyed by display UUID) ---------------------------
+//
+// Tiling spans every display, so the layout engine needs each display's usable
+// frame, not just the main one. `SLSCopyManagedDisplaySpaces` identifies a
+// display by its UUID string; AppKit identifies an `NSScreen` by its
+// `NSScreenNumber` (a `CGDirectDisplayID`). `CGDisplayCreateUUIDFromDisplayID`
+// bridges the two, so we tag each screen's visible frame with its UUID and the
+// tree matches a Monitor Con to its frame by that UUID.
+
+/// CoreGraphics: the UUID of a display id (caller owns the returned CFUUIDRef).
+extern fn CGDisplayCreateUUIDFromDisplayID(display: u32) ?*anyopaque;
+/// CoreFoundation: a CFString from a CFUUID (caller owns the result).
+extern fn CFUUIDCreateString(alloc: ?*anyopaque, uuid: ?*anyopaque) c.CFStringRef;
+
+/// A display's usable area tagged with its window-server UUID, so a Monitor in
+/// the tree (identified by the SkyLight UUID) can be matched to its geometry.
+pub const DisplayFrame = struct {
+    /// The CGDisplay UUID string (matches `SLSCopyManagedDisplaySpaces`'s
+    /// "Display Identifier"). NUL-free; `uuid_len` is the valid length.
+    uuid: [64]u8 = undefined,
+    uuid_len: usize = 0,
+    /// Visible frame (menu bar / Dock excluded) in top-left AX coordinates.
+    frame: Rect,
+
+    pub fn uuidSlice(self: *const DisplayFrame) []const u8 {
+        return self.uuid[0..self.uuid_len];
+    }
+};
+
+/// Every active display's visible frame, each tagged with its UUID. Frames are
+/// in top-left AX coordinates (flipped from AppKit's bottom-left origin, which
+/// is anchored to the *primary* screen `NSScreen.screens[0]`). Caller owns the
+/// slice.
+pub fn displayFrames(alloc: Allocator) ![]DisplayFrame {
+    const NSScreen = objc.getClass("NSScreen") orelse return &.{};
+    const screens = NSScreen.msgSend(objc.Object, "screens", .{});
+    if (screens.value == null) return &.{};
+    const count = screens.msgSend(usize, "count", .{});
+    if (count == 0) return &.{};
+
+    // The flip constant is the primary screen's height (AppKit's global origin).
+    const first = screens.msgSend(objc.Object, "objectAtIndex:", .{@as(usize, 0)});
+    if (first.value == null) return &.{};
+    const primary_h = first.msgSend(c.CGRect, "frame", .{}).size.height;
+
+    const key = try foundation.String.createUtf8("NSScreenNumber");
+    defer key.release();
+
+    var list: std.ArrayList(DisplayFrame) = .empty;
+    errdefer list.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const screen = screens.msgSend(objc.Object, "objectAtIndex:", .{i});
+        if (screen.value == null) continue;
+        const vis = screen.msgSend(c.CGRect, "visibleFrame", .{});
+
+        var df = DisplayFrame{ .frame = .{
+            .origin = .{ .x = vis.origin.x, .y = primary_h - (vis.origin.y + vis.size.height) },
+            .size = vis.size,
+        } };
+
+        // NSScreenNumber → CGDirectDisplayID → UUID string.
+        const dd = screen.msgSend(objc.Object, "deviceDescription", .{});
+        if (dd.value != null) {
+            const num = dd.msgSend(objc.Object, "objectForKey:", .{key.ref()});
+            if (num.value != null) {
+                const display_id = num.msgSend(u32, "unsignedIntValue", .{});
+                if (CGDisplayCreateUUIDFromDisplayID(display_id)) |uuid| {
+                    defer foundation.CFRelease(uuid);
+                    if (foundation.String.fromRef(CFUUIDCreateString(null, uuid))) |s| {
+                        defer s.release();
+                        if (s.cstring(&df.uuid)) |slice| df.uuid_len = slice.len;
+                    }
+                }
+            }
+        }
+        try list.append(alloc, df);
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+/// The visible frame of the display whose UUID is `uuid`, searched in `frames`
+/// (from `displayFrames`). Null if no display matches.
+pub fn frameForUUID(frames: []const DisplayFrame, uuid: []const u8) ?Rect {
+    if (uuid.len == 0) return null;
+    for (frames) |f| {
+        if (std.mem.eql(u8, f.uuidSlice(), uuid)) return f.frame;
+    }
+    return null;
+}
+
+/// The main display's canonical UUID string, copied into `buf`. SkyLight's
+/// `SLSCopyManagedDisplaySpaces` sometimes labels the main display "Main"
+/// instead of a UUID; this resolves the UUID that the NSScreen-derived
+/// `DisplayFrame`s are keyed by, so the two can still be matched.
+pub fn mainDisplayUUID(buf: []u8) ?[]const u8 {
+    const uuid = CGDisplayCreateUUIDFromDisplayID(CGMainDisplayID()) orelse return null;
+    defer foundation.CFRelease(uuid);
+    const s = foundation.String.fromRef(CFUUIDCreateString(null, uuid)) orelse return null;
+    defer s.release();
+    return s.cstring(buf);
 }
 
 // --- Small-screen detection -------------------------------------------------

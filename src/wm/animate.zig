@@ -75,7 +75,16 @@ pub fn shouldAnimate(from: Rect, to: Rect) bool {
 }
 
 /// Begin collecting one flush's moves. Caller: layout.flushWorkspace.
+///
+/// Finishes any still-in-flight previous batch FIRST: `add` overwrites the
+/// `g_moves` slots, so the previous batch's retained elements must be released
+/// (via `finishNow`) before we reuse those slots — otherwise `commit`'s own
+/// `finishNow` would release the *new* batch's elements (the ones just written
+/// into those slots) and they'd be released a second time when this batch ends,
+/// over-releasing the AX element (a use-after-free → crash). Harmless when no
+/// batch is live (the common case: the prior animation already completed).
 pub fn begin() void {
+    finishNow();
     g_pending = 0;
 }
 

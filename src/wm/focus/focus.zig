@@ -9,6 +9,16 @@ const state = @import("../../state.zig");
 /// left/up map to the previous tile and right/down to the next.
 pub const Direction = enum { left, right, up, down };
 
+/// How to pick a target monitor in `focusMonitor` / move-to-monitor: cycle
+/// through displays in window-server order (`next`/`prev`), or step to the
+/// physically adjacent display in a direction (`left`/`right`/`up`/`down`).
+pub const MonitorDir = enum { next, prev, left, right, up, down };
+
+/// Warp the mouse cursor to a point (global top-left CG coordinates, the same
+/// space the tree's frames live in). Used to land focus on an *empty* display
+/// where there's no window to raise.
+extern fn CGWarpMouseCursorPosition(point: macos.c.CGPoint) c_int;
+
 /// Raise `win` and make its application frontmost so it becomes the focused
 /// window. Returns true if either the app or the window accepted focus.
 pub fn focusWindow(win: *data.Window) bool {
@@ -175,4 +185,110 @@ fn validLastFocused(con: *data.Con) ?*data.Con {
     const lf = con.last_focused_child orelse return null;
     for (con.children.items) |c| if (c == lf) return lf;
     return null;
+}
+
+/// The Monitor Con the focus currently lives on: the focused window's monitor,
+/// falling back to the focused display's visible workspace's monitor.
+pub fn currentMonitor(appState: *state.AppState) ?*data.Con {
+    if (currentFocusedLeaf(appState)) |leaf| {
+        if (tree.monitorOf(leaf)) |m| return m;
+    }
+    const root = appState.tree orelse return null;
+    const sid = macos.spaces.activeSpace(appState.skylight_cid) orelse return null;
+    const ws = tree.findWorkspace(root, sid) orelse return null;
+    return tree.monitorOf(ws);
+}
+
+/// The maximum number of displays `focusMonitor` / monitor moves consider.
+pub const max_monitors = 16;
+
+/// Move keyboard focus to another monitor selected by `dir` (cycle order, or
+/// the physically adjacent display). Focuses the most-recently-used window on
+/// that display's visible Space; if it has none, warps the cursor to its centre
+/// so the display still becomes active. Returns false with fewer than two
+/// displays or when no display lies in the requested direction.
+pub fn focusMonitor(appState: *state.AppState, dir: MonitorDir) bool {
+    var buf: [max_monitors]tree.MonitorInfo = undefined;
+    const n = tree.collectMonitors(appState, &buf);
+    if (n < 2) return false;
+    const mons = buf[0..n];
+
+    const cur = currentMonitor(appState);
+    var ci: usize = 0;
+    if (cur) |c| {
+        for (mons, 0..) |m, i| if (m.con == c) {
+            ci = i;
+            break;
+        };
+    }
+
+    const target = monitorTarget(mons, ci, dir) orelse return false;
+    if (target == ci) return false;
+    return focusMonitorInfo(appState, mons[target]);
+}
+
+/// Resolve the index of the monitor `dir` selects from `mons`, relative to the
+/// monitor at `ci`. Null when nothing lies in a directional request.
+pub fn monitorTarget(mons: []const tree.MonitorInfo, ci: usize, dir: MonitorDir) ?usize {
+    const n = mons.len;
+    return switch (dir) {
+        .next => (ci + 1) % n,
+        .prev => (ci + n - 1) % n,
+        .left, .right, .up, .down => spatialTarget(mons, ci, dir),
+    };
+}
+
+/// The nearest monitor whose centre lies in `dir` from `mons[ci]`'s centre
+/// (top-left coordinates: up = smaller y). Null if none does.
+fn spatialTarget(mons: []const tree.MonitorInfo, ci: usize, dir: MonitorDir) ?usize {
+    const cur = mons[ci].frame;
+    const cx = cur.origin.x + cur.size.width / 2;
+    const cy = cur.origin.y + cur.size.height / 2;
+
+    var best: ?usize = null;
+    var best_dist: f64 = 0;
+    for (mons, 0..) |m, i| {
+        if (i == ci) continue;
+        const mx = m.frame.origin.x + m.frame.size.width / 2;
+        const my = m.frame.origin.y + m.frame.size.height / 2;
+        const dx = mx - cx;
+        const dy = my - cy;
+        const ok = switch (dir) {
+            .left => dx < -1,
+            .right => dx > 1,
+            .up => dy < -1,
+            .down => dy > 1,
+            else => false,
+        };
+        if (!ok) continue;
+        const dist = dx * dx + dy * dy;
+        if (best == null or dist < best_dist) {
+            best = i;
+            best_dist = dist;
+        }
+    }
+    return best;
+}
+
+/// Focus the most-recently-used window on `mi`'s visible Space, or warp the
+/// cursor to the display's centre when it has no window to focus.
+fn focusMonitorInfo(appState: *state.AppState, mi: tree.MonitorInfo) bool {
+    const root = appState.tree orelse return warpToFrame(mi.frame);
+    const ws = tree.findWorkspace(root, mi.current_space) orelse return warpToFrame(mi.frame);
+    if (ws.children.items.len == 0) return warpToFrame(mi.frame);
+
+    const start = validLastFocused(ws) orelse ws.children.items[0];
+    if (focusLeaf(descendToLeaf(start, true))) return true;
+    for (ws.children.items) |child| {
+        if (focusLeaf(descendToLeaf(child, true))) return true;
+    }
+    return warpToFrame(mi.frame);
+}
+
+fn warpToFrame(frame: macos.window_list.Rect) bool {
+    _ = CGWarpMouseCursorPosition(.{
+        .x = frame.origin.x + frame.size.width / 2,
+        .y = frame.origin.y + frame.size.height / 2,
+    });
+    return true;
 }
