@@ -516,6 +516,18 @@ fn onSpaceChanged(
     userdata: ?*anyopaque,
 ) callconv(.c) void {
     const mgr: *Manager = @ptrCast(@alignCast(userdata orelse return));
+    // Pick up Spaces created since startup (a new desktop, or the Space macOS
+    // opens for a native-fullscreen window) before tiling — otherwise switching
+    // to one finds no workspace and the flush/focus below would bail.
+    _ = tree.reconcileSpaces(mgr.appState);
+    // Follow windows that changed Space without a create/destroy event — chiefly
+    // a window entering/leaving native fullscreen, which relocates it to/from a
+    // fullscreen Space. Re-homes the leaf so we stop tiling a now-fullscreen
+    // window (and resume when it returns).
+    _ = tree.reconcileWindowSpaces(mgr.appState);
+    // Finish a move that was waiting on a window leaving native fullscreen (the
+    // leaf is now back on a user Space, re-homed just above).
+    lua_config.runPendingMove(mgr.appState);
     // A Space switch on any display can change which workspace is visible on
     // that display, so re-tile every monitor's visible Space, not just the
     // focused one.
@@ -585,6 +597,8 @@ fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) v
     // workspaces into or out of Small Screen Mode before tiling to the new
     // geometry, so undocking lands straight in the accordion.
     _ = lua_config.applySmallScreenMode(mgr.appState);
+    // A display change can add/remove Spaces too — reconcile before tiling.
+    _ = tree.reconcileSpaces(mgr.appState);
     // Geometry changed for potentially every display — re-tile them all.
     tree.flushAllVisible(mgr.appState);
     std.debug.print("[observer] display reconfigured → retiled\n", .{});
@@ -1223,7 +1237,12 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     if (!shouldTile(el, name)) return;
 
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
-    const ws = tree.findWorkspace(app.tree.?, sid) orelse return;
+    // The window may have opened on a Space created since startup (a new desktop)
+    // — reconcile so its workspace exists, then look it up.
+    const ws = tree.findWorkspace(app.tree.?, sid) orelse blk: {
+        _ = tree.reconcileSpaces(app);
+        break :blk tree.findWorkspace(app.tree.?, sid) orelse return;
+    };
 
     const owner = app.arena.dupe(u8, name) catch return; // must outlive the event
 

@@ -54,6 +54,7 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
 
         const workspace = try makeCon(alloc, .Workspace, monitor, 2, sp.id);
         workspace.gaps = default_gaps;
+        workspace.space_type = sp.type;
         try monitor.children.append(alloc, workspace);
 
         for (try macos.spaces.manageableWindowsOnSpace(alloc, cid, sp.id)) |wid| {
@@ -71,6 +72,147 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
     }
 
     return root;
+}
+
+/// The Monitor Con for display index `idx`, or null.
+pub fn findMonitor(root: *data.Con, idx: usize) ?*data.Con {
+    for (root.children.items) |c| {
+        if (c.con_type == .Monitor and c.id == @as(u64, idx)) return c;
+    }
+    return null;
+}
+
+/// Find or create the Monitor Con for display index `idx` (its `id`).
+pub fn ensureMonitor(alloc: Allocator, root: *data.Con, idx: usize) !*data.Con {
+    if (findMonitor(root, idx)) |m| return m;
+    const mon = try makeCon(alloc, .Monitor, root, 1, @intCast(idx));
+    try root.children.append(alloc, mon);
+    return mon;
+}
+
+/// Add a new Workspace Con for SkyLight space `sid` under `mon`, with the
+/// default gaps — the same shape `build_tree` creates.
+pub fn addWorkspace(alloc: Allocator, mon: *data.Con, sid: u64, space_type: i64) !*data.Con {
+    const ws = try makeCon(alloc, .Workspace, mon, 2, sid);
+    ws.gaps = default_gaps;
+    ws.space_type = space_type;
+    try mon.children.append(alloc, ws);
+    return ws;
+}
+
+/// Reset a recycled Workspace Con for reuse under `mon` (keeps its children
+/// buffer — empty when parked — so reuse allocates nothing).
+fn resetWorkspace(ws: *data.Con, mon: *data.Con, sid: u64, space_type: i64) void {
+    ws.children.clearRetainingCapacity();
+    ws.id = sid;
+    ws.con_type = .Workspace;
+    ws.space_type = space_type;
+    ws.window = null;
+    ws.layout = .H_SPLIT;
+    ws.auto_small = false;
+    ws.gaps = default_gaps;
+    ws.parent = mon;
+    ws.ratio = 1.0;
+    ws.depth = mon.depth + 1;
+    ws.last_focused_child = null;
+}
+
+/// Acquire a Workspace Con for `sid` under `mon`, recycling one from the pool if
+/// available (else allocating a fresh one). Appends it to `mon`'s children.
+fn acquireWorkspace(appState: *state.AppState, mon: *data.Con, sid: u64, space_type: i64) ?*data.Con {
+    if (appState.workspace_pool.items.len > 0) {
+        const ws = appState.workspace_pool.items[appState.workspace_pool.items.len - 1];
+        appState.workspace_pool.items.len -= 1;
+        resetWorkspace(ws, mon, sid, space_type);
+        mon.children.append(appState.arena, ws) catch return null;
+        return ws;
+    }
+    return addWorkspace(appState.arena, mon, sid, space_type) catch null;
+}
+
+/// Reconcile the tree's Workspace set against the window server's current
+/// Spaces: add a (Monitor + ) Workspace Con for every Space we don't know yet,
+/// and park *empty* Workspace Cons whose Space has vanished for reuse. This is
+/// how agate picks up Spaces created while it runs — a new desktop, or the
+/// dedicated Space macOS opens for a native-fullscreen window — which
+/// `build_tree` only captured at startup. New workspaces start empty; windows
+/// opened on them tile via the normal create path. A fullscreen Space is tracked
+/// (so a window parked there is found) but never tiled (see `flushWorkspace`).
+/// Returns true if the tree changed.
+pub fn reconcileSpaces(appState: *state.AppState) bool {
+    const root = appState.tree orelse return false;
+    const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
+    defer appState.gpa.free(all);
+
+    var changed = false;
+    for (all) |sp| {
+        if (findWorkspace(root, sp.id) != null) continue;
+        const mon = ensureMonitor(appState.arena, root, sp.display_index) catch continue;
+        _ = acquireWorkspace(appState, mon, sp.id, sp.type) orelse continue;
+        std.debug.print("[tree] +space {d} (display {d}, type {d})\n", .{ sp.id, sp.display_index, sp.type });
+        changed = true;
+    }
+    if (pruneVanishedWorkspaces(appState, all)) changed = true;
+    return changed;
+}
+
+/// Move every tracked window's leaf to the Workspace matching the Space it is
+/// actually on now, using the window server's per-Space window lists (the
+/// authoritative source). This is how agate follows a window that changed Space
+/// without a create/destroy event — most importantly a window entering or
+/// leaving native fullscreen, which silently relocates it to/from a fullscreen
+/// Space. A window parked on a fullscreen Space's (non-tiled) Workspace is thus
+/// left at full size; when it returns to a user Space its leaf comes back and
+/// tiling resumes. Call after `reconcileSpaces` (so destination Workspaces
+/// exist). Returns true if any leaf moved.
+pub fn reconcileWindowSpaces(appState: *state.AppState) bool {
+    const root = appState.tree orelse return false;
+    const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
+    defer appState.gpa.free(all);
+
+    var changed = false;
+    for (all) |sp| {
+        const wids = macos.spaces.windowsOnSpace(appState.gpa, appState.skylight_cid, sp.id, true) catch continue;
+        defer appState.gpa.free(wids);
+        for (wids) |wid| {
+            const leaf = findLeaf(root, wid) orelse continue; // not a window we track
+            const cur_ws = workspaceOf(leaf) orelse continue;
+            if (cur_ws.id == sp.id) continue; // already on the right Space
+            const dst = findWorkspace(root, sp.id) orelse continue;
+            if (moveLeafToWorkspace(appState.arena, leaf, dst)) changed = true;
+        }
+    }
+    return changed;
+}
+
+/// Whether `sid` is among `spaces`.
+fn spaceExists(spaces: []const macos.spaces.Space, sid: u64) bool {
+    for (spaces) |sp| if (sp.id == sid) return true;
+    return false;
+}
+
+/// Park *empty* Workspace Cons whose Space no longer exists (a closed desktop, a
+/// fullscreen Space dismissed on exit) in the reuse pool. Non-empty workspaces
+/// are left alone: their windows moved somewhere when the Space went away and
+/// would otherwise be lost from tracking. Returns true if anything was removed.
+fn pruneVanishedWorkspaces(appState: *state.AppState, spaces: []const macos.spaces.Space) bool {
+    const root = appState.tree orelse return false;
+    var changed = false;
+    for (root.children.items) |mon| {
+        if (mon.con_type != .Monitor) continue;
+        var i: usize = 0;
+        while (i < mon.children.items.len) {
+            const ws = mon.children.items[i];
+            if (ws.con_type == .Workspace and ws.children.items.len == 0 and !spaceExists(spaces, ws.id)) {
+                _ = mon.children.orderedRemove(i);
+                appState.workspace_pool.append(appState.gpa, ws) catch {}; // park for reuse
+                changed = true;
+                continue; // list shifted; re-check this index
+            }
+            i += 1;
+        }
+    }
+    return changed;
 }
 
 /// Append a new leaf Con holding `win` under `ws`. Returns the leaf. The new
@@ -250,6 +392,13 @@ pub fn flushActive(appState: *state.AppState) void {
     flushWorkspace(appState, ws);
 }
 
+/// Whether `ws` is a tiled workspace — a user Space. Native-fullscreen and
+/// system Spaces are tracked but left alone (resizing a fullscreen window would
+/// break it). Non-Workspace cons are never flushed directly.
+fn isTileable(ws: *data.Con) bool {
+    return ws.con_type == .Workspace and ws.space_type == 0;
+}
+
 /// Lay out the visible Space of *every* display, each within its own frame.
 /// Called when a change can affect more than the focused monitor (a Space
 /// switch, a display reconfiguration, a window moved across monitors).
@@ -265,6 +414,7 @@ pub fn flushAllVisible(appState: *state.AppState) void {
     for (mds) |md| {
         if (md.current_space == 0) continue;
         const ws = findWorkspace(root, md.current_space) orelse continue;
+        if (!isTileable(ws)) continue; // a fullscreen/system Space is showing — leave it
         const area = macos.display.frameForUUID(frames, md.uuidSlice()) orelse
             macos.display.mainVisibleFrame() orelse continue;
         layout.flushWorkspace(ws, area);
@@ -277,6 +427,7 @@ pub fn flushAllVisible(appState: *state.AppState) void {
 /// applies even on Spaces the user isn't looking at, so the destination's
 /// tiling row is correct before they swipe (or glance) over.
 pub fn flushWorkspace(appState: *state.AppState, ws: *data.Con) void {
+    if (!isTileable(ws)) return; // never resize windows on a fullscreen/system Space
     layout.flushWorkspace(ws, areaForWorkspace(appState, ws));
 }
 

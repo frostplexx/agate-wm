@@ -180,35 +180,24 @@ fn swipeToPos(order: Order, target_pos: usize) void {
     for (0..steps) |_| event_tap.performSwitchGesture(dir);
 }
 
-/// Switch the focused display to the 1-based user-space index `n`
-/// (counting only `type == 0` user Spaces, stepping past fullscreen ones).
+/// Switch the focused display to the 1-based Space index `n` — counting every
+/// Space in Mission Control order, exactly as the swipe traverses them. This
+/// INCLUDES native-fullscreen Spaces (e.g. a fullscreened Finder at position 7
+/// is reached by `n == 7`), since the fake swipe can land on them. No-op if `n`
+/// is past the strip.
 pub fn switchToIndex(alloc: Allocator, cid: sl.ConnectionID, n: usize) !void {
     if (n == 0) return;
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);
-
-    var seen: usize = 0;
-    for (order.spaces, 0..) |sp, i| {
-        if (sp.type != 0) continue;
-        seen += 1;
-        if (seen == n) {
-            swipeToPos(order, i);
-            return;
-        }
-    }
+    if (n - 1 < order.spaces.len) swipeToPos(order, n - 1);
 }
 
-/// Switch to the next user Space on the focused display (no wrap).
+/// Switch to the next Space on the focused display (any type — one swipe step,
+/// no wrap).
 pub fn switchNext(alloc: Allocator, cid: sl.ConnectionID) !void {
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);
-    var i: usize = order.active_pos + 1;
-    while (i < order.spaces.len) : (i += 1) {
-        if (order.spaces[i].type == 0) {
-            swipeToPos(order, i);
-            return;
-        }
-    }
+    if (order.active_pos + 1 < order.spaces.len) swipeToPos(order, order.active_pos + 1);
 }
 
 /// Reassign window `wid` to managed space `space_id` on macOS 26+ Tahoe via
@@ -239,26 +228,21 @@ pub fn moveWindowToSpace(wid: u32, space_id: u64) bool {
     return true;
 }
 
-/// Resolve the SkyLight space id of the 1-based user-space `n` on the focused
-/// display (counting only `type == 0` Spaces). Null if `n` is out of range.
+/// The SkyLight space id at the 1-based Mission Control position `n` on the
+/// focused display (every Space counted, including fullscreen — matching
+/// `switchToIndex`). Null if `n` is past the strip.
 pub fn userSpaceIdAt(alloc: Allocator, cid: sl.ConnectionID, n: usize) !?u64 {
     if (n == 0) return null;
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return null;
     defer alloc.free(order.spaces);
-    var seen: usize = 0;
-    for (order.spaces) |sp| {
-        if (sp.type != 0) continue;
-        seen += 1;
-        if (seen == n) return sp.id;
-    }
-    return null;
+    if (n - 1 >= order.spaces.len) return null;
+    return order.spaces[n - 1].id;
 }
 
-/// The SkyLight space id of the 1-based user-space `n` (counting only
-/// `type == 0` Spaces) on the display at `display_index`. Unlike
-/// `userSpaceIdAt`, this addresses any display, not just the focused one — so a
-/// window can be assigned to a Space on another monitor. Null if `n` is out of
-/// range on that display.
+/// The SkyLight space id at the 1-based Mission Control position `n` on the
+/// display at `display_index` (every Space counted). Unlike `userSpaceIdAt`,
+/// addresses any display — so a window can be assigned to a Space on another
+/// monitor. Null if `n` is out of range on that display.
 pub fn userSpaceIdOnDisplay(alloc: Allocator, cid: sl.ConnectionID, display_index: usize, n: usize) !?u64 {
     if (n == 0) return null;
     const all = try allSpaces(alloc, cid);
@@ -266,44 +250,27 @@ pub fn userSpaceIdOnDisplay(alloc: Allocator, cid: sl.ConnectionID, display_inde
     var seen: usize = 0;
     for (all) |sp| {
         if (sp.display_index != display_index) continue;
-        if (sp.type != 0) continue;
         seen += 1;
         if (seen == n) return sp.id;
     }
     return null;
 }
 
-/// The 1-based user-space index of the currently active Space on the focused
-/// display (the number `agate.space(n)` would use to reach it) — what the
-/// menu-bar indicator shows. Null when it can't be resolved or the active
-/// Space isn't a user Space (e.g. a native-fullscreen Space).
+/// The 1-based Mission Control position of the currently active Space on the
+/// focused display (every Space counted) — the number `agate.space(n)` reaches
+/// it with, and what the menu-bar indicator shows. Null if it can't be resolved.
 pub fn activeUserIndex(alloc: Allocator, cid: sl.ConnectionID) ?usize {
     const order = (focusedDisplayOrder(alloc, cid) catch return null) orelse return null;
     defer alloc.free(order.spaces);
-    var seen: usize = 0;
-    for (order.spaces, 0..) |sp, i| {
-        if (sp.type != 0) {
-            if (i == order.active_pos) return null;
-            continue;
-        }
-        seen += 1;
-        if (i == order.active_pos) return seen;
-    }
-    return null;
+    return order.active_pos + 1;
 }
 
-/// Switch to the previous user Space on the focused display (no wrap).
+/// Switch to the previous Space on the focused display (any type — one swipe
+/// step, no wrap).
 pub fn switchPrev(alloc: Allocator, cid: sl.ConnectionID) !void {
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);
-    var i: usize = order.active_pos;
-    while (i > 0) {
-        i -= 1;
-        if (order.spaces[i].type == 0) {
-            swipeToPos(order, i);
-            return;
-        }
-    }
+    if (order.active_pos > 0) swipeToPos(order, order.active_pos - 1);
 }
 
 /// Every Space across every display. Caller owns the slice (use an arena).

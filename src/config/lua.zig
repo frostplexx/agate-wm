@@ -10,6 +10,7 @@ const state = @import("../state.zig");
 const focus = @import("../wm/focus/focus.zig");
 const tree = @import("../wm/tree.zig");
 const data = @import("../wm/data.zig");
+const window = @import("../wm/window.zig");
 const regexp = @import("../lib/regexp.zig");
 const gestures = @import("../wm/gestures.zig");
 const wm_layout = @import("../wm/layout.zig");
@@ -580,6 +581,10 @@ fn moveFocusedToSpaceId(app: *state.AppState, target_sid: u64) void {
     const win = if (leaf.window) |w| w else return;
     const cur_ws = leaf.parent orelse return; // Workspace Con; .id == SkyLight sid
     if (target_sid == cur_ws.id) return; // already there — don't issue the SPI
+    // A native-fullscreen window can't be sent to a regular Space while it's
+    // fullscreen — exit fullscreen first, then finish the move once it lands on
+    // a user Space (see `runPendingMove`).
+    if (deferIfFullscreen(app, leaf, win.id, target_sid)) return;
     if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
     const root = app.tree orelse return;
     const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
@@ -642,12 +647,51 @@ fn moveFocusedToMonitor(app: *state.AppState, dir: focus.MonitorDir) void {
     const root = app.tree orelse return;
     const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
     if (dst_ws == leaf.parent) return;
+    // Native fullscreen: exit it first, then finish the move (see runPendingMove).
+    if (deferIfFullscreen(app, leaf, win.id, target_sid)) return;
     if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
 
     _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws);
     tree.flushActive(app); // re-tile the source we shrank
     tree.flushWorkspace(app, dst_ws); // tile the destination
     _ = focus.focusLeaf(leaf); // the window is visible there now — follow it
+}
+
+/// If `leaf`'s window is on a native-fullscreen Space, leave fullscreen and
+/// record the move to finish once it returns to a user Space. Returns true when
+/// it deferred (the caller must not proceed with the move this turn).
+fn deferIfFullscreen(app: *state.AppState, leaf: *data.Con, wid: u32, target_sid: u64) bool {
+    const ws = tree.workspaceOf(leaf) orelse return false;
+    if (ws.space_type == 0) return false; // a normal window — move it directly
+    const win = if (leaf.window) |*w| w else return false;
+    const el = window.resolveElement(win) orelse return false;
+    if (!el.setBool("AXFullScreen", false)) return false; // couldn't exit — let caller try
+    app.pending_move = .{ .wid = wid, .target_sid = target_sid };
+    std.debug.print("[move] #{d} leaving fullscreen; move to {d} deferred\n", .{ wid, target_sid });
+    return true;
+}
+
+/// Carry out a move deferred by `deferIfFullscreen`, once the window has left
+/// the fullscreen Space and is back on a user Space. Called from the
+/// space-change handler. No-op while the window is still transitioning.
+pub fn runPendingMove(app: *state.AppState) void {
+    const pm = app.pending_move orelse return;
+    const root = app.tree orelse return;
+    const leaf = tree.findLeaf(root, pm.wid) orelse {
+        app.pending_move = null; // window gone
+        return;
+    };
+    const src_ws = tree.workspaceOf(leaf) orelse return;
+    if (src_ws.space_type != 0) return; // still on a fullscreen/transition Space — wait
+    app.pending_move = null;
+    if (src_ws.id == pm.target_sid) return; // already landed on the target
+    if (!macos.spaces.moveWindowToSpace(pm.wid, pm.target_sid)) return;
+    const dst = tree.findWorkspace(root, pm.target_sid) orelse return;
+    _ = tree.moveLeafToWorkspace(app.arena, leaf, dst);
+    tree.flushWorkspace(app, src_ws); // re-tile the Space it returned to
+    tree.flushWorkspace(app, dst); // tile the destination
+    app.pending_focus = .{ .wid = pm.wid, .sid = pm.target_sid };
+    std.debug.print("[move] fullscreen exited; #{d} -> space {d}\n", .{ pm.wid, pm.target_sid });
 }
 
 /// `agate.rule{ app = "...", title = "...", space = N, follow = bool }`

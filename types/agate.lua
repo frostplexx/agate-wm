@@ -46,8 +46,8 @@
 ---@class agate.Rule
 ---@field app? string POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.
 ---@field title? string POSIX extended regex matched against the window title.
----@field space? integer 1-based user-space index matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first user space).
----@field monitor? integer 1-based monitor (display order) the `space` index counts on; pins the app to that display. Omit for the focused display.
+---@field space? integer 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
+---@field monitor? integer 1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.
 ---@field follow? boolean Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
 
 ---@class Agate
@@ -93,19 +93,19 @@ function agate.move(dir) end
 ---@param mode? agate.Layout Layout of the new container. Default `v_stack`.
 function agate.join(dir, mode) end
 
----Switch to user space N on the focused display.
----@param n integer 1-based user-space index on the focused display.
+---Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
+---@param n integer 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 function agate.space(n) end
 
----Switch to the next user space on the focused display.
+---Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 function agate.space_next() end
 
----Switch to the previous user space on the focused display.
+---Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 function agate.space_prev() end
 
 ---Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
----@param n integer 1-based user-space index to send the window to.
----@param monitor? integer 1-based monitor (display order) the space belongs to. Omit for the focused display — pass it to assign the window to a space on another monitor.
+---@param n integer 1-based Space position (Mission Control order, fullscreen included) to send the window to.
+---@param monitor? integer 1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
 function agate.move_to_space(n, monitor) end
 
 ---Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.

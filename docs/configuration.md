@@ -36,8 +36,8 @@ On a small main display (the built-in panel, or anything at or under `max_width`
 | --- | --- | --- |
 | `app` | `string` | POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`. _(optional)_ |
 | `title` | `string` | POSIX extended regex matched against the window title. _(optional)_ |
-| `space` | `integer` | 1-based user-space index matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first user space). _(optional)_ |
-| `monitor` | `integer` | 1-based monitor (display order) the `space` index counts on; pins the app to that display. Omit for the focused display. _(optional)_ |
+| `space` | `integer` | 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space). _(optional)_ |
+| `monitor` | `integer` | 1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display. _(optional)_ |
 | `follow` | `boolean` | Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor. _(optional)_ |
 
 ## API
@@ -102,24 +102,24 @@ Combine the focused window with its neighbour into a nested container, for mixed
 
 ### `agate.space(n)`
 
-Switch to user space N on the focused display.
+Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
 
-- `n` (`integer`) — 1-based user-space index on the focused display.
+- `n` (`integer`) — 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 
 ### `agate.space_next()`
 
-Switch to the next user space on the focused display.
+Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 
 ### `agate.space_prev()`
 
-Switch to the previous user space on the focused display.
+Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 
 ### `agate.move_to_space(n, monitor?)`
 
 Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
 
-- `n` (`integer`) — 1-based user-space index to send the window to.
-- `monitor` (`integer`) _(optional)_ — 1-based monitor (display order) the space belongs to. Omit for the focused display — pass it to assign the window to a space on another monitor.
+- `n` (`integer`) — 1-based Space position (Mission Control order, fullscreen included) to send the window to.
+- `monitor` (`integer`) _(optional)_ — 1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
 
 ### `agate.focus_monitor(dir)`
 

@@ -15,6 +15,13 @@ pub const PendingFocus = struct { wid: u32, sid: u64 };
 /// skips a recently rule-routed window instead.
 pub const RuleMoved = struct { wid: u32, at: f64 };
 
+/// A move requested for a window that was in native fullscreen. A fullscreen
+/// window can't be sent to a regular Space while fullscreen, so the move command
+/// exits fullscreen and records the target here; once the window lands back on a
+/// user Space (a later space-change), the move is carried out. See
+/// `lua_config.runPendingMove`.
+pub const PendingMove = struct { wid: u32, target_sid: u64 };
+
 pub const AppState = struct {
     skylight_cid: u32,
     /// Arena for tree-lifetime allocations: Con nodes, their children lists,
@@ -24,8 +31,16 @@ pub const AppState = struct {
     /// arena is for things that live as long as the tree).
     gpa: std.mem.Allocator,
     tree: ?*data.Con,
+    /// Recycled Workspace Cons (gpa-tracked list, arena-allocated Cons). A Space
+    /// created at runtime (a new desktop, a native-fullscreen Space) gets a
+    /// Workspace Con; when that Space is destroyed the empty Con is parked here
+    /// and reused for the next new Space, so create/destroy churn (e.g. toggling
+    /// fullscreen) doesn't grow the tree arena without bound.
+    workspace_pool: std.ArrayListUnmanaged(*data.Con) = .empty,
     /// See `PendingFocus`. Null when there's no deferred focus request.
     pending_focus: ?PendingFocus = null,
+    /// See `PendingMove`. Null when no fullscreen-exit move is pending.
+    pending_move: ?PendingMove = null,
     /// See `RuleMoved`. Null when no rule move is pending suppression.
     rule_moved: ?RuleMoved = null,
 };

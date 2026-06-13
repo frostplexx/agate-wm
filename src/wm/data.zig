@@ -76,6 +76,11 @@ pub const Con = struct {
     id: u64,
     /// What this Con represents in the tree.
     con_type: Type,
+    /// For a Workspace Con: the SkyLight Space `type` (0 = user/tileable,
+    /// 2 = native-fullscreen, 4 = system). Non-user spaces are tracked (so a
+    /// window parked there is found) but never tiled — agate must not resize a
+    /// fullscreen window. Unused for other Con types.
+    space_type: i64 = 0,
     /// The window contained in this Con, if it's a leaf node.
     window: ?Window = null,
     /// The tiling mode of this Con. Only relevant if it has children.

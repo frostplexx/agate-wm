@@ -64,8 +64,8 @@ const small_screen_fields = [_]Param{
 const rule_fields = [_]Param{
     .{ .name = "app", .ty = "string", .doc = "POSIX extended regex matched against the owning application's name, e.g. `\"^Music$\"`.", .optional = true },
     .{ .name = "title", .ty = "string", .doc = "POSIX extended regex matched against the window title.", .optional = true },
-    .{ .name = "space", .ty = "integer", .doc = "1-based user-space index matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first user space).", .optional = true },
-    .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the `space` index counts on; pins the app to that display. Omit for the focused display.", .optional = true },
+    .{ .name = "space", .ty = "integer", .doc = "1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).", .optional = true },
+    .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.", .optional = true },
     .{ .name = "follow", .ty = "boolean", .doc = "Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.", .optional = true },
 };
 
@@ -138,16 +138,16 @@ const funcs = [_]Func{
     },
     .{
         .name = "space",
-        .params = &.{.{ .name = "n", .ty = "integer", .doc = "1-based user-space index on the focused display." }},
-        .doc = "Switch to user space N on the focused display.",
+        .params = &.{.{ .name = "n", .ty = "integer", .doc = "1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included)." }},
+        .doc = "Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).",
     },
-    .{ .name = "space_next", .doc = "Switch to the next user space on the focused display." },
-    .{ .name = "space_prev", .doc = "Switch to the previous user space on the focused display." },
+    .{ .name = "space_next", .doc = "Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included)." },
+    .{ .name = "space_prev", .doc = "Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included)." },
     .{
         .name = "move_to_space",
         .params = &.{
-            .{ .name = "n", .ty = "integer", .doc = "1-based user-space index to send the window to." },
-            .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the space belongs to. Omit for the focused display — pass it to assign the window to a space on another monitor.", .optional = true },
+            .{ .name = "n", .ty = "integer", .doc = "1-based Space position (Mission Control order, fullscreen included) to send the window to." },
+            .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.", .optional = true },
         },
         .doc = "Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.",
     },
