@@ -144,5 +144,10 @@ agate.rule({ app = "^Obsidian$", space = 3 })
 agate.rule({ app = "^Things$", space = 3 })
 agate.rule({ app = "^Spotify$", space = 5 })
 agate.rule({ app = "^Vesktop$", space = 4 })
+-- Pin an app to a specific monitor (1-based, display order). `space` then
+-- counts on that monitor; omit it for the monitor's first space. `follow=false`
+-- routes the window there without yanking your view to that display.
+-- agate.rule({ app = "^Zen$", monitor = 2, follow = false })
+-- agate.rule({ app = "^Slack$", monitor = 2, space = 2, follow = false })
 
-print("agate: development config 420")
+print("agate: development config")

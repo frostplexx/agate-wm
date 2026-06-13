@@ -36,8 +36,9 @@ On a small main display (the built-in panel, or anything at or under `max_width`
 | --- | --- | --- |
 | `app` | `string` | POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`. _(optional)_ |
 | `title` | `string` | POSIX extended regex matched against the window title. _(optional)_ |
-| `space` | `integer` | 1-based user-space index matched windows are sent to. Required. |
-| `follow` | `boolean` | Switch to that space along with the window (default `true`). Set `false` to route the window in the background. _(optional)_ |
+| `space` | `integer` | 1-based user-space index matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first user space). _(optional)_ |
+| `monitor` | `integer` | 1-based monitor (display order) the `space` index counts on; pins the app to that display. Omit for the focused display. _(optional)_ |
+| `follow` | `boolean` | Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor. _(optional)_ |
 
 ## API
 
@@ -134,7 +135,7 @@ Move the focused window to an adjacent display's visible space, tile it there, a
 
 ### `agate.rule(rule)`
 
-Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space when they appear. At least one of `app`/`title` is required; both must match when both are given. When several rules match a window, the last registered one wins.
+Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, or both. When several rules match a window, the last registered one wins.
 
 - `rule` (`agate.Rule`) — Rule table (see agate.Rule).
 

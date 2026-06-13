@@ -52,6 +52,11 @@ pub const Rule = struct {
     title: ?regexp.Regex = null,
     /// 1-based user-space index to send matched windows to (0 = unset/invalid).
     space: usize = 0,
+    /// 1-based monitor (display order) the `space` index counts on. 0 = the
+    /// focused display (the original behaviour). Set it to pin an app to a
+    /// specific display; combined with `space` to pick which Space on it
+    /// (defaults to the monitor's first user Space when only `monitor` is given).
+    monitor: usize = 0,
     /// Switch to the Space the window was sent to (the default: opening an
     /// assigned app takes the user along). `follow = false` routes the window
     /// in the background instead.
@@ -662,6 +667,15 @@ fn agateRule(lua: *Lua) i32 {
     }
     lua.pop(1);
 
+    _ = lua.getField(1, "monitor");
+    if (lua.isNumber(-1)) {
+        const m = lua.toInteger(-1) catch 0;
+        if (m >= 1) rule.monitor = @intCast(m);
+    }
+    lua.pop(1);
+    // `monitor` alone pins to that display's first user Space.
+    if (rule.monitor >= 1 and rule.space == 0) rule.space = 1;
+
     _ = lua.getField(1, "follow");
     if (lua.isBoolean(-1)) rule.follow = lua.toBoolean(-1);
     lua.pop(1);
@@ -687,7 +701,7 @@ fn agateRule(lua: *Lua) i32 {
     lua.pop(1);
 
     if (rule.space == 0 or (rule.app == null and rule.title == null)) {
-        std.debug.print("[config] rule needs a space >= 1 and an app or title matcher; ignored\n", .{});
+        std.debug.print("[config] rule needs a space or monitor, and an app or title matcher; ignored\n", .{});
         freeRule(rule);
         return 0;
     }
@@ -713,9 +727,10 @@ fn regexMatches(re: regexp.Regex, s: []const u8) bool {
 
 /// The combined effect of every rule matching this window, or null if none
 /// does. Later rules override earlier ones, like yabai's effect combining.
-fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, follow: bool } {
+fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, monitor: usize, follow: bool } {
     const cfg = g_config orelse return null;
     var space: usize = 0;
+    var monitor: usize = 0;
     var follow = false;
     for (cfg.rules.items) |r| {
         if (r.app) |re| {
@@ -725,10 +740,11 @@ fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, f
             if (!regexMatches(re, title)) continue;
         }
         space = r.space;
+        monitor = r.monitor;
         follow = r.follow;
     }
     if (space == 0) return null;
-    return .{ .space = space, .follow = follow };
+    return .{ .space = space, .monitor = monitor, .follow = follow };
 }
 
 /// Apply assignment rules to a freshly tracked window: if a rule matches, send
@@ -740,14 +756,21 @@ pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8
     const win = if (leaf.window) |w| w else return;
     const eff = matchRules(win.owner, title) orelse return;
     const cur_ws = leaf.parent orelse return; // new leaves sit directly under their Workspace
-    const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, eff.space) catch return) orelse return;
+    // A `monitor` makes `space` count on that display (1-based); else the
+    // focused display, the original behaviour.
+    const target_sid = blk: {
+        if (eff.monitor >= 1) {
+            break :blk (macos.spaces.userSpaceIdOnDisplay(app.gpa, app.skylight_cid, eff.monitor - 1, eff.space) catch return) orelse return;
+        }
+        break :blk (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, eff.space) catch return) orelse return;
+    };
     if (target_sid == cur_ws.id) return; // already on the assigned space
     if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
     const root = app.tree orelse return;
     const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
     _ = tree.moveLeafToWorkspace(app.arena, leaf, dst_ws); // arena: see moveFocusedToSpace
     tree.flushWorkspace(app, dst_ws);
-    std.debug.print("[rule] {s} #{d} -> space {d}\n", .{ win.owner, win.id, eff.space });
+    std.debug.print("[rule] {s} #{d} -> space {d} (monitor {d})\n", .{ win.owner, win.id, eff.space, eff.monitor });
     // Mute activation-follow for this window either way: the app activates
     // around its own launch, and the follow chasing the window we just routed
     // would switch the user a second time (racing the gesture below and able to
@@ -757,7 +780,16 @@ pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8
         // The window is already moved and tiled (flushed above), so the user
         // lands on a settled Space. Keep the window selected once it's shown.
         app.pending_focus = .{ .wid = win.id, .sid = target_sid };
-        macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, target_sid) catch {};
+        if (eff.monitor >= 1) {
+            // `switchToSpaceId` only drives the *focused* display. For a
+            // monitor-targeted rule, focus the window directly — when that
+            // display already shows the target Space it's on-screen, so focus
+            // (and the menu bar) move there; otherwise `pending_focus` keeps it
+            // selected for when the Space is next shown.
+            _ = focus.focusLeaf(leaf);
+        } else {
+            macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, target_sid) catch {};
+        }
     }
 }
 

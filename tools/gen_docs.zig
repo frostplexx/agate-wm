@@ -64,8 +64,9 @@ const small_screen_fields = [_]Param{
 const rule_fields = [_]Param{
     .{ .name = "app", .ty = "string", .doc = "POSIX extended regex matched against the owning application's name, e.g. `\"^Music$\"`.", .optional = true },
     .{ .name = "title", .ty = "string", .doc = "POSIX extended regex matched against the window title.", .optional = true },
-    .{ .name = "space", .ty = "integer", .doc = "1-based user-space index matched windows are sent to. Required." },
-    .{ .name = "follow", .ty = "boolean", .doc = "Switch to that space along with the window (default `true`). Set `false` to route the window in the background.", .optional = true },
+    .{ .name = "space", .ty = "integer", .doc = "1-based user-space index matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first user space).", .optional = true },
+    .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the `space` index counts on; pins the app to that display. Omit for the focused display.", .optional = true },
+    .{ .name = "follow", .ty = "boolean", .doc = "Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.", .optional = true },
 };
 
 const aliases = [_]Alias{
@@ -163,7 +164,7 @@ const funcs = [_]Func{
     .{
         .name = "rule",
         .params = &.{.{ .name = "rule", .ty = "agate.Rule", .doc = "Rule table (see agate.Rule)." }},
-        .doc = "Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space when they appear. At least one of `app`/`title` is required; both must match when both are given. When several rules match a window, the last registered one wins.",
+        .doc = "Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, or both. When several rules match a window, the last registered one wins.",
     },
 };
 
