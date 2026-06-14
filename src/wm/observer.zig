@@ -264,7 +264,12 @@ pub fn run(appState: *state.AppState) !void {
     // other `agate.gesture` binding). Recognition runs on MultitouchSupport's
     // thread; dispatch lands back on this run loop. Missing framework or no
     // trackpad just leaves gestures off.
-    _ = gestures.start();
+    // A 4-finger swipe bound via `agate.gesture` collides with the native macOS
+    // 4-finger swipe, which the window server consumes before tap level — so we
+    // can't suppress it, only warn the user to turn it off in System Settings.
+    if (gestures.start() and lua_config.hasFourFingerGesture()) {
+        macos.trackpad.warnIfNativeSwipeEnabled();
+    }
 
     // Swallow scroll while a bound trackpad gesture is in progress. MultitouchSupport
     // only *observes* the touches, so without this the window under a 3-/4-finger

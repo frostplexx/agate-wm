@@ -1068,6 +1068,14 @@ fn gestureDirBound(cfg: *Config, fingers: u8, dir: gestures.Swipe) bool {
     return false;
 }
 
+/// Whether any 4-finger swipe is bound, used to decide whether to warn about the
+/// conflicting native macOS gesture (see `wm/observer.zig`).
+pub fn hasFourFingerGesture() bool {
+    const cfg = g_config orelse return false;
+    for (cfg.gesture_bindings.items) |b| if (b.fingers == 4) return true;
+    return false;
+}
+
 /// The swipe direction for an axis + sign (progress is +right/+up).
 fn dirOf(axis: gestures.Axis, positive: bool) gestures.Swipe {
     return switch (axis) {
@@ -1099,8 +1107,11 @@ pub fn gestureBegin(fingers: u8, axis: gestures.Axis) void {
     g_arrow_dir = null;
 }
 
-pub fn gestureUpdate(progress: f32) void {
+pub fn gestureUpdate(fingers: u8, progress: f32) void {
     const cfg = g_config orelse return;
+    // The peak finger count can climb after `begin` (a 4-finger swipe that
+    // started as 3), so keep the HUD's notion of it current each frame.
+    g_gesture_fingers = fingers;
     const mag = @abs(progress);
     const positive = progress >= 0;
 

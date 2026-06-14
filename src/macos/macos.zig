@@ -43,6 +43,8 @@ pub const statusbar = @import("statusbar.zig");
 pub const overlay = @import("overlay.zig");
 /// Liquid Glass swipe HUD (NSGlassEffectView capsule, shown during gestures).
 pub const glass_hud = @import("glass_hud.zig");
+/// Disable/restore the native 4-finger swipe so agate's owns that gesture.
+pub const trackpad = @import("trackpad.zig");
 
 // Common conveniences re-exported at the top level.
 pub const String = foundation.String;

@@ -40,7 +40,7 @@ pub const Phase = union(enum) {
     end: End,
 
     pub const Begin = struct { fingers: u8, axis: Axis };
-    pub const Update = struct { progress: f32 };
+    pub const Update = struct { fingers: u8, progress: f32 };
     pub const End = struct { fingers: u8, dir: ?Swipe };
 };
 
@@ -72,8 +72,13 @@ pub const Recognizer = struct {
     /// without this a one-frame flicker would abort an in-progress swipe.
     lift_grace: u8 = 4,
 
-    /// Finger count locked at gesture start (0 = no gesture in progress).
+    /// The current touching finger count (0 = no gesture in progress). Changes
+    /// freely between 3 and 4 within a single gesture as fingers land/lift.
     active: u8 = 0,
+    /// The highest finger count seen this gesture — the count we report and fire
+    /// on. Four fingers never land together, so a 4-finger swipe routinely dips
+    /// through 3; taking the peak makes it fire as a 4-finger gesture anyway.
+    peak: u8 = 0,
     /// Axis locked after clearing the deadzone (null = still in the deadzone, no
     /// `begin` emitted yet).
     axis: ?Axis = null,
@@ -94,6 +99,7 @@ pub const Recognizer = struct {
 
     fn begin(self: *Recognizer, count: u8, cx: f32, cy: f32, t: f64) void {
         self.active = count;
+        self.peak = count;
         self.axis = null;
         self.last_x = cx;
         self.last_y = cy;
@@ -127,9 +133,10 @@ pub const Recognizer = struct {
     /// never left the deadzone is invisible to the main thread.
     fn finish(self: *Recognizer) ?Phase {
         const had_axis = self.axis != null;
-        const fingers = self.active;
+        const fingers = self.peak;
         const dir = self.committedDir();
         self.active = 0;
+        self.peak = 0;
         self.axis = null;
         self.velocity = 0;
         self.grace = 0;
@@ -151,9 +158,18 @@ pub const Recognizer = struct {
             // A clean lift (no contacts at all) is unambiguous: end now.
             if (count == 0) return self.finish();
             if (recognized(count)) {
-                // Switched to the *other* gesture count (3↔4): end this one;
-                // the next frame starts the new gesture fresh.
-                return self.finish();
+                // Count changed between 3 and 4 within the SAME gesture (fingers
+                // landing or lifting unevenly — they never move in lockstep).
+                // Keep going: bump the peak, and re-baseline the centroid so the
+                // position jump from adding/removing a finger isn't counted as
+                // travel. Travel, axis and progress all carry over untouched.
+                self.active = count;
+                if (count > self.peak) self.peak = count;
+                self.last_x = cx;
+                self.last_y = cy;
+                self.last_t = t;
+                self.grace = 0;
+                return null;
             }
             // A partial wrong count (1–2 fingers, or a phantom contact). Tolerate
             // a few frames — fingers seldom land/leave together — by freezing the
@@ -184,7 +200,7 @@ pub const Recognizer = struct {
             // Seed velocity from this frame so even a flick that locks and lifts
             // in two frames carries a speed.
             if (dt > 0) self.velocity = (if (axis == .horizontal) fdx else fdy) / @as(f32, @floatCast(dt));
-            return .{ .begin = .{ .fingers = self.active, .axis = axis } };
+            return .{ .begin = .{ .fingers = self.peak, .axis = axis } };
         }
 
         const axis = self.axis.?;
@@ -195,7 +211,7 @@ pub const Recognizer = struct {
             // Light EMA so a single noisy frame at release can't fake a flick.
             self.velocity = self.velocity * 0.5 + inst * 0.5;
         }
-        return .{ .update = .{ .progress = travel_along / self.commit_distance } };
+        return .{ .update = .{ .fingers = self.peak, .progress = travel_along / self.commit_distance } };
     }
 };
 
@@ -318,7 +334,7 @@ fn drainQueue(_: ?*anyopaque) callconv(.c) void {
     }
     for (events[0..n]) |ev| switch (ev) {
         .begin => |b| lua_config.gestureBegin(b.fingers, b.axis),
-        .update => |u| lua_config.gestureUpdate(u.progress),
+        .update => |u| lua_config.gestureUpdate(u.fingers, u.progress),
         .end => |e| lua_config.gestureEnd(e.fingers, e.dir),
     };
 }
@@ -429,6 +445,40 @@ test "a one-frame finger-count flicker does not abort the gesture" {
     _ = d.step(3, 0.48, 0.5); // recovers and keeps travelling
     const e = d.step(0, 0.48, 0.5).?; // real lift
     try testing.expectEqual(Swipe.right, e.end.dir.?); // gesture survived
+}
+
+test "a 4-finger swipe that dips to 3 stays one gesture and fires as 4-finger" {
+    var d = Driver{ .r = .{ .deadzone = 0.03, .commit_distance = 0.2, .flick_speed = 100 } };
+    _ = d.step(4, 0.30, 0.5); // land 4 fingers
+    _ = d.step(4, 0.42, 0.5); // begin (axis locks), travel 0.12
+    _ = d.step(3, 0.42, 0.5); // a finger lifts a hair → reads 3, NOT a new gesture
+    _ = d.step(3, 0.54, 0.5); // keep swiping on 3 → travel 0.24, past commit
+    _ = d.step(4, 0.54, 0.5); // finger back → 4 again; travel carries through
+    const e = d.step(0, 0.54, 0.5).?;
+    try testing.expectEqual(Swipe.right, e.end.dir.?); // committed once, not fragmented
+    try testing.expectEqual(@as(u8, 4), e.end.fingers); // peak count → 4-finger action
+}
+
+test "a 4-finger swipe whose 4th finger lands late still fires as 4-finger" {
+    var d = Driver{ .r = .{ .deadzone = 0.03, .commit_distance = 0.2, .flick_speed = 100 } };
+    _ = d.step(3, 0.30, 0.5); // only 3 down at first contact
+    _ = d.step(4, 0.31, 0.5); // 4th lands before any real travel
+    _ = d.step(4, 0.42, 0.5); // begin on 4
+    _ = d.step(4, 0.55, 0.5);
+    const e = d.step(0, 0.55, 0.5).?;
+    try testing.expectEqual(Swipe.right, e.end.dir.?);
+    try testing.expectEqual(@as(u8, 4), e.end.fingers);
+}
+
+test "re-baselining across a count change does not inject phantom travel" {
+    // The centroid jumps when a finger is added; that jump must not count as
+    // travel, so a gesture that hasn't really moved still won't commit.
+    var d = Driver{ .r = .{ .deadzone = 0.03, .commit_distance = 0.2, .flick_speed = 100 } };
+    _ = d.step(3, 0.50, 0.5);
+    _ = d.step(3, 0.54, 0.5); // begin, tiny travel (0.04)
+    _ = d.step(4, 0.70, 0.5); // big centroid jump from the 4th finger — re-baselined
+    const e = d.step(0, 0.70, 0.5).?;
+    try testing.expect(e.end.dir == null); // 0.04 of real travel, nowhere near commit
 }
 
 test "vertical swipe down commits with bottom-left origin" {
