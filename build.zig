@@ -71,18 +71,25 @@ pub fn build(b: *std.Build) !void {
     const run_macos_tests = b.addRunArtifact(macos_tests);
     test_step.dependOn(&run_macos_tests.step);
 
-    // `zig build docs` — regenerate the settings reference and the Lua type stub
-    // from tools/gen_docs.zig, writing them back into the source tree. The
-    // generator is a plain module (std only); we call it at configure time to
-    // render the strings, stage them with WriteFiles, then copy into the source.
-    const gen_docs = @import("tools/gen_docs.zig");
-    const staged = b.addWriteFiles();
-    const md = staged.add("configuration.md", gen_docs.markdown(b.allocator));
-    const lua_types = staged.add("agate.lua", gen_docs.lua(b.allocator));
+    // `zig build docs` — compile tools/gen_docs.zig, run it against
+    // src/config/lua.zig (parsing its `// @doc` annotations), and copy the
+    // rendered outputs back into the source tree.
+    const gen_docs_exe = b.addExecutable(.{
+        .name = "gen_docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_docs.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_gen_docs = b.addRunArtifact(gen_docs_exe);
+    _ = run_gen_docs.addFileArg(b.path("src/config/lua.zig")); // argv[1]
+    const md_out = run_gen_docs.addOutputFileArg("configuration.md"); // argv[2]
+    const lua_out = run_gen_docs.addOutputFileArg("agate.lua");       // argv[3]
 
     const write_docs = b.addUpdateSourceFiles();
-    write_docs.addCopyFileToSource(md, "docs/configuration.md");
-    write_docs.addCopyFileToSource(lua_types, "types/agate.lua");
+    write_docs.addCopyFileToSource(md_out, "docs/configuration.md");
+    write_docs.addCopyFileToSource(lua_out, "types/agate.lua");
 
     const docs_step = b.step("docs", "Generate settings docs and Lua type defs");
     docs_step.dependOn(&write_docs.step);

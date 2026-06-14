@@ -1,332 +1,310 @@
-//! Documentation generator for agate's Lua config surface.
+//! Reads `// @doc` annotations from src/config/lua.zig and emits:
+//!   * docs/configuration.md  — human-readable settings reference
+//!   * types/agate.lua        — LuaCATS type stub for lua-language-server
 //!
-//! A single metadata table below is the source of truth for both outputs:
-//!   * `markdown()` → `docs/configuration.md` (human reference)
-//!   * `lua()`      → `types/agate.lua` (LuaCATS type stub for lua-language-server)
+//! Invoked by `zig build docs` (see build.zig). Never edit this file when
+//! adding settings — add `// @doc` lines in lua.zig instead.
 //!
-//! `build.zig` imports this file and calls the two functions, writing the
-//! results into the source tree via `zig build docs`. Keep the metadata in sync
-//! with `src/config/lua.zig` (the `agate_fns` table, `agateConfig` parsing,
-//! `layoutFromName`, and `parseDir`).
+//! Annotation format (use | as field separator; never use | inside a field
+//! value except in FP type names, which are parsed from both ends):
+//!
+//!   // @doc S|name|lua_type|default|description
+//!   // @doc SS|name|lua_type|optional|description      (small_screen fields)
+//!   // @doc SR|name|lua_type|optional|description      (rule fields)
+//!   // @doc A|name|description                         (start an alias)
+//!   // @doc AV|alias_name|value                        (alias value; follows its A)
+//!   // @doc F|name|description                         (api function)
+//!   // @doc FP|func|param|type|optional|description    (function param)
+//!   // @doc C|form|description                         (string command)
 const std = @import("std");
 
-// --- Source-of-truth metadata ----------------------------------------------
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
 
-const Param = struct {
-    name: []const u8,
-    ty: []const u8, // Lua/LuaCATS type
-    doc: []const u8,
-    optional: bool = false,
-};
-
-const Func = struct {
-    name: []const u8,
-    params: []const Param = &.{},
-    ret: ?[]const u8 = null,
-    doc: []const u8,
-};
-
-const Setting = struct {
-    name: []const u8,
-    ty: []const u8,
-    default: []const u8,
-    doc: []const u8,
-};
-
-const Alias = struct {
-    name: []const u8,
-    values: []const []const u8,
-    doc: []const u8,
-};
-
-const settings = [_]Setting{
-    .{ .name = "gaps", .ty = "number", .default = "8", .doc = "Pixels between adjacent tiles." },
-    .{ .name = "outer_gaps", .ty = "number", .default = "8", .doc = "Pixels inset from the screen edge." },
-    .{ .name = "accordion_padding", .ty = "number", .default = "40", .doc = "Stacked-window \"peek\": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`." },
-    .{ .name = "hyper", .ty = "string[]", .default = "{\"ctrl\",\"alt\",\"cmd\",\"shift\"}", .doc = "Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`." },
-    .{ .name = "hyper_key", .ty = "string", .default = "\"f18\"", .doc = "Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `\"f18\"`; empty disables." },
-    .{ .name = "small_screen", .ty = "agate.SmallScreen", .default = "{ enabled = true, layout = \"h_accordion\", max_width = 0 }", .doc = "Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over." },
-    .{ .name = "drag_preview", .ty = "boolean", .default = "true", .doc = "While dragging a window, highlight the tile it will swap into on drop with a translucent overlay." },
-    .{ .name = "space_indicator", .ty = "boolean", .default = "true", .doc = "Show the active space's number as a menu-bar status item." },
-    .{ .name = "animations", .ty = "boolean", .default = "false", .doc = "Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`." },
-    .{ .name = "animation_duration", .ty = "number", .default = "150", .doc = "Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`." },
-    .{ .name = "space_animation", .ty = "string", .default = "\"instant\"", .doc = "How much of the Space-switch transition plays: `\"fast\"`, `\"very_fast\"`, or `\"instant\"` (no perceptible animation)." },
-};
-
-// Fields of the `small_screen` table inside `agate.config{}`.
-const small_screen_fields = [_]Param{
-    .{ .name = "enabled", .ty = "boolean", .doc = "Master switch (default `true`).", .optional = true },
-    .{ .name = "layout", .ty = "string", .doc = "Layout small workspaces get: any layout name (default `\"h_accordion\"`), or `\"tabs\"` for a zero-peek stack — full-area windows flipped through like tabs.", .optional = true },
-    .{ .name = "max_width", .ty = "number", .doc = "Width (points) at or under which a display counts as small, in addition to the built-in panel. `0` (default) = built-in display detection only.", .optional = true },
-};
-
-// Fields of the table passed to `agate.rule{}`.
-const rule_fields = [_]Param{
-    .{ .name = "app", .ty = "string", .doc = "POSIX extended regex matched against the owning application's name, e.g. `\"^Music$\"`.", .optional = true },
-    .{ .name = "title", .ty = "string", .doc = "POSIX extended regex matched against the window title.", .optional = true },
-    .{ .name = "space", .ty = "integer", .doc = "1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).", .optional = true },
-    .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.", .optional = true },
-    .{ .name = "follow", .ty = "boolean", .doc = "Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.", .optional = true },
-};
-
-const aliases = [_]Alias{
-    .{ .name = "agate.Direction", .values = &.{ "left", "right", "up", "down" }, .doc = "A focus/move/resize direction." },
-    .{ .name = "agate.MonitorDir", .values = &.{ "next", "prev", "left", "right", "up", "down" }, .doc = "A monitor selector: `next`/`prev` cycle displays in window-server order; `left`/`right`/`up`/`down` step to the physically adjacent display." },
-    .{ .name = "agate.Layout", .values = &.{ "h_tiles", "v_tiles", "h_stack", "v_stack", "accordion", "float", "toggle" }, .doc = "A layout mode. Synonyms: `h_split`/`horizontal` = `h_tiles`; `v_split`/`vertical` = `v_tiles`; `v_accordion`/`stacking`/`stacked` = `v_stack`/`accordion`; `floating` = `float`. `toggle` flips the split orientation." },
-};
-
-const dir_ty = "agate.Direction";
-const layout_ty = "agate.Layout";
-
-const funcs = [_]Func{
-    .{
-        .name = "config",
-        .params = &.{.{ .name = "config", .ty = "agate.Config", .doc = "Settings table (see agate.Config)." }},
-        .doc = "Apply global configuration. Call once near the top of init.lua.",
-    },
-    .{
-        .name = "bind",
-        .params = &.{
-            .{ .name = "spec", .ty = "string", .doc = "Key chord, e.g. `\"hyper+shift+l\"`." },
-            .{ .name = "action", .ty = "fun()|string", .doc = "A Lua callback, or a string command (see Commands below)." },
-        },
-        .doc = "Bind a key chord to an action.",
-    },
-    .{
-        .name = "gesture",
-        .params = &.{
-            .{ .name = "spec", .ty = "string", .doc = "Finger count (3 or 4) and direction, e.g. `\"3:left\"` or `\"4:up\"`." },
-            .{ .name = "action", .ty = "fun()|string", .doc = "A Lua callback, or a string command (see Commands below)." },
-        },
-        .doc = "Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.",
-    },
-    .{
-        .name = "cycle",
-        .params = &.{.{ .name = "dir", .ty = "\"next\"|\"prev\"", .doc = "Cycle direction." }},
-        .doc = "Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.",
-    },
-    .{
-        .name = "focus",
-        .params = &.{.{ .name = "dir", .ty = dir_ty, .doc = "Direction to move focus." }},
-        .doc = "Move focus to the nearest window in a direction, descending into and ascending out of nested containers (i3-style). Left/right traverse horizontal splits/stacks; up/down vertical ones.",
-    },
-    .{
-        .name = "layout",
-        .params = &.{.{ .name = "mode", .ty = layout_ty, .doc = "Layout mode to apply." }},
-        .doc = "Set the focused container's layout (the focused window's parent), falling back to the workspace for top-level windows.",
-    },
-    .{
-        .name = "resize",
-        .params = &.{
-            .{ .name = "dir", .ty = dir_ty, .doc = "Edge to grow toward." },
-            .{ .name = "amount", .ty = "number", .doc = "Pixels to resize by. Default 50.", .optional = true },
-        },
-        .doc = "Resize the focused tile, transferring the delta to its neighbour.",
-    },
-    .{
-        .name = "move",
-        .params = &.{.{ .name = "dir", .ty = dir_ty, .doc = "Direction to move the window." }},
-        .doc = "Swap the focused window with its neighbour in a direction. Works across nested containers.",
-    },
-    .{
-        .name = "join",
-        .params = &.{
-            .{ .name = "dir", .ty = dir_ty, .doc = "Neighbour to combine with." },
-            .{ .name = "mode", .ty = layout_ty, .doc = "Layout of the new container. Default `v_stack`.", .optional = true },
-        },
-        .doc = "Combine the focused window with its neighbour into a nested container, for mixed layouts (e.g. a row whose one slot is a stack of two windows).",
-    },
-    .{
-        .name = "space",
-        .params = &.{.{ .name = "n", .ty = "integer", .doc = "1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included)." }},
-        .doc = "Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).",
-    },
-    .{ .name = "space_next", .doc = "Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included)." },
-    .{ .name = "space_prev", .doc = "Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included)." },
-    .{
-        .name = "move_to_space",
-        .params = &.{
-            .{ .name = "n", .ty = "integer", .doc = "1-based Space position (Mission Control order, fullscreen included) to send the window to." },
-            .{ .name = "monitor", .ty = "integer", .doc = "1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.", .optional = true },
-        },
-        .doc = "Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.",
-    },
-    .{
-        .name = "focus_monitor",
-        .params = &.{.{ .name = "dir", .ty = "agate.MonitorDir", .doc = "Which display to focus." }},
-        .doc = "Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.",
-    },
-    .{
-        .name = "move_to_monitor",
-        .params = &.{.{ .name = "dir", .ty = "agate.MonitorDir", .doc = "Which display to move the window to." }},
-        .doc = "Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.",
-    },
-    .{
-        .name = "rule",
-        .params = &.{.{ .name = "rule", .ty = "agate.Rule", .doc = "Rule table (see agate.Rule)." }},
-        .doc = "Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, or both. When several rules match a window, the last registered one wins.",
-    },
-};
-
-// String commands accepted by `agate.bind(spec, "<command>")`.
+const Setting = struct { name: []const u8, ty: []const u8, default: []const u8, doc: []const u8 };
+const Param = struct { name: []const u8, ty: []const u8, optional: bool, doc: []const u8 };
+const Alias = struct { name: []const u8, doc: []const u8, values: [][]const u8 };
+const Func = struct { name: []const u8, doc: []const u8 };
+const FuncParam = struct { func: []const u8, name: []const u8, ty: []const u8, optional: bool, doc: []const u8 };
 const Command = struct { form: []const u8, doc: []const u8 };
-const commands = [_]Command{
-    .{ .form = "move <dir>", .doc = "Same as `agate.move(dir)`." },
-    .{ .form = "focus <dir>", .doc = "Same as `agate.focus(dir)`." },
-    .{ .form = "cycle <next|prev>", .doc = "Same as `agate.cycle(dir)`." },
-    .{ .form = "layout <mode>", .doc = "Same as `agate.layout(mode)`." },
-    .{ .form = "space <n>", .doc = "Same as `agate.space(n)`." },
-    .{ .form = "move_to_space <n>", .doc = "Same as `agate.move_to_space(n)`." },
-    .{ .form = "focus_monitor <dir>", .doc = "Same as `agate.focus_monitor(dir)`." },
-    .{ .form = "move_to_monitor <dir>", .doc = "Same as `agate.move_to_monitor(dir)`." },
+
+const ApiData = struct {
+    settings: []Setting,
+    small_screen: []Param,
+    rule_fields: []Param,
+    aliases: []Alias,
+    funcs: []Func,
+    func_params: []FuncParam,
+    commands: []Command,
 };
 
-// --- Output -----------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
 
-/// A growable output buffer carrying its allocator, so the emit helpers read as
-/// plain `b.w("...", .{})` calls.
-const Buf = struct {
-    list: std.ArrayList(u8) = .empty,
-    alloc: std.mem.Allocator,
-    fn w(b: *Buf, comptime fmt: []const u8, args: anytype) void {
-        const s = std.fmt.allocPrint(b.alloc, fmt, args) catch return;
-        b.list.appendSlice(b.alloc, s) catch {};
-    }
-};
+fn parse(alloc: std.mem.Allocator, src: []const u8) !ApiData {
+    var settings: std.ArrayList(Setting) = .empty;
+    var small_screen: std.ArrayList(Param) = .empty;
+    var rule_fields: std.ArrayList(Param) = .empty;
+    const AliasBuilder = struct { name: []const u8, doc: []const u8, values: std.ArrayList([]const u8) };
+    var alias_builders: std.ArrayList(AliasBuilder) = .empty;
+    var funcs: std.ArrayList(Func) = .empty;
+    var func_params: std.ArrayList(FuncParam) = .empty;
+    var commands: std.ArrayList(Command) = .empty;
 
-/// Render the markdown settings reference.
-pub fn markdown(alloc: std.mem.Allocator) []const u8 {
-    var b = Buf{ .alloc = alloc };
-    emitMarkdown(&b);
-    return b.list.items;
-}
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t");
+        const pfx = "// @doc ";
+        if (!std.mem.startsWith(u8, line, pfx)) continue;
+        const rest = line[pfx.len..];
 
-/// Render the LuaCATS type stub.
-pub fn lua(alloc: std.mem.Allocator) []const u8 {
-    var b = Buf{ .alloc = alloc };
-    emitLua(&b);
-    return b.list.items;
-}
+        if (std.mem.startsWith(u8, rest, "S|")) {
+            var it = std.mem.splitScalar(u8, rest[2..], '|');
+            const name = it.next() orelse continue;
+            const ty = it.next() orelse continue;
+            const def = it.next() orelse continue;
+            try settings.append(alloc, .{ .name = name, .ty = ty, .default = def, .doc = it.rest() });
 
-/// `(p1, p2, ...)` for a function signature. When `mark_optional` is set, an
-/// optional param shows a trailing `?` (doc convention) — but a real Lua
-/// `function` definition must use bare names, so the Lua emitter passes false.
-fn signature(alloc: std.mem.Allocator, f: Func, mark_optional: bool) []const u8 {
-    var sig: std.ArrayList(u8) = .empty;
-    sig.append(alloc, '(') catch {};
-    for (f.params, 0..) |p, i| {
-        if (i != 0) sig.appendSlice(alloc, ", ") catch {};
-        sig.appendSlice(alloc, p.name) catch {};
-        if (mark_optional and p.optional) sig.append(alloc, '?') catch {};
-    }
-    sig.append(alloc, ')') catch {};
-    return sig.items;
-}
+        } else if (std.mem.startsWith(u8, rest, "SS|")) {
+            var it = std.mem.splitScalar(u8, rest[3..], '|');
+            const name = it.next() orelse continue;
+            const ty = it.next() orelse continue;
+            const opt = it.next() orelse continue;
+            try small_screen.append(alloc, .{ .name = name, .ty = ty, .optional = eql(opt, "true"), .doc = it.rest() });
 
-fn emitMarkdown(b: *Buf) void {
-    b.w("# agate configuration\n\n", .{});
-    b.w("> Auto-generated by `zig build docs` from `tools/gen_docs.zig`. Do not edit by hand.\n\n", .{});
-    b.w("All configuration is Lua, loaded from `$WM_CONFIG`, `$XDG_CONFIG_HOME/agate/init.lua`, `~/.config/agate/init.lua`, or `./init.lua`.\n\n", .{});
+        } else if (std.mem.startsWith(u8, rest, "SR|")) {
+            var it = std.mem.splitScalar(u8, rest[3..], '|');
+            const name = it.next() orelse continue;
+            const ty = it.next() orelse continue;
+            const opt = it.next() orelse continue;
+            try rule_fields.append(alloc, .{ .name = name, .ty = ty, .optional = eql(opt, "true"), .doc = it.rest() });
 
-    b.w("## `agate.config{{}}` settings\n\n", .{});
-    b.w("| Key | Type | Default | Description |\n", .{});
-    b.w("| --- | --- | --- | --- |\n", .{});
-    for (settings) |s| {
-        b.w("| `{s}` | `{s}` | `{s}` | {s} |\n", .{ s.name, s.ty, s.default, s.doc });
-    }
-    b.w("\n", .{});
+        } else if (std.mem.startsWith(u8, rest, "AV|")) {
+            // Append value to the last alias (A lines must precede their AV lines).
+            var it = std.mem.splitScalar(u8, rest[3..], '|');
+            _ = it.next(); // alias name — unused, we just append to the last entry
+            const value = it.next() orelse continue;
+            if (alias_builders.items.len > 0)
+                try alias_builders.items[alias_builders.items.len - 1].values.append(alloc, value);
 
-    b.w("## `small_screen` fields (Small Screen Mode)\n\n", .{});
-    b.w("On a small main display (the built-in panel, or anything at or under `max_width` points), workspaces still on the default split layout switch to `layout` — a straight tiling split is not useful on a tiny screen. They switch back when a big display takes over (dock/undock re-evaluates). Workspaces whose layout was set by hand are left alone in both directions. Pair with `agate.gesture` for trackpad-driven window cycling.\n\n", .{});
-    b.w("| Key | Type | Description |\n", .{});
-    b.w("| --- | --- | --- |\n", .{});
-    for (small_screen_fields) |p| {
-        const opt = if (p.optional) " _(optional)_" else "";
-        b.w("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, opt });
-    }
-    b.w("\n", .{});
+        } else if (std.mem.startsWith(u8, rest, "A|")) {
+            var it = std.mem.splitScalar(u8, rest[2..], '|');
+            const name = it.next() orelse continue;
+            try alias_builders.append(alloc, .{ .name = name, .doc = it.rest(), .values = .empty });
 
-    b.w("## `agate.rule{{}}` fields\n\n", .{});
-    b.w("| Key | Type | Description |\n", .{});
-    b.w("| --- | --- | --- |\n", .{});
-    for (rule_fields) |p| {
-        const opt = if (p.optional) " _(optional)_" else "";
-        b.w("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, opt });
-    }
-    b.w("\n", .{});
+        } else if (std.mem.startsWith(u8, rest, "FP|")) {
+            // Parse from both ends so the type field (field 3) may safely contain '|'.
+            // Format: FP|func|param|...type...|optional|description
+            const s = rest[3..];
+            const func_end = std.mem.indexOfScalar(u8, s, '|') orelse continue;
+            const func_name = s[0..func_end];
+            const s2 = s[func_end + 1 ..];
+            const name_end = std.mem.indexOfScalar(u8, s2, '|') orelse continue;
+            const param_name = s2[0..name_end];
+            const s3 = s2[name_end + 1 ..]; // "type_possibly_with_pipes|optional|doc"
+            const doc_sep = std.mem.lastIndexOfScalar(u8, s3, '|') orelse continue;
+            const doc = s3[doc_sep + 1 ..];
+            const s4 = s3[0..doc_sep]; // "type_possibly_with_pipes|optional"
+            const opt_sep = std.mem.lastIndexOfScalar(u8, s4, '|') orelse continue;
+            const ty = s4[0..opt_sep];
+            const opt = s4[opt_sep + 1 ..];
+            try func_params.append(alloc, .{ .func = func_name, .name = param_name, .ty = ty, .optional = eql(opt, "true"), .doc = doc });
 
-    b.w("## API\n\n", .{});
-    for (funcs) |f| {
-        b.w("### `agate.{s}{s}`\n\n", .{ f.name, signature(b.alloc, f, true) });
-        b.w("{s}\n\n", .{f.doc});
-        if (f.params.len != 0) {
-            for (f.params) |p| {
-                const opt = if (p.optional) " _(optional)_" else "";
-                b.w("- `{s}` (`{s}`){s} — {s}\n", .{ p.name, p.ty, opt, p.doc });
-            }
-            b.w("\n", .{});
+        } else if (std.mem.startsWith(u8, rest, "F|")) {
+            var it = std.mem.splitScalar(u8, rest[2..], '|');
+            const name = it.next() orelse continue;
+            try funcs.append(alloc, .{ .name = name, .doc = it.rest() });
+
+        } else if (std.mem.startsWith(u8, rest, "C|")) {
+            // Split on the last '|' so the form may contain '|' (e.g. `cycle <next|prev>`).
+            const s = rest[2..];
+            const sep = std.mem.lastIndexOfScalar(u8, s, '|') orelse continue;
+            try commands.append(alloc, .{ .form = s[0..sep], .doc = s[sep + 1 ..] });
         }
     }
 
-    b.w("## Commands\n\n", .{});
-    b.w("Strings passed as the second argument of `agate.bind` instead of a function:\n\n", .{});
-    b.w("| Command | Description |\n| --- | --- |\n", .{});
-    for (commands) |cmd| b.w("| `{s}` | {s} |\n", .{ cmd.form, cmd.doc });
-    b.w("\n", .{});
+    const aliases = try alloc.alloc(Alias, alias_builders.items.len);
+    for (alias_builders.items, aliases) |*ab, *a|
+        a.* = .{ .name = ab.name, .doc = ab.doc, .values = try ab.values.toOwnedSlice(alloc) };
 
-    b.w("## Enumerations\n\n", .{});
-    for (aliases) |a| {
-        b.w("### `{s}`\n\n{s}\n\n", .{ a.name, a.doc });
-        for (a.values) |v| b.w("- `\"{s}\"`\n", .{v});
-        b.w("\n", .{});
-    }
-
-    b.w("## Example\n\n```lua\nagate.config({{ gaps = 8, accordion_padding = 40, hyper = {{ \"ctrl\", \"alt\", \"cmd\" }} }})\nagate.bind(\"hyper+l\", function() agate.focus(\"right\") end)\nagate.bind(\"hyper+shift+l\", \"move right\")\nagate.bind(\"hyper+s\", function() agate.layout(\"accordion\") end)\nagate.bind(\"hyper+g\", function() agate.join(\"right\") end)\nagate.rule({{ app = \"^Music$\", space = 5 }})\nagate.rule({{ app = \"^Firefox$\", title = \"Library\", space = 2, follow = false }})\n```\n", .{});
+    return .{
+        .settings = try settings.toOwnedSlice(alloc),
+        .small_screen = try small_screen.toOwnedSlice(alloc),
+        .rule_fields = try rule_fields.toOwnedSlice(alloc),
+        .aliases = aliases,
+        .funcs = try funcs.toOwnedSlice(alloc),
+        .func_params = try func_params.toOwnedSlice(alloc),
+        .commands = try commands.toOwnedSlice(alloc),
+    };
 }
 
-fn emitLua(b: *Buf) void {
-    b.w("---@meta\n", .{});
-    b.w("-- Auto-generated by `zig build docs` from `tools/gen_docs.zig`. Do not edit by hand.\n", .{});
-    b.w("-- LuaCATS type definitions for the global `agate` object (lua-language-server).\n\n", .{});
+fn eql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
 
-    for (aliases) |a| {
-        b.w("---@alias {s}\n", .{a.name});
-        for (a.values) |v| b.w("---| '\"{s}\"'\n", .{v});
-        b.w("\n", .{});
+// ---------------------------------------------------------------------------
+// Rendering helpers
+// ---------------------------------------------------------------------------
+
+fn writeSignature(w: anytype, func_name: []const u8, params: []FuncParam, mark_optional: bool) !void {
+    try w.writeByte('(');
+    var first = true;
+    for (params) |p| {
+        if (!eql(p.func, func_name)) continue;
+        if (!first) try w.writeAll(", ");
+        try w.writeAll(p.name);
+        if (mark_optional and p.optional) try w.writeByte('?');
+        first = false;
     }
+    try w.writeByte(')');
+}
 
-    b.w("---@class agate.Config\n", .{});
-    for (settings) |s| {
-        b.w("---@field {s}? {s} {s} (default `{s}`)\n", .{ s.name, s.ty, s.doc, s.default });
-    }
-    b.w("\n", .{});
+// ---------------------------------------------------------------------------
+// Markdown renderer
+// ---------------------------------------------------------------------------
 
-    b.w("---@class agate.SmallScreen\n", .{});
-    for (small_screen_fields) |p| {
-        const opt = if (p.optional) "?" else "";
-        b.w("---@field {s}{s} {s} {s}\n", .{ p.name, opt, p.ty, p.doc });
-    }
-    b.w("\n", .{});
+fn renderMarkdown(w: anytype, d: ApiData) !void {
+    try w.writeAll("# agate configuration\n\n");
+    try w.writeAll("> Auto-generated by `zig build docs` from annotations in `src/config/lua.zig`. Do not edit by hand.\n\n");
+    try w.writeAll("All configuration is Lua, loaded from `$WM_CONFIG`, `$XDG_CONFIG_HOME/agate/init.lua`, `~/.config/agate/init.lua`, or `./init.lua`.\n\n");
 
-    b.w("---@class agate.Rule\n", .{});
-    for (rule_fields) |p| {
-        const opt = if (p.optional) "?" else "";
-        b.w("---@field {s}{s} {s} {s}\n", .{ p.name, opt, p.ty, p.doc });
-    }
-    b.w("\n", .{});
+    try w.writeAll("## `agate.config{}` settings\n\n");
+    try w.writeAll("| Key | Type | Default | Description |\n| --- | --- | --- | --- |\n");
+    for (d.settings) |s|
+        try w.print("| `{s}` | `{s}` | `{s}` | {s} |\n", .{ s.name, s.ty, s.default, s.doc });
+    try w.writeByte('\n');
 
-    b.w("---@class Agate\n", .{});
-    b.w("agate = {{}}\n\n", .{});
+    try w.writeAll("## `small_screen` fields (Small Screen Mode)\n\n");
+    try w.writeAll("On a small main display (the built-in panel, or anything at or under `max_width` points), workspaces still on the default split layout switch to `layout` — a straight tiling split is not useful on a tiny screen. They switch back when a big display takes over (dock/undock re-evaluates). Workspaces whose layout was set by hand are left alone in both directions. Pair with `agate.gesture` for trackpad-driven window cycling.\n\n");
+    try w.writeAll("| Key | Type | Description |\n| --- | --- | --- |\n");
+    for (d.small_screen) |p|
+        try w.print("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, if (p.optional) " _(optional)_" else "" });
+    try w.writeByte('\n');
 
-    for (funcs) |f| {
-        b.w("---{s}\n", .{f.doc});
-        for (f.params) |p| {
-            const opt = if (p.optional) "?" else "";
-            b.w("---@param {s}{s} {s} {s}\n", .{ p.name, opt, p.ty, p.doc });
+    try w.writeAll("## `agate.rule{}` fields\n\n");
+    try w.writeAll("| Key | Type | Description |\n| --- | --- | --- |\n");
+    for (d.rule_fields) |p|
+        try w.print("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, if (p.optional) " _(optional)_" else "" });
+    try w.writeByte('\n');
+
+    try w.writeAll("## API\n\n");
+    for (d.funcs) |f| {
+        try w.print("### `agate.{s}", .{f.name});
+        try writeSignature(w, f.name, d.func_params, true);
+        try w.writeAll("`\n\n");
+        try w.print("{s}\n\n", .{f.doc});
+        var has_params = false;
+        for (d.func_params) |p| {
+            if (!eql(p.func, f.name)) continue;
+            try w.print("- `{s}` (`{s}`){s} — {s}\n", .{ p.name, p.ty, if (p.optional) " _(optional)_" else "", p.doc });
+            has_params = true;
         }
-        if (f.ret) |r| b.w("---@return {s}\n", .{r});
-        b.w("function agate.{s}{s} end\n\n", .{ f.name, signature(b.alloc, f, false) });
+        if (has_params) try w.writeByte('\n');
     }
 
-    b.w("return agate\n", .{});
+    try w.writeAll("## Commands\n\n");
+    try w.writeAll("Strings passed as the second argument of `agate.bind` instead of a function:\n\n");
+    try w.writeAll("| Command | Description |\n| --- | --- |\n");
+    for (d.commands) |c|
+        try w.print("| `{s}` | {s} |\n", .{ c.form, c.doc });
+    try w.writeByte('\n');
+
+    try w.writeAll("## Enumerations\n\n");
+    for (d.aliases) |a| {
+        try w.print("### `{s}`\n\n{s}\n\n", .{ a.name, a.doc });
+        for (a.values) |v| try w.print("- `\"{s}\"`\n", .{v});
+        try w.writeByte('\n');
+    }
+
+    try w.writeAll(
+        \\## Example
+        \\
+        \\```lua
+        \\agate.config({ gaps = 8, accordion_padding = 40, hyper = { "ctrl", "alt", "cmd" } })
+        \\agate.bind("hyper+l", function() agate.focus("right") end)
+        \\agate.bind("hyper+shift+l", "move right")
+        \\agate.bind("hyper+s", function() agate.layout("accordion") end)
+        \\agate.bind("hyper+g", function() agate.join("right") end)
+        \\agate.rule({ app = "^Music$", space = 5 })
+        \\agate.rule({ app = "^Firefox$", title = "Library", space = 2, follow = false })
+        \\```
+        \\
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LuaCATS renderer
+// ---------------------------------------------------------------------------
+
+fn renderLua(w: anytype, d: ApiData) !void {
+    try w.writeAll("---@meta\n");
+    try w.writeAll("-- Auto-generated by `zig build docs`. Do not edit by hand.\n");
+    try w.writeAll("-- LuaCATS type definitions for the global `agate` object (lua-language-server).\n\n");
+
+    for (d.aliases) |a| {
+        try w.print("---@alias {s}\n", .{a.name});
+        for (a.values) |v| try w.print("---| '\"{s}\"'\n", .{v});
+        try w.writeByte('\n');
+    }
+
+    try w.writeAll("---@class agate.Config\n");
+    for (d.settings) |s|
+        try w.print("---@field {s}? {s} {s} (default `{s}`)\n", .{ s.name, s.ty, s.doc, s.default });
+    try w.writeByte('\n');
+
+    try w.writeAll("---@class agate.SmallScreen\n");
+    for (d.small_screen) |p|
+        try w.print("---@field {s}{s} {s} {s}\n", .{ p.name, if (p.optional) "?" else "", p.ty, p.doc });
+    try w.writeByte('\n');
+
+    try w.writeAll("---@class agate.Rule\n");
+    for (d.rule_fields) |p|
+        try w.print("---@field {s}{s} {s} {s}\n", .{ p.name, if (p.optional) "?" else "", p.ty, p.doc });
+    try w.writeByte('\n');
+
+    try w.writeAll("---@class Agate\nagate = {}\n\n");
+
+    for (d.funcs) |f| {
+        try w.print("---{s}\n", .{f.doc});
+        for (d.func_params) |p| {
+            if (!eql(p.func, f.name)) continue;
+            try w.print("---@param {s}{s} {s} {s}\n", .{ p.name, if (p.optional) "?" else "", p.ty, p.doc });
+        }
+        try w.print("function agate.{s}", .{f.name});
+        try writeSignature(w, f.name, d.func_params, false);
+        try w.writeAll(" end\n\n");
+    }
+
+    try w.writeAll("return agate\n");
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+pub fn main(init: std.process.Init) !void {
+    const usage = "usage: gen_docs <lua.zig> <out.md> <out.lua>\n";
+    var argv = std.process.Args.iterate(init.minimal.args);
+    _ = argv.next(); // exe path
+    const lua_path = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
+    const md_path  = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
+    const lua_path2 = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
+
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+    const src = try cwd.readFileAlloc(init.io, lua_path, alloc, .unlimited);
+    const data = try parse(alloc, src);
+
+    var md = std.Io.Writer.Allocating.init(alloc);
+    try renderMarkdown(&md.writer, data);
+    try cwd.writeFile(init.io, .{ .sub_path = md_path, .data = md.written() });
+
+    var lua_out = std.Io.Writer.Allocating.init(alloc);
+    try renderLua(&lua_out.writer, data);
+    try cwd.writeFile(init.io, .{ .sub_path = lua_path2, .data = lua_out.written() });
 }

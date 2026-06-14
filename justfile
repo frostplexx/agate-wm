@@ -29,3 +29,24 @@ debug *args: build
 # Remove build artifacts
 clean:
     rm -rf {{build_dir}}
+
+# Generate settings docs and Lua type defs
+docs:
+    zig build docs
+
+# Generate docs and push to the GitHub wiki
+publish-docs: docs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    wiki_dir=$(mktemp -d)
+    trap 'rm -rf "$wiki_dir"' EXIT
+    git clone https://github.com/frostplexx/agate-wm.wiki.git "$wiki_dir"
+    cp docs/configuration.md "$wiki_dir/Configuration.md"
+    cd "$wiki_dir"
+    git add Configuration.md
+    if git diff --cached --quiet; then
+        echo "Wiki already up to date."
+    else
+        git commit -m "Update configuration reference"
+        git push
+    fi

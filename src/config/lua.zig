@@ -48,42 +48,53 @@ pub const GestureBinding = struct {
 /// neither matcher is rejected at registration.
 pub const Rule = struct {
     /// Matches the owning application's name (POSIX extended regex).
+    // @doc SR|app|string|true|POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.
     app: ?regexp.Regex = null,
     /// Matches the window title (POSIX extended regex).
+    // @doc SR|title|string|true|POSIX extended regex matched against the window title.
     title: ?regexp.Regex = null,
     /// 1-based user-space index to send matched windows to (0 = unset/invalid).
+    // @doc SR|space|integer|true|1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
     space: usize = 0,
     /// 1-based monitor (display order) the `space` index counts on. 0 = the
     /// focused display (the original behaviour). Set it to pin an app to a
     /// specific display; combined with `space` to pick which Space on it
     /// (defaults to the monitor's first user Space when only `monitor` is given).
+    // @doc SR|monitor|integer|true|1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.
     monitor: usize = 0,
     /// Switch to the Space the window was sent to (the default: opening an
     /// assigned app takes the user along). `follow = false` routes the window
     /// in the background instead.
+    // @doc SR|follow|boolean|true|Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
     follow: bool = true,
 };
 
 pub const Config = struct {
     alloc: std.mem.Allocator,
+    // @doc S|gaps|number|8|Pixels between adjacent tiles.
     gaps: f64,
+    // @doc S|outer_gaps|number|8|Pixels inset from the screen edge.
     outer_gaps: f64,
     /// Accordion/stack peek inset (px): how far each stacked window is fanned
     /// past the one in front. See `data.gaps.accordion`.
+    // @doc S|accordion_padding|number|40|Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`.
     accordion_padding: f64,
     /// CGEventFlag mask for the "hyper" macro key.
+    // @doc S|hyper|string[]|{"ctrl","alt","cmd","shift"}|Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`.
     hyper_mods: u64,
     /// Virtual keycode of a physical key whose held state means "hyper". Needed
     /// when a remapper (lazykeys, Karabiner) turns e.g. Caps Lock into F18 and
     /// applies the real modifiers downstream of our event tap, where we can't see
     /// them: we instead watch this key go down/up and synthesize `hyper_mods`.
     /// Default 79 = kVK_F18. 0 disables the feature.
+    // @doc S|hyper_key|string|"f18"|Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables.
     hyper_key: u16,
     /// Small Screen Mode: on a small main display (the built-in panel, or any
     /// display at or under `small_screen_max_width` points), workspaces still
     /// on the default split layout are switched to `small_screen_layout`
     /// (an accordion/stack suits a screen too tiny to split), and back when a
     /// big display takes over. See `applySmallScreenMode`.
+    // @doc S|small_screen|agate.SmallScreen|{ enabled = true, layout = "h_accordion", max_width = 0 }|Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over.
     small_screen_enabled: bool,
     /// Width threshold (points) for "small" — 0 means "built-in display only".
     small_screen_max_width: f64,
@@ -94,10 +105,13 @@ pub const Config = struct {
     small_screen_tabs: bool,
     /// Animate AX-driven frame changes (AppKit's window slide) instead of
     /// snapping. Mirrored into `wm_layout.animate` on config load.
+    // @doc S|animations|boolean|false|Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`.
     animations: bool,
     /// Show the active space number as a menu-bar status item.
+    // @doc S|space_indicator|boolean|true|Show the active space's number as a menu-bar status item.
     space_indicator: bool,
     /// Show the translucent target-slot overlay while dragging a window.
+    // @doc S|drag_preview|boolean|true|While dragging a window, highlight the tile it will swap into on drop with a translucent overlay.
     drag_preview: bool,
     bindings: std.ArrayList(Binding),
     gesture_bindings: std.ArrayList(GestureBinding),
@@ -203,6 +217,8 @@ fn boolField(lua: *Lua, idx: i32, name: [:0]const u8, dst: *bool) void {
     if (lua.isBoolean(-1)) dst.* = lua.toBoolean(-1);
 }
 
+// @doc F|config|Apply global configuration. Call once near the top of init.lua.
+// @doc FP|config|config|agate.Config|false|Settings table (see agate.Config).
 fn agateConfig(lua: *Lua) i32 {
     const cfg = g_config orelse return 0;
     if (!lua.isTable(1)) return 0;
@@ -242,6 +258,9 @@ fn agateConfig(lua: *Lua) i32 {
     // small_screen: { enabled = bool, max_width = number, layout = string }.
     // `layout` accepts every layoutFromName name plus "tabs"/"tabbed" (a
     // zero-peek stack: full-area windows flipped through like tabs).
+    // @doc SS|enabled|boolean|true|Master switch (default `true`).
+    // @doc SS|layout|string|true|Layout small workspaces get: any layout name (default `"h_accordion"`), or `"tabs"` for a zero-peek stack — full-area windows flipped through like tabs.
+    // @doc SS|max_width|number|true|Width (points) at or under which a display counts as small, in addition to the built-in panel. `0` (default) = built-in display detection only.
     _ = lua.getField(1, "small_screen");
     if (lua.isTable(-1)) {
         _ = lua.getField(-1, "enabled");
@@ -270,6 +289,7 @@ fn agateConfig(lua: *Lua) i32 {
     boolField(lua, 1, "animations", &cfg.animations);
     wm_layout.animate = cfg.animations;
     // animation_duration: milliseconds per frame animation — the speed knob.
+    // @doc S|animation_duration|number|150|Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`.
     var anim_dur: f64 = wm_animate.duration_ms;
     if (numberField(lua, "animation_duration", &anim_dur)) {
         // The knob used to be seconds; a sub-5 value can only be the old unit
@@ -285,6 +305,7 @@ fn agateConfig(lua: *Lua) i32 {
     boolField(lua, 1, "drag_preview", &cfg.drag_preview);
     // space_animation: how much of the Space-switch transition plays.
     // TODO: Remove this option
+    // @doc S|space_animation|string|"instant"|How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation).
     _ = lua.getField(1, "space_animation");
     if (lua.isString(-1)) {
         const s = std.mem.sliceTo(lua.toString(-1) catch "", 0);
@@ -318,6 +339,9 @@ fn applyGapsToTree(con: *data.Con, gaps: f64, outer_gaps: f64, accordion: f64) v
     for (con.children.items) |child| applyGapsToTree(child, gaps, outer_gaps, accordion);
 }
 
+// @doc F|bind|Bind a key chord to an action.
+// @doc FP|bind|spec|string|false|Key chord, e.g. `"hyper+shift+l"`.
+// @doc FP|bind|action|fun()|string|false|A Lua callback, or a string command (see Commands below).
 fn agateBind(lua: *Lua) i32 {
     const cfg = g_config orelse return 0;
     const spec_z = lua.toString(1) catch return 0;
@@ -379,6 +403,9 @@ fn parseGestureSpec(spec: []const u8) ?struct { fingers: u8, dir: gestures.Swipe
 /// `"3:left"`) to a Lua function or string command, like `agate.bind` does for
 /// key chords. One step fires per threshold of swipe travel, so holding a long
 /// swipe repeats the action (Hyprland-style continuous cycling).
+// @doc F|gesture|Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
+// @doc FP|gesture|spec|string|false|Finger count (3 or 4) and direction, e.g. `"3:left"` or `"4:up"`.
+// @doc FP|gesture|action|fun()|string|false|A Lua callback, or a string command (see Commands below).
 fn agateGesture(lua: *Lua) i32 {
     const cfg = g_config orelse return 0;
     const spec_z = lua.toString(1) catch return 0;
@@ -414,6 +441,8 @@ fn agateGesture(lua: *Lua) i32 {
 /// `agate.cycle("next"|"prev")` — focus the next/previous window among the
 /// focused window's siblings, wrapping at the edges. The accordion motion:
 /// on a small screen every window is one cycle step away.
+// @doc F|cycle|Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.
+// @doc FP|cycle|dir|"next"|"prev"|false|Cycle direction.
 fn agateCycle(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -424,6 +453,8 @@ fn agateCycle(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|focus|Move focus to the nearest window in a direction, descending into and ascending out of nested containers (i3-style). Left/right traverse horizontal splits/stacks; up/down vertical ones.
+// @doc FP|focus|dir|agate.Direction|false|Direction to move focus.
 fn agateFocus(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -432,6 +463,8 @@ fn agateFocus(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|layout|Set the focused container's layout (the focused window's parent), falling back to the workspace for top-level windows.
+// @doc FP|layout|mode|agate.Layout|false|Layout mode to apply.
 fn agateLayout(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const name_z = lua.toString(1) catch return 0;
@@ -441,6 +474,14 @@ fn agateLayout(lua: *Lua) i32 {
 
 /// Map a layout name to a tiling mode. Accepts AeroSpace-ish synonyms.
 /// "toggle" is handled by `setActiveLayout` (it needs the current layout).
+// @doc A|agate.Layout|A layout mode. Synonyms: `h_split`/`horizontal` = `h_tiles`; `v_split`/`vertical` = `v_tiles`; `v_accordion`/`stacking`/`stacked` = `v_stack`/`accordion`; `floating` = `float`. `toggle` flips the split orientation.
+// @doc AV|agate.Layout|h_tiles
+// @doc AV|agate.Layout|v_tiles
+// @doc AV|agate.Layout|h_stack
+// @doc AV|agate.Layout|v_stack
+// @doc AV|agate.Layout|accordion
+// @doc AV|agate.Layout|float
+// @doc AV|agate.Layout|toggle
 fn layoutFromName(name: []const u8) ?data.Layout {
     const eql = std.mem.eql;
     if (eql(u8, name, "h_tiles") or eql(u8, name, "h_split") or eql(u8, name, "horizontal")) return .H_SPLIT;
@@ -478,6 +519,9 @@ fn setActiveLayout(app: *state.AppState, name: []const u8) void {
 /// giving the workspace a mixed layout. `agate.join(dir [, layout])`: `dir` is
 /// the neighbour to absorb ("left"/"right"/"up"/"down"); `layout` is the new
 /// container's mode (default "v_stack" — a vertical stack).
+// @doc F|join|Combine the focused window with its neighbour into a nested container, for mixed layouts (e.g. a row whose one slot is a stack of two windows).
+// @doc FP|join|dir|agate.Direction|false|Neighbour to combine with.
+// @doc FP|join|mode|agate.Layout|true|Layout of the new container. Default `v_stack`.
 fn agateJoin(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -496,6 +540,8 @@ fn agateJoin(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|space|Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
+// @doc FP|space|n|integer|false|1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 fn agateSpace(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const n = lua.toInteger(1) catch return 0;
@@ -504,6 +550,7 @@ fn agateSpace(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|space_next|Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 fn agateSpaceNext(lua: *Lua) i32 {
     _ = lua;
     const app = g_appstate orelse return 0;
@@ -511,6 +558,7 @@ fn agateSpaceNext(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|space_prev|Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 fn agateSpacePrev(lua: *Lua) i32 {
     _ = lua;
     const app = g_appstate orelse return 0;
@@ -518,6 +566,9 @@ fn agateSpacePrev(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|resize|Resize the focused tile, transferring the delta to its neighbour.
+// @doc FP|resize|dir|agate.Direction|false|Edge to grow toward.
+// @doc FP|resize|amount|number|true|Pixels to resize by. Default 50.
 fn agateResize(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -529,6 +580,8 @@ fn agateResize(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|move|Swap the focused window with its neighbour in a direction. Works across nested containers.
+// @doc FP|move|dir|agate.Direction|false|Direction to move the window.
 fn agateMove(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -543,6 +596,9 @@ fn agateMove(lua: *Lua) i32 {
 /// `n`. With a second argument it targets space `n` on monitor `monitor`
 /// (1-based, in display order) — so a window can be assigned to a Space on
 /// another display; without it, the focused display.
+// @doc F|move_to_space|Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
+// @doc FP|move_to_space|n|integer|false|1-based Space position (Mission Control order, fullscreen included) to send the window to.
+// @doc FP|move_to_space|monitor|integer|true|1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
 fn agateMoveToSpace(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const n = lua.toInteger(1) catch return 0;
@@ -602,6 +658,8 @@ fn moveFocusedToSpaceId(app: *state.AppState, target_sid: u64) void {
 
 /// `agate.focus_monitor(dir)`: move keyboard focus to another display
 /// (`next`/`prev`, or `left`/`right`/`up`/`down`).
+// @doc F|focus_monitor|Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.
+// @doc FP|focus_monitor|dir|agate.MonitorDir|false|Which display to focus.
 fn agateFocusMonitor(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -612,6 +670,8 @@ fn agateFocusMonitor(lua: *Lua) i32 {
 
 /// `agate.move_to_monitor(dir)`: move the focused window to the visible Space
 /// of an adjacent display and tile it there, following it over.
+// @doc F|move_to_monitor|Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.
+// @doc FP|move_to_monitor|dir|agate.MonitorDir|false|Which display to move the window to.
 fn agateMoveToMonitor(lua: *Lua) i32 {
     const app = g_appstate orelse return 0;
     const dir_z = lua.toString(1) catch return 0;
@@ -698,6 +758,8 @@ pub fn runPendingMove(app: *state.AppState) void {
 /// Register a window assignment rule (yabai's `yabai -m rule --add app=...
 /// space=N`). `app`/`title` are POSIX extended regexes; at least one must be
 /// given. Matched windows are sent to user space N when they appear.
+// @doc F|rule|Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, or both. When several rules match a window, the last registered one wins.
+// @doc FP|rule|rule|agate.Rule|false|Rule table (see agate.Rule).
 fn agateRule(lua: *Lua) i32 {
     const cfg = g_config orelse return 0;
     if (!lua.isTable(1)) return 0;
@@ -836,6 +898,11 @@ pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8
         }
     }
 }
+
+// How `// @doc` annotations work: tools/gen_docs.zig scans this file for lines
+// beginning `// @doc ` and renders docs/configuration.md + types/agate.lua from
+// them (run `zig build docs`). Each annotation lives directly above the code it
+// documents. Field separator is '|'; the FP/C type/form fields may contain '|'.
 
 const agate_fns = [_]zlua.FnReg{
     .{ .name = "config",      .func = zlua.wrap(agateConfig) },
@@ -1083,6 +1150,11 @@ pub fn handleKey(keycode: u16, raw_flags: u64) bool {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// @doc A|agate.Direction|A focus/move/resize direction.
+// @doc AV|agate.Direction|left
+// @doc AV|agate.Direction|right
+// @doc AV|agate.Direction|up
+// @doc AV|agate.Direction|down
 fn parseDir(s: []const u8) ?focus.Direction {
     if (std.mem.eql(u8, s, "left"))  return .left;
     if (std.mem.eql(u8, s, "right")) return .right;
@@ -1091,6 +1163,13 @@ fn parseDir(s: []const u8) ?focus.Direction {
     return null;
 }
 
+// @doc A|agate.MonitorDir|A monitor selector: `next`/`prev` cycle displays in window-server order; `left`/`right`/`up`/`down` step to the physically adjacent display.
+// @doc AV|agate.MonitorDir|next
+// @doc AV|agate.MonitorDir|prev
+// @doc AV|agate.MonitorDir|left
+// @doc AV|agate.MonitorDir|right
+// @doc AV|agate.MonitorDir|up
+// @doc AV|agate.MonitorDir|down
 fn parseMonitorDir(s: []const u8) ?focus.MonitorDir {
     if (std.mem.eql(u8, s, "next")) return .next;
     if (std.mem.eql(u8, s, "prev") or std.mem.eql(u8, s, "previous")) return .prev;
@@ -1101,6 +1180,15 @@ fn parseMonitorDir(s: []const u8) ?focus.MonitorDir {
     return null;
 }
 
+// String commands accepted as the second argument of `agate.bind`.
+// @doc C|move <dir>|Same as `agate.move(dir)`.
+// @doc C|focus <dir>|Same as `agate.focus(dir)`.
+// @doc C|cycle <next|prev>|Same as `agate.cycle(dir)`.
+// @doc C|layout <mode>|Same as `agate.layout(mode)`.
+// @doc C|space <n>|Same as `agate.space(n)`.
+// @doc C|move_to_space <n>|Same as `agate.move_to_space(n)`.
+// @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
+// @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
 fn executeCommand(cmd: []const u8) void {
     const app = g_appstate orelse return;
     if (std.mem.startsWith(u8, cmd, "move ")) {
