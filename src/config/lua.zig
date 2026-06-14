@@ -401,9 +401,10 @@ fn parseGestureSpec(spec: []const u8) ?struct { fingers: u8, dir: gestures.Swipe
 
 /// `agate.gesture(spec, action)` — bind an N-finger trackpad swipe (e.g.
 /// `"3:left"`) to a Lua function or string command, like `agate.bind` does for
-/// key chords. One step fires per threshold of swipe travel, so holding a long
-/// swipe repeats the action (Hyprland-style continuous cycling).
-// @doc F|gesture|Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
+/// key chords. The swipe tracks continuously with a Liquid Glass HUD and the
+/// action commits once on lift — either by dragging far enough or by flicking
+/// fast, like native macOS space switching.
+// @doc F|gesture|Bind a trackpad swipe to an action. The swipe tracks live with a Liquid Glass HUD and fires once when you lift — drag far enough or flick fast, like native macOS. The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
 // @doc FP|gesture|spec|string|false|Finger count (3 or 4) and direction, e.g. `"3:left"` or `"4:up"`.
 // @doc FP|gesture|action|fun()|string|false|A Lua callback, or a string command (see Commands below).
 fn agateGesture(lua: *Lua) i32 {
@@ -415,6 +416,10 @@ fn agateGesture(lua: *Lua) i32 {
         std.debug.print("[config] bad gesture spec: {s} (want e.g. \"3:left\")\n", .{spec});
         return 0;
     };
+
+    // Arm the scroll-blocking tap: now that a gesture is bound, an in-progress
+    // swipe should swallow the scroll the app below would otherwise receive.
+    gestures.g_enabled.store(true, .release);
 
     if (lua.isFunction(2)) {
         lua.pushValue(2);
@@ -1042,10 +1047,91 @@ fn applySmallLayoutToTree(con: *data.Con, small: bool, layout: data.Layout, smal
     return changed;
 }
 
-/// Dispatch a recognized trackpad swipe against the registered gesture
-/// bindings (`agate.gesture`). Runs on the main run loop (see
-/// `wm/gestures.zig` for the marshalling) — safe to call Lua and the tree.
-/// Returns true if a binding matched.
+/// State for the in-progress swipe's Liquid Glass arrow (the browser-style
+/// back/forward affordance). The arrow only appears once the swipe has travelled
+/// far enough to commit, and only for a direction the user actually bound.
+var g_gesture_fingers: u8 = 0;
+var g_gesture_axis: gestures.Axis = .horizontal;
+var g_arrow_dir: ?gestures.Swipe = null;
+
+/// Progress (normalized so ±1 == "far enough to commit") at which the arrow
+/// appears, and the lower point at which it retracts — a little hysteresis so it
+/// can't flicker when you hover right on the line.
+const arrow_reveal: f32 = 1.0;
+const arrow_conceal: f32 = 0.85;
+
+/// True if a binding matches `fingers` + `dir` exactly.
+fn gestureDirBound(cfg: *Config, fingers: u8, dir: gestures.Swipe) bool {
+    for (cfg.gesture_bindings.items) |b| {
+        if (b.fingers == fingers and b.dir == dir) return true;
+    }
+    return false;
+}
+
+/// The swipe direction for an axis + sign (progress is +right/+up).
+fn dirOf(axis: gestures.Axis, positive: bool) gestures.Swipe {
+    return switch (axis) {
+        .horizontal => if (positive) .right else .left,
+        .vertical => if (positive) .up else .down,
+    };
+}
+
+/// Map a recognizer direction to the HUD's arrow direction. The arrow points
+/// *against* the swipe and hugs the opposite edge — swipe right, a back-chevron
+/// appears on the left, like Safari/Chrome's two-finger back/forward affordance.
+fn hudDir(d: gestures.Swipe) macos.glass_hud.Dir {
+    return switch (d) {
+        .left => .right,
+        .right => .left,
+        .up => .down,
+        .down => .up,
+    };
+}
+
+/// Gesture lifecycle (main run loop; see `wm/gestures.zig`). A swipe begins once
+/// it clears the deadzone; we just remember its axis and finger count. On
+/// `update` we show or hide the edge arrow as the swipe crosses the commit
+/// threshold, and on `end` we tear the arrow down and — if the swipe committed —
+/// fire the bound action exactly once.
+pub fn gestureBegin(fingers: u8, axis: gestures.Axis) void {
+    g_gesture_fingers = fingers;
+    g_gesture_axis = axis;
+    g_arrow_dir = null;
+}
+
+pub fn gestureUpdate(progress: f32) void {
+    const cfg = g_config orelse return;
+    const mag = @abs(progress);
+    const positive = progress >= 0;
+
+    if (g_arrow_dir) |cur| {
+        // Retract if we've fallen back under the threshold or reversed past
+        // center — then fall through so a reversal can re-show the other way.
+        const cur_positive = cur == .right or cur == .up;
+        if (mag < arrow_conceal or positive != cur_positive) {
+            macos.glass_hud.hide();
+            g_arrow_dir = null;
+        } else return;
+    }
+    if (mag >= arrow_reveal) {
+        const dir = dirOf(g_gesture_axis, positive);
+        if (gestureDirBound(cfg, g_gesture_fingers, dir)) {
+            macos.glass_hud.show(hudDir(dir));
+            g_arrow_dir = dir;
+        }
+    }
+}
+
+pub fn gestureEnd(fingers: u8, dir: ?gestures.Swipe) void {
+    if (g_arrow_dir != null) macos.glass_hud.hide();
+    g_arrow_dir = null;
+    if (dir) |d| _ = handleGesture(fingers, d);
+}
+
+/// Dispatch a committed trackpad swipe against the registered gesture bindings
+/// (`agate.gesture`). Runs on the main run loop (see `wm/gestures.zig` for the
+/// marshalling) — safe to call Lua and the tree. Returns true if a binding
+/// matched.
 pub fn handleGesture(fingers: u8, dir: gestures.Swipe) bool {
     const cfg = g_config orelse return false;
     for (cfg.gesture_bindings.items) |b| {

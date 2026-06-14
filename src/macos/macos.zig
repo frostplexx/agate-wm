@@ -41,6 +41,8 @@ pub const multitouch = @import("multitouch.zig");
 pub const statusbar = @import("statusbar.zig");
 /// Drag-preview overlay window (borderless translucent NSWindow).
 pub const overlay = @import("overlay.zig");
+/// Liquid Glass swipe HUD (NSGlassEffectView capsule, shown during gestures).
+pub const glass_hud = @import("glass_hud.zig");
 
 // Common conveniences re-exported at the top level.
 pub const String = foundation.String;

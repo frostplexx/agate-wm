@@ -114,6 +114,10 @@ const Manager = struct {
     /// callback must re-enable *itself* — re-enabling the mouse tap here (the old
     /// bug) left keybindings permanently dead after the first slow action.
     ktap: macos.event_tap.MachPortRef = null,
+    /// The scroll-wheel event-tap handle (kept to re-enable it if disabled). An
+    /// intercepting tap that swallows scroll while a trackpad gesture is live, so
+    /// the window under the swipe doesn't also scroll (see `scrollTap`).
+    stap: macos.event_tap.MachPortRef = null,
     /// Whether the mouse actually moved since mouse-down (a drag, not a click).
     dragging: bool = false,
     /// Window id of the leaf identified as being dragged (0 = none yet). Found
@@ -261,6 +265,30 @@ pub fn run(appState: *state.AppState) !void {
     // thread; dispatch lands back on this run loop. Missing framework or no
     // trackpad just leaves gestures off.
     _ = gestures.start();
+
+    // Swallow scroll while a bound trackpad gesture is in progress. MultitouchSupport
+    // only *observes* the touches, so without this the window under a 3-/4-finger
+    // swipe keeps scrolling its content — unlike the system's own 4-finger Space
+    // swipe, which the window server consumes. An intercepting tap on scroll-wheel
+    // events returns null (drops the event) whenever `gestures.blockingScroll()` is
+    // set; otherwise it passes every event through untouched, so normal 2-finger
+    // scrolling is unaffected. Head-inserted at the session level so we drop the
+    // event before the focused app's own session tap can act on it.
+    mgr.stap = macos.event_tap.CGEventTapCreate(
+        macos.event_tap.kCGSessionEventTap,
+        macos.event_tap.kCGHeadInsertEventTap,
+        macos.event_tap.kCGEventTapOptionDefault,
+        macos.event_tap.mask(macos.event_tap.kCGEventScrollWheel),
+        scrollTap,
+        null,
+    );
+    if (mgr.stap) |tap| {
+        const ssrc = macos.event_tap.CFMachPortCreateRunLoopSource(null, tap, 0);
+        c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), ssrc, c.kCFRunLoopCommonModes);
+        macos.event_tap.CGEventTapEnable(tap, true);
+    } else {
+        std.debug.print("[observer] scroll tap unavailable; gestures won't block scrolling\n", .{});
+    }
 
     // Re-tile when the display layout changes (clamshell, dock/undock, a
     // resolution change). The visible frame we tile to moves with it, but no
@@ -669,6 +697,30 @@ fn mouseTap(
         else => {},
     }
     return event; // listen-only: pass the event through unchanged
+}
+
+/// Intercepting tap on scroll-wheel events. Drops the event (returns null) while
+/// a bound trackpad gesture is being performed so the window under the swipe
+/// doesn't scroll; otherwise passes it through, leaving ordinary 2-finger
+/// scrolling completely untouched.
+fn scrollTap(
+    proxy: macos.event_tap.EventTapProxy,
+    etype: macos.event_tap.EventType,
+    event: macos.event_tap.EventRef,
+    info: ?*anyopaque,
+) callconv(.c) macos.event_tap.EventRef {
+    _ = proxy;
+    _ = info;
+    switch (etype) {
+        // The system disables an intercepting tap if its callback stalls; the
+        // tap must re-enable itself (re-enabling a different tap was the old bug).
+        macos.event_tap.kCGEventTapDisabledByTimeout,
+        macos.event_tap.kCGEventTapDisabledByUserInput,
+        => if (g_manager) |m| if (m.stap) |t| macos.event_tap.CGEventTapEnable(t, true),
+        macos.event_tap.kCGEventScrollWheel => if (gestures.blockingScroll()) return null,
+        else => {},
+    }
+    return event;
 }
 
 /// What a scan of the active workspace found out of place: the first window

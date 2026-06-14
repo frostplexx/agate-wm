@@ -18,6 +18,7 @@ pub const EventType = u32;
 pub const kCGEventLeftMouseDown: EventType = 1;
 pub const kCGEventLeftMouseUp: EventType = 2;
 pub const kCGEventLeftMouseDragged: EventType = 6;
+pub const kCGEventScrollWheel: EventType = 22;
 pub const kCGEventKeyDown: EventType = 10;
 pub const kCGEventKeyUp: EventType = 11;
 pub const kCGEventFlagsChanged: EventType = 12;
