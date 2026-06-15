@@ -35,6 +35,7 @@
 ---@field animations? boolean Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`. (default `false`)
 ---@field space_indicator? boolean Show the active space's number as a menu-bar status item. (default `true`)
 ---@field drag_preview? boolean While dragging a window, highlight the tile it will swap into on drop with a translucent overlay. (default `true`)
+---@field smart_gaps? boolean When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`). (default `false`)
 ---@field animation_duration? number Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`. (default `150`)
 ---@field space_animation? string How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation). (default `"instant"`)
 
@@ -62,10 +63,22 @@ function agate.config(config) end
 ---@param action fun()|string A Lua callback, or a string command (see Commands below).
 function agate.bind(spec, action) end
 
----Bind a trackpad swipe to an action. One step fires per ~quarter-pad of travel, so a long swipe repeats the action (Hyprland-style). The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
+---Bind a trackpad swipe to an action. The swipe tracks live with a Liquid Glass HUD and fires once when you lift — drag far enough or flick fast, like native macOS. The system gestures on the same finger count must be off or moved to the other count in Trackpad settings.
 ---@param spec string Finger count (3 or 4) and direction, e.g. `"3:left"` or `"4:up"`.
 ---@param action fun()|string A Lua callback, or a string command (see Commands below).
 function agate.gesture(spec, action) end
+
+---Define a modal keybind group (Hyprland-style submap): a named table of `keyspec = action` entries that are live only while the mode is active. Enter with `agate.enter_mode(name)`, leave with `agate.exit_mode()`. While a mode is active only its bindings fire — global binds are suppressed and unbound keys pass through to the focused app. Bind `escape` to `agate.exit_mode` so there's always a way out.
+---@param name string Mode name, referenced by `enter_mode`/`exit_mode` and the `mode <name>` command.
+---@param bindings table Table mapping a key chord (e.g. `"h"`, `"shift+l"`) to a Lua function or string command.
+function agate.mode(name, bindings) end
+
+---Activate a mode defined with `agate.mode`. While active, only that mode's bindings fire; global binds are suppressed and unbound keys pass through. The active mode name shows in the menu-bar indicator.
+---@param name string Name of a mode registered with `agate.mode`.
+function agate.enter_mode(name) end
+
+---Leave the active mode and return to the normal keymap. Bind this to `escape` inside a mode so there's always a way out.
+function agate.exit_mode() end
 
 ---Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.
 ---@param dir "next"|"prev" Cycle direction.

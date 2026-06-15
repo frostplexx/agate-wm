@@ -42,6 +42,16 @@ pub const GestureBinding = struct {
     action: BindingAction,
 };
 
+/// A modal keybind group (`agate.mode(name, {...})`), modelled on Hyprland's
+/// submaps: while the mode is active it owns the keyboard — only its bindings
+/// fire, global binds are suppressed, and unbound keys pass through to the app.
+/// Enter with `agate.enter_mode(name)` (or `"mode <name>"`), leave with
+/// `agate.exit_mode()` — typically bound to `escape` inside the mode.
+pub const Mode = struct {
+    name: []const u8, // owned by Config.alloc
+    bindings: std.ArrayList(Binding),
+};
+
 /// A window assignment rule (`agate.rule{...}`), modelled on yabai's rules
 /// (koekeishiya/yabai, src/rule.c): regexes select windows, the effect sends
 /// them to a Space. Matching is AND across the present matchers; a rule with
@@ -113,8 +123,17 @@ pub const Config = struct {
     /// Show the translucent target-slot overlay while dragging a window.
     // @doc S|drag_preview|boolean|true|While dragging a window, highlight the tile it will swap into on drop with a translucent overlay.
     drag_preview: bool,
+    /// Drop the outer gap when a workspace holds a single window (Hyprland's
+    /// `no_gaps_when_only`). Mirrored into `wm_layout.smart_gaps` on config load.
+    // @doc S|smart_gaps|boolean|false|When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`).
+    smart_gaps: bool,
     bindings: std.ArrayList(Binding),
     gesture_bindings: std.ArrayList(GestureBinding),
+    /// Registered modal keybind groups (`agate.mode`). Indexed by `active_mode`.
+    modes: std.ArrayList(Mode),
+    /// Index into `modes` of the currently active modal group, or null when in
+    /// the normal (global-bind) keymap. Toggled by `enter_mode` / `exit_mode`.
+    active_mode: ?usize = null,
     /// Window assignment rules in registration order. All matching rules
     /// combine; the last match wins (yabai's `rule_combine_effects` order).
     rules: std.ArrayList(Rule),
@@ -303,6 +322,8 @@ fn agateConfig(lua: *Lua) i32 {
     }
     boolField(lua, 1, "space_indicator", &cfg.space_indicator);
     boolField(lua, 1, "drag_preview", &cfg.drag_preview);
+    boolField(lua, 1, "smart_gaps", &cfg.smart_gaps);
+    wm_layout.smart_gaps = cfg.smart_gaps;
     // space_animation: how much of the Space-switch transition plays.
     // TODO: Remove this option
     // @doc S|space_animation|string|"instant"|How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation).
@@ -440,6 +461,116 @@ fn agateGesture(lua: *Lua) i32 {
             cfg.alloc.free(cmd);
         };
     }
+    return 0;
+}
+
+/// `agate.mode(name, { keyspec = action, ... })` — define a modal keybind group
+/// (Hyprland-style submap). Each entry binds a key chord (same syntax as
+/// `agate.bind`) to a Lua function or string command, but only while the mode is
+/// active. Enter it with `agate.enter_mode(name)`; leave with `agate.exit_mode()`
+/// — bind that to `escape` inside the mode so there's always a way out.
+// @doc F|mode|Define a modal keybind group (Hyprland-style submap): a named table of `keyspec = action` entries that are live only while the mode is active. Enter with `agate.enter_mode(name)`, leave with `agate.exit_mode()`. While a mode is active only its bindings fire — global binds are suppressed and unbound keys pass through to the focused app. Bind `escape` to `agate.exit_mode` so there's always a way out.
+// @doc FP|mode|name|string|false|Mode name, referenced by `enter_mode`/`exit_mode` and the `mode <name>` command.
+// @doc FP|mode|bindings|table|false|Table mapping a key chord (e.g. `"h"`, `"shift+l"`) to a Lua function or string command.
+fn agateMode(lua: *Lua) i32 {
+    const cfg = g_config orelse return 0;
+    const name_z = lua.toString(1) catch return 0;
+    const name = std.mem.sliceTo(name_z, 0);
+    if (!lua.isTable(2)) {
+        std.debug.print("[config] mode '{s}': second argument must be a {{ key = action }} table\n", .{name});
+        return 0;
+    }
+
+    var mode: Mode = .{ .name = cfg.alloc.dupe(u8, name) catch return 0, .bindings = .empty };
+
+    // Walk the table: keys are keyspec strings, values are functions or commands
+    // (same forms `agate.bind` accepts). `lua.next` pops the value each turn and
+    // leaves the key for the following iteration; we guard `isString` on the key
+    // so coercion never mutates a live key and breaks the traversal.
+    lua.pushNil();
+    while (lua.next(2)) {
+        if (!lua.isString(-2)) { lua.pop(1); continue; }
+        const spec = std.mem.sliceTo(lua.toString(-2) catch {
+            lua.pop(1);
+            continue;
+        }, 0);
+        const parsed = parseKeySpec(spec, cfg.hyper_mods) orelse {
+            std.debug.print("[config] mode '{s}': unknown key '{s}'\n", .{ name, spec });
+            lua.pop(1);
+            continue;
+        };
+        if (lua.isFunction(-1)) {
+            lua.pushValue(-1);
+            const fn_ref = lua.ref(zlua.registry_index);
+            mode.bindings.append(cfg.alloc, .{
+                .keycode = parsed.keycode,
+                .modifiers = parsed.mods,
+                .action = .{ .lua_fn = fn_ref },
+            }) catch {};
+        } else if (lua.isString(-1)) {
+            const cmd_z = lua.toString(-1) catch {
+                lua.pop(1);
+                continue;
+            };
+            const cmd = cfg.alloc.dupe(u8, std.mem.sliceTo(cmd_z, 0)) catch {
+                lua.pop(1);
+                continue;
+            };
+            mode.bindings.append(cfg.alloc, .{
+                .keycode = parsed.keycode,
+                .modifiers = parsed.mods,
+                .action = .{ .cmd = cmd },
+            }) catch cfg.alloc.free(cmd);
+        }
+        lua.pop(1); // drop value; keep key for the next `lua.next`
+    }
+
+    cfg.modes.append(cfg.alloc, mode) catch {
+        cfg.alloc.free(mode.name);
+        mode.bindings.deinit(cfg.alloc);
+    };
+    return 0;
+}
+
+/// Activate the named mode by index (shared by `agate.enter_mode` and the
+/// `mode <name>` command). Updates the menu-bar indicator if it's present.
+fn enterModeByName(cfg: *Config, name: []const u8) void {
+    for (cfg.modes.items, 0..) |m, i| {
+        if (!std.mem.eql(u8, m.name, name)) continue;
+        cfg.active_mode = i;
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrintZ(&buf, "◆ {s}", .{name})) |label| {
+            macos.statusbar.setText(label);
+        } else |_| {}
+        return;
+    }
+    std.debug.print("[config] enter_mode: no mode named '{s}'\n", .{name});
+}
+
+/// Leave any active mode and restore the normal keymap (and the Space indicator).
+fn exitActiveMode(cfg: *Config) void {
+    if (cfg.active_mode == null) return;
+    cfg.active_mode = null;
+    // Restore the menu-bar item to the Space number the indicator normally shows.
+    if (g_appstate) |app| {
+        macos.statusbar.setSpaceNumber(macos.spaces.activeUserIndex(app.gpa, app.skylight_cid));
+    }
+}
+
+/// `agate.enter_mode(name)` — switch into a mode defined with `agate.mode`.
+// @doc F|enter_mode|Activate a mode defined with `agate.mode`. While active, only that mode's bindings fire; global binds are suppressed and unbound keys pass through. The active mode name shows in the menu-bar indicator.
+// @doc FP|enter_mode|name|string|false|Name of a mode registered with `agate.mode`.
+fn agateEnterMode(lua: *Lua) i32 {
+    const cfg = g_config orelse return 0;
+    const name_z = lua.toString(1) catch return 0;
+    enterModeByName(cfg, std.mem.sliceTo(name_z, 0));
+    return 0;
+}
+
+/// `agate.exit_mode()` — leave the active mode, back to the normal keymap.
+// @doc F|exit_mode|Leave the active mode and return to the normal keymap. Bind this to `escape` inside a mode so there's always a way out.
+fn agateExitMode(_: *Lua) i32 {
+    if (g_config) |cfg| exitActiveMode(cfg);
     return 0;
 }
 
@@ -905,14 +1036,17 @@ pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8
 }
 
 // How `// @doc` annotations work: tools/gen_docs.zig scans this file for lines
-// beginning `// @doc ` and renders docs/configuration.md + types/agate.lua from
-// them (run `zig build docs`). Each annotation lives directly above the code it
+// beginning `// @doc ` and renders types/agate.lua plus the wiki's
+// Configuration reference from them (run `zig build docs`). Each annotation lives directly above the code it
 // documents. Field separator is '|'; the FP/C type/form fields may contain '|'.
 
 const agate_fns = [_]zlua.FnReg{
     .{ .name = "config",      .func = zlua.wrap(agateConfig) },
     .{ .name = "bind",        .func = zlua.wrap(agateBind) },
     .{ .name = "gesture",     .func = zlua.wrap(agateGesture) },
+    .{ .name = "mode",        .func = zlua.wrap(agateMode) },
+    .{ .name = "enter_mode",  .func = zlua.wrap(agateEnterMode) },
+    .{ .name = "exit_mode",   .func = zlua.wrap(agateExitMode) },
     .{ .name = "cycle",       .func = zlua.wrap(agateCycle) },
     .{ .name = "focus",       .func = zlua.wrap(agateFocus) },
     .{ .name = "layout",      .func = zlua.wrap(agateLayout) },
@@ -950,8 +1084,10 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .animations = false,
         .space_indicator = true,
         .drag_preview = true,
+        .smart_gaps = false,
         .bindings = .empty,
         .gesture_bindings = .empty,
+        .modes = .empty,
         .rules = .empty,
         .lua = try Lua.init(gpa),
     };
@@ -1176,6 +1312,17 @@ pub fn deinit(cfg: *Config) void {
         }
     }
     cfg.gesture_bindings.deinit(cfg.alloc);
+    for (cfg.modes.items) |*m| {
+        for (m.bindings.items) |b| {
+            switch (b.action) {
+                .lua_fn => |r| cfg.lua.unref(zlua.registry_index, r),
+                .cmd => |s| cfg.alloc.free(s),
+            }
+        }
+        m.bindings.deinit(cfg.alloc);
+        cfg.alloc.free(m.name);
+    }
+    cfg.modes.deinit(cfg.alloc);
     for (cfg.rules.items) |r| freeRule(r);
     cfg.rules.deinit(cfg.alloc);
     cfg.lua.deinit();
@@ -1216,28 +1363,38 @@ pub fn dragPreviewEnabled() bool {
 pub fn matchBinding(keycode: u16, raw_flags: u64) bool {
     const cfg = g_config orelse return false;
     const mods = raw_flags & MOD_MASK;
-    for (cfg.bindings.items) |b| {
+    // In a mode the global keymap is suppressed: only the mode's own chords are
+    // swallowed; anything else falls through to the focused app (Hyprland submap).
+    const set = if (cfg.active_mode) |mi| cfg.modes.items[mi].bindings.items else cfg.bindings.items;
+    for (set) |b| {
         if (b.keycode == keycode and b.modifiers == mods) return true;
     }
     return false;
 }
 
+/// Run a binding's action: call its Lua function or execute its string command.
+fn runAction(cfg: *Config, action: BindingAction) void {
+    switch (action) {
+        .lua_fn => |r| {
+            _ = cfg.lua.getIndexRaw(zlua.registry_index, r);
+            cfg.lua.protectedCall(.{ .args = 0, .results = 0 }) catch |err| {
+                std.debug.print("[config] keybinding error: {}\n", .{err});
+            };
+        },
+        .cmd => |cmd| executeCommand(cmd),
+    }
+}
+
 /// Dispatch a key event against registered bindings. Returns true if the
 /// event was handled and should be swallowed. Call from the keyboard event tap.
+/// While a mode is active only its bindings are consulted (see `matchBinding`).
 pub fn handleKey(keycode: u16, raw_flags: u64) bool {
     const cfg = g_config orelse return false;
     const mods = raw_flags & MOD_MASK;
-    for (cfg.bindings.items) |b| {
+    const set = if (cfg.active_mode) |mi| cfg.modes.items[mi].bindings.items else cfg.bindings.items;
+    for (set) |b| {
         if (b.keycode != keycode or b.modifiers != mods) continue;
-        switch (b.action) {
-            .lua_fn => |r| {
-                _ = cfg.lua.getIndexRaw(zlua.registry_index, r);
-                cfg.lua.protectedCall(.{ .args = 0, .results = 0 }) catch |err| {
-                    std.debug.print("[config] keybinding error: {}\n", .{err});
-                };
-            },
-            .cmd => |cmd| executeCommand(cmd),
-        }
+        runAction(cfg, b.action);
         return true;
     }
     return false;
@@ -1286,6 +1443,8 @@ fn parseMonitorDir(s: []const u8) ?focus.MonitorDir {
 // @doc C|move_to_space <n>|Same as `agate.move_to_space(n)`.
 // @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
 // @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
+// @doc C|mode <name>|Same as `agate.enter_mode(name)`.
+// @doc C|exit_mode|Same as `agate.exit_mode()`.
 fn executeCommand(cmd: []const u8) void {
     const app = g_appstate orelse return;
     if (std.mem.startsWith(u8, cmd, "move ")) {
@@ -1325,6 +1484,10 @@ fn executeCommand(cmd: []const u8) void {
     } else if (std.mem.startsWith(u8, cmd, "move_to_monitor ")) {
         const dir = parseMonitorDir(cmd[16..]) orelse return;
         moveFocusedToMonitor(app, dir);
+    } else if (std.mem.startsWith(u8, cmd, "mode ")) {
+        if (g_config) |cfg| enterModeByName(cfg, cmd[5..]);
+    } else if (std.mem.eql(u8, cmd, "exit_mode")) {
+        if (g_config) |cfg| exitActiveMode(cfg);
     }
 }
 

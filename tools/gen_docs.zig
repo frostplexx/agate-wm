@@ -1,6 +1,8 @@
 //! Reads `// @doc` annotations from src/config/lua.zig and emits:
-//!   * docs/configuration.md  — human-readable settings reference
-//!   * types/agate.lua        — LuaCATS type stub for lua-language-server
+//!   * Configuration.md  — settings reference for the GitHub wiki (installed to
+//!                         zig-out, not committed; published by
+//!                         `just publish-docs`)
+//!   * types/agate.lua   — LuaCATS type stub for lua-language-server (committed)
 //!
 //! Invoked by `zig build docs` (see build.zig). Never edit this file when
 //! adding settings — add `// @doc` lines in lua.zig instead.

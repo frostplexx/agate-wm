@@ -72,8 +72,12 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_macos_tests.step);
 
     // `zig build docs` — compile tools/gen_docs.zig, run it against
-    // src/config/lua.zig (parsing its `// @doc` annotations), and copy the
-    // rendered outputs back into the source tree.
+    // src/config/lua.zig (parsing its `// @doc` annotations), and emit:
+    //   * types/agate.lua — LuaCATS type stub, copied into the source tree
+    //     (committed; editors read it for completion).
+    //   * zig-out/Configuration.md — settings reference for the GitHub wiki.
+    //     The human-readable docs live only in the wiki, so this is installed
+    //     to the build output (not committed) and `just publish-docs` pushes it.
     const gen_docs_exe = b.addExecutable(.{
         .name = "gen_docs",
         .root_module = b.createModule(.{
@@ -88,11 +92,14 @@ pub fn build(b: *std.Build) !void {
     const lua_out = run_gen_docs.addOutputFileArg("agate.lua");       // argv[3]
 
     const write_docs = b.addUpdateSourceFiles();
-    write_docs.addCopyFileToSource(md_out, "docs/configuration.md");
     write_docs.addCopyFileToSource(lua_out, "types/agate.lua");
 
-    const docs_step = b.step("docs", "Generate settings docs and Lua type defs");
+    // The wiki markdown goes to zig-out/Configuration.md for `publish-docs`.
+    const install_md = b.addInstallFile(md_out, "Configuration.md");
+
+    const docs_step = b.step("docs", "Generate the Lua type defs and wiki reference");
     docs_step.dependOn(&write_docs.step);
+    docs_step.dependOn(&install_md.step);
 }
 
 /// Link every macOS framework agate needs and point the module at the SDK.

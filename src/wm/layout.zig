@@ -19,6 +19,20 @@ const Rect = macos.window_list.Rect;
 /// `animate.zig` for how (and within which platform limits) the sweep runs.
 pub var animate: bool = false;
 
+/// Smart gaps (Hyprland's `no_gaps_when_only`): when a workspace holds a single
+/// tiled window, drop the outer gap so it fills the display edge-to-edge. Set
+/// from the Lua config (`agate.config{ smart_gaps = true }`).
+pub var smart_gaps: bool = false;
+
+/// Count the leaf (real-window) cons under `con`. Used by smart gaps to detect
+/// the "only one window" workspace.
+fn leafCount(con: *data.Con) usize {
+    if (con.window != null) return 1;
+    var total: usize = 0;
+    for (con.children.items) |child| total += leafCount(child);
+    return total;
+}
+
 /// Lay out and apply a workspace's windows within `area` (the display's usable
 /// frame, AX coordinates). The workspace's `outer` gap insets the whole area;
 /// children are then split per the container's layout with the `inner` gap
@@ -61,7 +75,10 @@ fn animateSink(leaf: *data.Con, area: Rect) void {
 /// sink's business — `flushWorkspace` pushes it onto the real window, tests
 /// record it. `sink` is comptime so the recursion stays a plain call.
 pub fn assignFrames(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
-    layoutChildren(con, inset(area, @floatFromInt(con.gaps.outer)), sink);
+    // Smart gaps: a lone tiled window fills the display (inner gaps are moot with
+    // no siblings, so only the outer inset is suppressed).
+    const outer: f64 = if (smart_gaps and leafCount(con) <= 1) 0 else @floatFromInt(con.gaps.outer);
+    layoutChildren(con, inset(area, outer), sink);
 }
 
 /// The production sink: apply the computed frame to the leaf's real window.
@@ -335,6 +352,32 @@ test "V_STACK fans by the accordion peek, clamped to half the area" {
     try expectRect(testRect(0, 0, 100, 50), a.window.?.bounds);
     try expectRect(testRect(0, 25, 100, 50), b.window.?.bounds);
     try expectRect(testRect(0, 50, 100, 50), c2.window.?.bounds);
+}
+
+test "smart gaps drop the outer inset for a lone window, keep it for two" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    smart_gaps = true;
+    defer smart_gaps = false;
+
+    // One window: outer gap suppressed, fills the whole area.
+    const solo = try testContainer(alloc, .Workspace, .H_SPLIT);
+    solo.gaps = .{ .inner = 8, .outer = 8, .top = 0, .bottom = 0, .left = 0, .right = 0 };
+    const only = try testLeaf(alloc, solo, 1, 1.0);
+    assignFrames(solo, testRect(0, 0, 400, 300), recordSink);
+    try expectRect(testRect(0, 0, 400, 300), only.window.?.bounds);
+
+    // Two windows: the outer inset applies again (8px on every side).
+    const pair = try testContainer(alloc, .Workspace, .H_SPLIT);
+    pair.gaps = .{ .inner = 0, .outer = 8, .top = 0, .bottom = 0, .left = 0, .right = 0 };
+    const a = try testLeaf(alloc, pair, 1, 1.0);
+    const b = try testLeaf(alloc, pair, 2, 1.0);
+    assignFrames(pair, testRect(0, 0, 400, 300), recordSink);
+    // area inset to (8,8,384,284); split in half horizontally (inner gap 0).
+    try expectRect(testRect(8, 8, 192, 284), a.window.?.bounds);
+    try expectRect(testRect(200, 8, 192, 284), b.window.?.bounds);
 }
 
 test "single window fills the workspace area" {

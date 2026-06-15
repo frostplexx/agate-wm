@@ -37,5 +37,7 @@ soon.
 
 Needs Zig 0.16 and macOS. `zig build` compiles, `zig build run` starts the
 daemon (requires the Accessibility permission), `zig build test` runs the
-unit tests, `zig build docs` regenerates `docs/configuration.md` and
-`types/agate.lua`.
+unit tests, `zig build docs` regenerates `types/agate.lua` and the wiki's
+configuration reference (`zig-out/Configuration.md`, published with
+`just publish-docs`). The full settings reference lives in the
+[GitHub wiki](https://github.com/frostplexx/agate-wm/wiki).

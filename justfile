@@ -30,18 +30,18 @@ debug *args: build
 clean:
     rm -rf {{build_dir}}
 
-# Generate settings docs and Lua type defs
+# Generate the Lua type defs and the wiki reference (zig-out/Configuration.md)
 docs:
     zig build docs
 
-# Generate docs and push to the GitHub wiki
+# Generate docs and push the configuration reference to the GitHub wiki
 publish-docs: docs
     #!/usr/bin/env bash
     set -euo pipefail
     wiki_dir=$(mktemp -d)
     trap 'rm -rf "$wiki_dir"' EXIT
     git clone https://github.com/frostplexx/agate-wm.wiki.git "$wiki_dir"
-    cp docs/configuration.md "$wiki_dir/Configuration.md"
+    cp zig-out/Configuration.md "$wiki_dir/Configuration.md"
     cd "$wiki_dir"
     git add Configuration.md
     if git diff --cached --quiet; then

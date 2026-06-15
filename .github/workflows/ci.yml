@@ -26,10 +26,10 @@ jobs:
       - name: Test
         run: zig build test --summary all
 
-      - name: Generated docs are up to date
+      - name: Generated type defs are up to date
         run: |
           zig build docs
-          git diff --exit-code docs/configuration.md types/agate.lua
+          git diff --exit-code types/agate.lua
 
   nix:
     name: nix package
