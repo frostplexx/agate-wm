@@ -24,6 +24,14 @@ pub var animate: bool = false;
 /// from the Lua config (`agate.config{ smart_gaps = true }`).
 pub var smart_gaps: bool = false;
 
+/// The current workspace's full tiling area (after the outer-gap inset), set at
+/// the top of each `assignFrames` pass. A leaf marked `fake_full_screen`
+/// (yabai's zoom-fullscreen) is given this area instead of its tiled slot, so it
+/// fills the whole space while the others keep their frames behind it. Single-
+/// threaded main loop, so a file-scope value is safe (same pattern as the
+/// animator's fixed buffers).
+var zoom_area: Rect = undefined;
+
 /// Count the leaf (real-window) cons under `con`. Used by smart gaps to detect
 /// the "only one window" workspace.
 fn leafCount(con: *data.Con) usize {
@@ -78,7 +86,9 @@ pub fn assignFrames(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Re
     // Smart gaps: a lone tiled window fills the display (inner gaps are moot with
     // no siblings, so only the outer inset is suppressed).
     const outer: f64 = if (smart_gaps and leafCount(con) <= 1) 0 else @floatFromInt(con.gaps.outer);
-    layoutChildren(con, inset(area, outer), sink);
+    const top = inset(area, outer);
+    zoom_area = top; // a zoom-fullscreen leaf fills the whole space (see `place`)
+    layoutChildren(con, top, sink);
 }
 
 /// The production sink: apply the computed frame to the leaf's real window.
@@ -163,8 +173,9 @@ fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) v
 
 /// Emit `area` for a leaf window, or recurse if it's a nested split container.
 fn place(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
-    if (con.window != null) {
-        sink(con, area);
+    if (con.window) |win| {
+        // A zoom-fullscreen window ignores its tiled slot and fills the space.
+        sink(con, if (win.fake_full_screen) zoom_area else area);
     } else {
         layoutChildren(con, area, sink);
     }
@@ -334,6 +345,24 @@ test "nested split container subdivides its slot" {
     try expectRect(testRect(0, 0, 100, 100), a.window.?.bounds);
     try expectRect(testRect(100, 0, 100, 50), b1.window.?.bounds);
     try expectRect(testRect(100, 50, 100, 50), b2.window.?.bounds);
+}
+
+test "zoom-fullscreen leaf fills the whole space; siblings keep their slots" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .H_SPLIT);
+    ws.gaps = .{ .inner = 0, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0 };
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    b.window.?.fake_full_screen = true;
+
+    assignFrames(ws, testRect(0, 0, 220, 120), recordSink);
+    // Outer gap shrinks the area to (10,10,200,100). a keeps its tiled half;
+    // the zoomed b ignores its slot and fills the full (inset) workspace area.
+    try expectRect(testRect(10, 10, 100, 100), a.window.?.bounds);
+    try expectRect(testRect(10, 10, 200, 100), b.window.?.bounds);
 }
 
 test "V_STACK fans by the accordion peek, clamped to half the area" {

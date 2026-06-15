@@ -676,6 +676,30 @@ fn agateJoin(lua: *Lua) i32 {
     return 0;
 }
 
+/// Toggle "zoom fullscreen" for the focused window: flip its `fake_full_screen`
+/// flag and re-tile. Layout (`place`) hands a flagged leaf the whole workspace
+/// area instead of its tiled slot, so the window overlays the others until it's
+/// toggled off; the tiling underneath is preserved. Direct port of yabai's
+/// `window --toggle zoom-fullscreen` (not native macOS fullscreen — no separate
+/// Space, no transition animation).
+// @doc F|zoom_fullscreen|Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
+fn agateZoomFullscreen(lua: *Lua) i32 {
+    _ = lua;
+    toggleZoomFullscreen(g_appstate orelse return 0);
+    return 0;
+}
+
+/// Shared by `agate.zoom_fullscreen()` and the `zoom_fullscreen` string command.
+fn toggleZoomFullscreen(app: *state.AppState) void {
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    if (leaf.window == null) return;
+    const win = &leaf.window.?;
+    win.fake_full_screen = !win.fake_full_screen;
+    tree.flushActive(app);
+    // While zoomed the window overlaps its siblings — keep it raised on top.
+    if (win.fake_full_screen) _ = focus.focusLeaf(leaf);
+}
+
 // @doc F|space|Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
 // @doc FP|space|n|integer|false|1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 fn agateSpace(lua: *Lua) i32 {
@@ -1059,6 +1083,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },
     .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
+    .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
 };
 
@@ -1443,6 +1468,7 @@ fn parseMonitorDir(s: []const u8) ?focus.MonitorDir {
 // @doc C|move_to_space <n>|Same as `agate.move_to_space(n)`.
 // @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
 // @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
+// @doc C|zoom_fullscreen|Same as `agate.zoom_fullscreen()`.
 // @doc C|mode <name>|Same as `agate.enter_mode(name)`.
 // @doc C|exit_mode|Same as `agate.exit_mode()`.
 fn executeCommand(cmd: []const u8) void {
@@ -1488,6 +1514,8 @@ fn executeCommand(cmd: []const u8) void {
         if (g_config) |cfg| enterModeByName(cfg, cmd[5..]);
     } else if (std.mem.eql(u8, cmd, "exit_mode")) {
         if (g_config) |cfg| exitActiveMode(cfg);
+    } else if (std.mem.eql(u8, cmd, "zoom_fullscreen")) {
+        toggleZoomFullscreen(app);
     }
 }
 

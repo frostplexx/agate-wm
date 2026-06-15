@@ -97,6 +97,9 @@ function agate.layout(mode) end
 ---@param mode? agate.Layout Layout of the new container. Default `v_stack`.
 function agate.join(dir, mode) end
 
+---Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
+function agate.zoom_fullscreen() end
+
 ---Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
 ---@param n integer 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 function agate.space(n) end
