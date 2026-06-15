@@ -26,6 +26,8 @@
 ---| '"down"'
 
 ---@class agate.Config
+---@field animation_duration? number Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`. (default `150`)
+---@field space_animation? string How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation). (default `"instant"`)
 ---@field gaps? number Pixels between adjacent tiles. (default `8`)
 ---@field outer_gaps? number Pixels inset from the screen edge. (default `8`)
 ---@field accordion_padding? number Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`. (default `40`)
@@ -36,8 +38,6 @@
 ---@field space_indicator? boolean Show the active space's number as a menu-bar status item. (default `true`)
 ---@field drag_preview? boolean While dragging a window, highlight the tile it will swap into on drop with a translucent overlay. (default `true`)
 ---@field smart_gaps? boolean When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`). (default `false`)
----@field animation_duration? number Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`. (default `150`)
----@field space_animation? string How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation). (default `"instant"`)
 
 ---@class agate.SmallScreen
 ---@field enabled? boolean Master switch (default `true`).
