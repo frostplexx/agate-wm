@@ -1,14 +1,11 @@
 <p align="center">
     </a>
-    <h1 align="center"><code>Agate</code></h1>
-    <h6 align="center">A macOS window manager that just works™</h2>
+    <h1 align="center">Agate</h1>
+    <h4 align="center">Agate (/ˈæɡɪt/ AG-it): A macOS window manager that just works™</h4>
     <div style="display: grid;" align="center"></div>
 </p>
 
 ---
-
-> Agate (/ˈæɡɪt/ AG-it): A banded variety of fibrous chalcedony
-
 
 > [!CAUTION]
 > This project is in alpha!
@@ -24,14 +21,8 @@ Features:
 
 ## Getting Started
 
-### Required Settings
-
-- Disable macOS's own space-switch-on-activate: System Settings → Desktop & Dock → scroll to Mission Control → turn OFF "When switching to an application, switch to a Space with open windows for the application".
-- Disable space rearranging: System Settings → Desktop & Dock → scroll to Mission Control → turn OFF "Automatically rearrange Spaces based on most recent use"
-
-### Installation
-
-soon.
+Please refer to the [GitHub wiki](https://github.com/frostplexx/agate-wm/wiki) to get started. It contains detailed installation and configuration instructions, known issues, and a list of all settings and commands. 
+For an example config, please refer to [todo: examples].
 
 ## Building
 
