@@ -45,6 +45,12 @@ pub fn build(b: *std.Build) !void {
             },
         }),
     });
+    // Compile-time options: expose the package version (from build.zig.zon) to
+    // the CLI as `@import("build_options").version`.
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    exe.root_module.addImport("build_options", options.createModule());
+
     // The frameworks are linked on the module that uses them; applying the SDK
     // paths and links to the final exe as well keeps the linker happy and
     // matches how Ghostty applies it to every compile step.

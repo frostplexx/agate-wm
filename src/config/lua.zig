@@ -27,6 +27,7 @@ const swipe = @import("swipe.zig");
 const actions = @import("actions.zig");
 const rules = @import("rules.zig");
 const small_screen = @import("small_screen.zig");
+const paths = @import("paths.zig");
 
 const Config = types.Config;
 
@@ -91,7 +92,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
     cfg.lua.openLibs();
     api.register(cfg.lua);
 
-    const config_path = findConfigPath(gpa) orelse {
+    const config_path = paths.findConfigPath(gpa) orelse {
         std.debug.print("[config] no init.lua found; using defaults\n", .{});
         // Small Screen Mode is on by default, so it applies config or not.
         if (small_screen.applySmallScreenMode(app)) tree.flushAllVisible(app);
@@ -149,43 +150,6 @@ pub fn deinit(cfg: *Config) void {
     ctx.appstate = null;
 }
 
-// ---------------------------------------------------------------------------
-// init.lua discovery
-// ---------------------------------------------------------------------------
-
-// `std.Io.Dir.access` needs the `Io` handle from main; plain `access(2)` is
-// enough for an existence probe and keeps the config layer Io-free.
-fn fileExists(path: []const u8) bool {
-    var buf: [4096]u8 = undefined;
-    if (path.len >= buf.len) return false;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    return std.c.access(@ptrCast(&buf), 0) == 0; // F_OK = 0
-}
-
-fn findConfigPath(alloc: std.mem.Allocator) ?[]u8 {
-    // 1. $WM_CONFIG
-    if (std.c.getenv("WM_CONFIG")) |raw| {
-        const s = std.mem.span(raw);
-        if (fileExists(s)) return alloc.dupe(u8, s) catch null;
-    }
-    // 2. $XDG_CONFIG_HOME/agate/init.lua
-    if (std.c.getenv("XDG_CONFIG_HOME")) |raw| {
-        const base = std.mem.span(raw);
-        const p = std.fmt.allocPrint(alloc, "{s}/agate/init.lua", .{base}) catch return null;
-        if (fileExists(p)) return p;
-        alloc.free(p);
-    }
-    // 3. ~/.config/agate/init.lua
-    if (std.c.getenv("HOME")) |raw| {
-        const home = std.mem.span(raw);
-        const p = std.fmt.allocPrint(alloc, "{s}/.config/agate/init.lua", .{home}) catch return null;
-        if (fileExists(p)) return p;
-        alloc.free(p);
-    }
-    // 4. ./init.lua (development fallback)
-    const p = alloc.dupe(u8, "init.lua") catch return null;
-    if (fileExists(p)) return p;
-    alloc.free(p);
-    return null;
-}
+/// The init.lua path agate would load, or null if none exists (see `paths`).
+/// Exposed for the CLI (`agate config`), which resolves it without the VM.
+pub const findConfigPath = paths.findConfigPath;

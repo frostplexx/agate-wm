@@ -65,6 +65,19 @@ pub fn appName(pid: i32, buf: []u8) ?[]const u8 {
     return nsStringToBuf(name, buf);
 }
 
+/// The bundle identifier (e.g. `"com.apple.Safari"`) of the app with `pid`,
+/// copied into `buf`. Null if there is no such running application or it has no
+/// bundle identifier (some processes — command-line tools, certain helpers — do
+/// not).
+pub fn bundleId(pid: i32, buf: []u8) ?[]const u8 {
+    const NSRunningApplication = objc.getClass("NSRunningApplication") orelse return null;
+    const app = NSRunningApplication.msgSend(objc.Object, "runningApplicationWithProcessIdentifier:", .{pid});
+    if (app.value == null) return null;
+    const bid = app.msgSend(objc.Object, "bundleIdentifier", .{}); // NSString*
+    if (bid.value == null) return null;
+    return nsStringToBuf(bid, buf);
+}
+
 /// Copy an `NSString`'s UTF-8 bytes into `buf`.
 fn nsStringToBuf(str: objc.Object, buf: []u8) ?[]const u8 {
     const cstr = str.msgSend(?[*:0]const u8, "UTF8String", .{}) orelse return null;

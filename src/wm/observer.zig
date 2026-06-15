@@ -30,6 +30,7 @@ const focus = @import("focus/focus.zig");
 const gestures = @import("gestures.zig");
 const state = @import("../state.zig");
 const lua_config = @import("../config/lua.zig");
+const ipc = @import("../ipc.zig");
 
 const ax = macos.ax;
 const c = macos.c;
@@ -299,6 +300,10 @@ pub fn run(appState: *state.AppState) !void {
     // resolution change). The visible frame we tile to moves with it, but no
     // window event fires, so without this the layout keeps the old geometry.
     _ = macos.display.CGDisplayRegisterReconfigurationCallback(onDisplayReconfigured, mgr);
+
+    // Control socket: lets `agate list-windows` &c. query our live state. Added
+    // to this run loop so the request handler reads the tree on the main thread.
+    ipc.start(appState);
 
     // With a status item, clicks on it are NSEvents delivered to this process,
     // and only [NSApp run] dispatches those safely — a bare CFRunLoopRun left
