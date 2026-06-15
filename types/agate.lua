@@ -100,6 +100,10 @@ function agate.join(dir, mode) end
 ---Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
 function agate.zoom_fullscreen() end
 
+---Run a shell command in the background, like skhd's `:` commands. The command line is handed to `$SHELL -c` (falling back to `/bin/sh -c`), so pipes, globs, and `&&` all work. agate does not wait for it — use it to launch apps or scripts from a keybind.
+---@param cmd string The shell command line to run.
+function agate.exec(cmd) end
+
 ---Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
 ---@param n integer 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 function agate.space(n) end

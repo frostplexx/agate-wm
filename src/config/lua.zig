@@ -689,6 +689,59 @@ fn agateZoomFullscreen(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|exec|Run a shell command in the background, like skhd's `:` commands. The command line is handed to `$SHELL -c` (falling back to `/bin/sh -c`), so pipes, globs, and `&&` all work. agate does not wait for it — use it to launch apps or scripts from a keybind.
+// @doc FP|exec|cmd|string|false|The shell command line to run.
+fn agateExec(lua: *Lua) i32 {
+    const app = g_appstate orelse return 0;
+    const cmd_z = lua.toString(1) catch return 0;
+    spawnShell(app.gpa, cmd_z);
+    return 0;
+}
+
+// `fork` isn't exposed by the Zig 0.16 std (it's a private extern in std.c), but
+// `execve`/`waitpid`/`setsid`/`environ`/`_exit` are — declare just `fork`.
+extern "c" fn fork() std.c.pid_t;
+
+/// Launch `cmd` through the user's shell without blocking the WM or leaving a
+/// zombie behind. Modelled on skhd's `fork_exec` (koekeishiya/skhd): a
+/// double-fork daemonizes the worker — the grandchild execs the shell and, once
+/// the intermediate child exits, is reparented to launchd, which reaps it; we
+/// wait out the intermediate child here so nothing lingers.
+///
+/// All allocation and env lookup happen in the parent *before* `fork`, because
+/// the process is multithreaded (the multitouch thread) and only
+/// async-signal-safe calls are legal between `fork` and `execve` in the child.
+fn spawnShell(alloc: std.mem.Allocator, cmd: []const u8) void {
+    if (cmd.len == 0) return;
+    const cmdz = alloc.dupeZ(u8, cmd) catch return;
+    defer alloc.free(cmdz);
+
+    const shell: [*:0]const u8 = blk: {
+        if (std.c.getenv("SHELL")) |s| {
+            if (s[0] != 0) break :blk s;
+        }
+        break :blk "/bin/sh";
+    };
+
+    const pid = fork();
+    if (pid < 0) {
+        std.debug.print("[exec] fork failed for: {s}\n", .{cmd});
+        return;
+    }
+    if (pid == 0) {
+        // Intermediate child: detach into its own session, fork the worker, leave.
+        _ = std.c.setsid();
+        if (fork() == 0) {
+            const argv = [_:null]?[*:0]const u8{ shell, "-c", cmdz.ptr };
+            _ = std.c.execve(shell, &argv, @ptrCast(std.c.environ));
+            std.c._exit(127); // execve only returns on failure
+        }
+        std.c._exit(0); // orphan the worker so launchd adopts (and reaps) it
+    }
+    // Parent: the intermediate child exits at once — reap it so it's no zombie.
+    _ = std.c.waitpid(pid, null, 0);
+}
+
 /// Shared by `agate.zoom_fullscreen()` and the `zoom_fullscreen` string command.
 fn toggleZoomFullscreen(app: *state.AppState) void {
     const leaf = focus.currentFocusedLeaf(app) orelse return;
@@ -1084,6 +1137,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
     .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
+    .{ .name = "exec",        .func = zlua.wrap(agateExec) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
 };
 
@@ -1468,6 +1522,7 @@ fn parseMonitorDir(s: []const u8) ?focus.MonitorDir {
 // @doc C|move_to_space <n>|Same as `agate.move_to_space(n)`.
 // @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
 // @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
+// @doc C|exec <cmd>|Run a shell command in the background through `$SHELL -c`. Same as `agate.exec(cmd)`.
 // @doc C|zoom_fullscreen|Same as `agate.zoom_fullscreen()`.
 // @doc C|mode <name>|Same as `agate.enter_mode(name)`.
 // @doc C|exit_mode|Same as `agate.exit_mode()`.
@@ -1516,6 +1571,8 @@ fn executeCommand(cmd: []const u8) void {
         if (g_config) |cfg| exitActiveMode(cfg);
     } else if (std.mem.eql(u8, cmd, "zoom_fullscreen")) {
         toggleZoomFullscreen(app);
+    } else if (std.mem.startsWith(u8, cmd, "exec ")) {
+        spawnShell(app.gpa, cmd[5..]);
     }
 }
 
