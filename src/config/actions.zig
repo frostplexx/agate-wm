@@ -63,6 +63,21 @@ pub fn toggleZoomFullscreen(app: *state.AppState) void {
     if (win.fake_full_screen) _ = focus.focusLeaf(leaf);
 }
 
+/// Toggle "floating" for the focused window (yabai's `window --toggle float`):
+/// flip its `floating` flag and re-tile. Layout skips a floating leaf, so the
+/// remaining tiles reflow to fill the space while the window keeps its current
+/// frame on top — free to be moved and resized without disturbing the tiling.
+/// Toggling off drops it back into its slot and re-tiles. Raised when floated so
+/// it sits above the tiles it now overlaps.
+pub fn toggleFloat(app: *state.AppState) void {
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    if (leaf.window == null) return;
+    const win = &leaf.window.?;
+    win.floating = !win.floating;
+    tree.flushActive(app);
+    if (win.floating) _ = focus.focusLeaf(leaf); // keep it raised above the tiles
+}
+
 /// Move the focused window to the Nth user space on the focused display.
 pub fn moveFocusedToSpace(app: *state.AppState, n: usize) void {
     const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, n) catch return) orelse return;

@@ -395,6 +395,13 @@ fn agateZoomFullscreen(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|toggle_float|Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
+fn agateToggleFloat(lua: *Lua) i32 {
+    _ = lua;
+    actions.toggleFloat(ctx.appstate orelse return 0);
+    return 0;
+}
+
 // @doc F|exec|Run a shell command in the background, like skhd's `:` commands. The command line is handed to `$SHELL -c` (falling back to `/bin/sh -c`), so pipes, globs, and `&&` all work. agate does not wait for it — use it to launch apps or scripts from a keybind.
 // @doc FP|exec|cmd|string|false|The shell command line to run.
 fn agateExec(lua: *Lua) i32 {
@@ -589,6 +596,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
     .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
+    .{ .name = "toggle_float", .func = zlua.wrap(agateToggleFloat) },
     .{ .name = "exec",        .func = zlua.wrap(agateExec) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
 };

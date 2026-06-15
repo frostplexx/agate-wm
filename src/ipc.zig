@@ -272,19 +272,21 @@ fn writeWindowRow(ctx: *WinCtx, leaf: *data.Con, win: data.Window, layout: data.
     const w = ctx.w;
     const is_focused = ctx.focused != null and ctx.focused.? == leaf;
     const zoom = win.fake_full_screen;
+    const floating = win.floating;
     if (ctx.json) {
         if (!ctx.first.*) try w.writeAll(",");
         ctx.first.* = false;
         try w.writeAll("{\"window-id\":");
         try w.print("{d},\"app\":\"", .{win.id});
         try writeJsonStr(w, win.owner);
-        try w.print("\",\"pid\":{d},\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"focused\":{},\"fullscreen\":{}}}", .{
-            win.pid, ctx.ws_no, ctx.mon_no, layoutName(layout), is_focused, zoom,
+        try w.print("\",\"pid\":{d},\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"focused\":{},\"fullscreen\":{},\"floating\":{}}}", .{
+            win.pid, ctx.ws_no, ctx.mon_no, layoutName(layout), is_focused, zoom, floating,
         });
     } else {
         try w.print("{d}\t{s}\tws {d}\tmon {d}\t{s}", .{ win.id, win.owner, ctx.ws_no, ctx.mon_no, layoutName(layout) });
         if (is_focused) try w.writeAll("\t(focused)");
         if (zoom) try w.writeAll("\t(fullscreen)");
+        if (floating) try w.writeAll("\t(floating)");
         try w.writeByte('\n');
     }
 }

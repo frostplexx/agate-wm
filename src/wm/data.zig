@@ -48,6 +48,14 @@ pub const Window = struct {
     /// Whether the window is in a "fake" i.e. not macos native full-screen mode. This is used to determine whether to apply gaps and tiling.
     fake_full_screen: bool = false,
 
+    /// Whether this window floats: lifted out of the tiling layout so it keeps
+    /// its own free position/size (yabai's `window --toggle float`). The flush
+    /// pass skips a floating leaf — it isn't counted in its siblings' split/stack
+    /// math and is never resized — so the remaining tiles reflow without it while
+    /// it stays put on top. Its leaf stays in the tree (still tracked, focusable,
+    /// removed on close); only layout ignores it.
+    floating: bool = false,
+
     /// Whether this window was observed joining a native macOS tab group (a new
     /// window created at the exact frame of an existing same-app window; see
     /// `observer.onWindowCreated`). There is no cross-process AX/CGS attribute

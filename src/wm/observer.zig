@@ -760,6 +760,15 @@ fn scanChangedWindows(con: *data.Con, s: *DragScan) void {
         const sz = el.size() orelse return;
         const frame = macos.window_list.Rect{ .origin = pos, .size = sz };
 
+        // A floating window is outside the tiling: a user drag/resize of it must
+        // not be classified as a tile move (which would swap it with a sibling)
+        // or resize (which would rewrite ratios). Just track its new frame and
+        // leave it where the user put it.
+        if (win.floating) {
+            win.bounds = frame;
+            return;
+        }
+
         const size_changed = @abs(sz.width - win.bounds.size.width) > eps or
             @abs(sz.height - win.bounds.size.height) > eps;
         const pos_changed = @abs(pos.x - win.bounds.origin.x) > eps or

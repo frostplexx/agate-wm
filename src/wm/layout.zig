@@ -41,6 +41,13 @@ fn leafCount(con: *data.Con) usize {
     return total;
 }
 
+/// Whether `con` is a floating leaf — lifted out of the tiling layout (see
+/// `data.Window.floating`). Such a leaf is skipped by the split/stack math: it
+/// keeps its own frame on top while its siblings tile as if it weren't there.
+fn isFloating(con: *data.Con) bool {
+    return if (con.window) |w| w.floating else false;
+}
+
 /// Lay out and apply a workspace's windows within `area` (the display's usable
 /// frame, AX coordinates). The workspace's `outer` gap insets the whole area;
 /// children are then split per the container's layout with the `inner` gap
@@ -118,15 +125,25 @@ fn layoutChildren(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect
     const horizontal = con.layout == .H_SPLIT;
     const gap: f64 = @floatFromInt(con.gaps.inner);
 
+    // Floating leaves are lifted out of the tiling: they don't take a slot and
+    // their weight doesn't count, so the tiled siblings split the area as if the
+    // floats weren't there (and the floats keep their own frame, untouched).
+    var tiled: usize = 0;
     var total_ratio: f64 = 0;
-    for (con.children.items) |child| total_ratio += child.ratio;
+    for (con.children.items) |child| {
+        if (isFloating(child)) continue;
+        tiled += 1;
+        total_ratio += child.ratio;
+    }
+    if (tiled == 0) return; // every child floats — nothing to tile
     if (total_ratio <= 0) total_ratio = 1;
 
-    const nf: f64 = @floatFromInt(n);
+    const nf: f64 = @floatFromInt(tiled);
     const avail_main = (if (horizontal) area.size.width else area.size.height) - gap * (nf - 1);
 
     var offset = if (horizontal) area.origin.x else area.origin.y;
     for (con.children.items) |child| {
+        if (isFloating(child)) continue;
         const extent = avail_main * (child.ratio / total_ratio);
         const rect: Rect = if (horizontal) .{
             .origin = .{ .x = offset, .y = area.origin.y },
@@ -149,8 +166,16 @@ fn layoutChildren(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect
 /// rest peek. The fan step is clamped so it never consumes more than half the
 /// area, keeping windows usable when the stack is deep.
 fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
-    const n = con.children.items.len;
     const horizontal = con.layout == .H_STACK;
+
+    // Floating leaves are lifted out of the fan (see `layoutChildren`): count and
+    // step over only the tiled ones, so a float doesn't widen the span or claim a
+    // fan position.
+    var n: usize = 0;
+    for (con.children.items) |child| {
+        if (!isFloating(child)) n += 1;
+    }
+    if (n == 0) return;
     const nf: f64 = @floatFromInt(n);
 
     const peek: f64 = @floatFromInt(con.gaps.accordion);
@@ -158,7 +183,9 @@ fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) v
     const step: f64 = if (n > 1) @min(peek, (main * 0.5) / (nf - 1)) else 0;
     const span = step * (nf - 1);
 
-    for (con.children.items, 0..) |child, i| {
+    var i: usize = 0;
+    for (con.children.items) |child| {
+        if (isFloating(child)) continue;
         const off = step * @as(f64, @floatFromInt(i));
         const rect: Rect = if (horizontal) .{
             .origin = .{ .x = area.origin.x + off, .y = area.origin.y },
@@ -168,6 +195,7 @@ fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) v
             .size = .{ .width = area.size.width, .height = area.size.height - span },
         };
         place(child, rect, sink);
+        i += 1;
     }
 }
 
@@ -381,6 +409,27 @@ test "V_STACK fans by the accordion peek, clamped to half the area" {
     try expectRect(testRect(0, 0, 100, 50), a.window.?.bounds);
     try expectRect(testRect(0, 25, 100, 50), b.window.?.bounds);
     try expectRect(testRect(0, 50, 100, 50), c2.window.?.bounds);
+}
+
+test "a floating leaf is skipped: tiled siblings split as if it weren't there" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try testContainer(alloc, .Workspace, .H_SPLIT);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const f = try testLeaf(alloc, ws, 2, 1.0);
+    const b = try testLeaf(alloc, ws, 3, 1.0);
+    // Float the middle window and seed a frame the flush must leave untouched.
+    f.window.?.floating = true;
+    f.window.?.bounds = testRect(11, 22, 33, 44);
+
+    assignFrames(ws, testRect(0, 0, 200, 100), recordSink);
+    // a and b share the full width 1:1 (the float takes no slot, no weight).
+    try expectRect(testRect(0, 0, 100, 100), a.window.?.bounds);
+    try expectRect(testRect(100, 0, 100, 100), b.window.?.bounds);
+    // The floating window keeps its own frame — the flush never placed it.
+    try expectRect(testRect(11, 22, 33, 44), f.window.?.bounds);
 }
 
 test "smart gaps drop the outer inset for a lone window, keep it for two" {
