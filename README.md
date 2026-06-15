@@ -2,7 +2,13 @@
     </a>
     <h1 align="center">Agate</h1>
     <h4 align="center">Agate (/ˈæɡɪt/ AG-it): A macOS window manager that just works™</h4>
-    <div style="display: grid;" align="center"></div>
+    <div style="display: grid;" align="center">
+        <img alt="GitHub License" src="https://img.shields.io/github/license/frostplexx/agate-wm">
+        <img alt="CI Status" src="https://github.com/frostplexx/agate-wm/actions/workflows/ci.yml/badge.svg">
+        <a href="https://github.com/frostplexx/agate-wm/wiki">
+            <img src="https://img.shields.io/badge/view-wiki-green.svg" alt="Wiki Badge">
+        </a>
+    </div>
 </p>
 
 ---
