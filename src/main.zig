@@ -30,6 +30,8 @@ test {
     _ = @import("wm/gestures.zig");
     _ = @import("wm/animate.zig");
     _ = @import("config/lua.zig");
+    _ = @import("config/parse.zig");
+    _ = @import("config/small_screen.zig");
     _ = @import("lib/regexp.zig");
     // The macos module's tests run in their own test compile (see build.zig);
     // cross-module test collection doesn't happen from here.

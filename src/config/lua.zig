@@ -1,4 +1,4 @@
-//! Lua configuration layer — public facade. Owns the lifecycle (`init`/`deinit`:
+//! Lua configuration public facade. Owns the lifecycle (`init`/`deinit`:
 //! create the `Config`, open the Lua VM, install the `agate.*` API, find and run
 //! init.lua) and re-exports the entry points the rest of the app calls. The
 //! actual work is split across sibling files:
