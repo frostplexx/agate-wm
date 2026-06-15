@@ -10,6 +10,10 @@ const Allocator = std.mem.Allocator;
 /// Default gaps applied to each workspace until config exists.
 const default_gaps: data.Gaps = .{ .inner = 10, .outer = 10, .top = 0, .bottom = 0, .left = 0, .right = 0, .accordion = 40 };
 
+/// Upper bound on physical displays, for the stack buffers the display-geometry
+/// queries fill (no machine has nearly this many; matches `focus.max_monitors`).
+const max_displays = 16;
+
 /// Allocate and initialize a single Con node.
 fn makeCon(alloc: Allocator, con_type: data.Con.Type, parent: ?*data.Con, depth: u32, id: u64) !*data.Con {
     const con = try alloc.create(data.Con);
@@ -370,11 +374,11 @@ const zero_rect: macos.window_list.Rect = .{ .origin = .{ .x = 0, .y = 0 }, .siz
 fn resolveMonitorFrame(appState: *state.AppState, mon: ?*data.Con) ?macos.window_list.Rect {
     const monitor = mon orelse return null;
     const idx: usize = @intCast(monitor.id); // Monitor.id == display_index
-    const mds = macos.spaces.managedDisplays(appState.gpa, appState.skylight_cid) catch return null;
-    defer appState.gpa.free(mds);
+    var md_buf: [max_displays]macos.spaces.ManagedDisplay = undefined;
+    const mds = macos.spaces.managedDisplays(&md_buf, appState.skylight_cid);
     if (idx >= mds.len) return null;
-    const frames = macos.display.displayFrames(appState.gpa) catch return null;
-    defer appState.gpa.free(frames);
+    var frame_buf: [max_displays]macos.display.DisplayFrame = undefined;
+    const frames = macos.display.displayFrames(&frame_buf);
     return macos.display.frameForUUID(frames, mds[idx].uuidSlice());
 }
 
@@ -399,12 +403,11 @@ fn isTileable(ws: *data.Con) bool {
 /// switch, a display reconfiguration, a window moved across monitors).
 pub fn flushAllVisible(appState: *state.AppState) void {
     const root = appState.tree orelse return;
-    const mds = macos.spaces.managedDisplays(appState.gpa, appState.skylight_cid) catch
-        return flushActive(appState);
-    defer appState.gpa.free(mds);
-    const frames = macos.display.displayFrames(appState.gpa) catch
-        return flushActive(appState);
-    defer appState.gpa.free(frames);
+    var md_buf: [max_displays]macos.spaces.ManagedDisplay = undefined;
+    const mds = macos.spaces.managedDisplays(&md_buf, appState.skylight_cid);
+    if (mds.len == 0) return flushActive(appState); // couldn't enumerate displays
+    var frame_buf: [max_displays]macos.display.DisplayFrame = undefined;
+    const frames = macos.display.displayFrames(&frame_buf);
 
     for (mds) |md| {
         if (md.current_space == 0) continue;
@@ -438,10 +441,10 @@ pub const MonitorInfo = struct {
 /// focus engine pick an adjacent monitor without each caller re-querying the OS.
 pub fn collectMonitors(appState: *state.AppState, out: []MonitorInfo) usize {
     const root = appState.tree orelse return 0;
-    const mds = macos.spaces.managedDisplays(appState.gpa, appState.skylight_cid) catch return 0;
-    defer appState.gpa.free(mds);
-    const frames = macos.display.displayFrames(appState.gpa) catch return 0;
-    defer appState.gpa.free(frames);
+    var md_buf: [max_displays]macos.spaces.ManagedDisplay = undefined;
+    const mds = macos.spaces.managedDisplays(&md_buf, appState.skylight_cid);
+    var frame_buf: [max_displays]macos.display.DisplayFrame = undefined;
+    const frames = macos.display.displayFrames(&frame_buf);
 
     var count: usize = 0;
     for (root.children.items) |mon| {

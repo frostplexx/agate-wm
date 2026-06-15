@@ -6,8 +6,6 @@ const c = @import("c.zig").c;
 const objc = @import("objc");
 const foundation = @import("foundation.zig");
 
-const Allocator = std.mem.Allocator;
-
 pub const Rect = c.CGRect;
 
 /// The usable frame of the main display in top-left (AX/CG) coordinates —
@@ -59,30 +57,29 @@ pub const DisplayFrame = struct {
     }
 };
 
-/// Every active display's visible frame, each tagged with its UUID. Frames are
-/// in top-left AX coordinates (flipped from AppKit's bottom-left origin, which
-/// is anchored to the *primary* screen `NSScreen.screens[0]`). Caller owns the
-/// slice.
-pub fn displayFrames(alloc: Allocator) ![]DisplayFrame {
-    const NSScreen = objc.getClass("NSScreen") orelse return &.{};
+/// Every active display's visible frame, each tagged with its UUID, written into
+/// `buf` (a caller-owned, typically stack, buffer — displays are few, so no heap
+/// allocation is needed on this per-flush path). Returns the filled prefix.
+/// Frames are in top-left AX coordinates (flipped from AppKit's bottom-left
+/// origin, which is anchored to the *primary* screen `NSScreen.screens[0]`).
+pub fn displayFrames(buf: []DisplayFrame) []DisplayFrame {
+    const NSScreen = objc.getClass("NSScreen") orelse return buf[0..0];
     const screens = NSScreen.msgSend(objc.Object, "screens", .{});
-    if (screens.value == null) return &.{};
+    if (screens.value == null) return buf[0..0];
     const count = screens.msgSend(usize, "count", .{});
-    if (count == 0) return &.{};
+    if (count == 0) return buf[0..0];
 
     // The flip constant is the primary screen's height (AppKit's global origin).
     const first = screens.msgSend(objc.Object, "objectAtIndex:", .{@as(usize, 0)});
-    if (first.value == null) return &.{};
+    if (first.value == null) return buf[0..0];
     const primary_h = first.msgSend(c.CGRect, "frame", .{}).size.height;
 
-    const key = try foundation.String.createUtf8("NSScreenNumber");
+    const key = foundation.String.createUtf8("NSScreenNumber") catch return buf[0..0];
     defer key.release();
 
-    var list: std.ArrayList(DisplayFrame) = .empty;
-    errdefer list.deinit(alloc);
-
+    var n: usize = 0;
     var i: usize = 0;
-    while (i < count) : (i += 1) {
+    while (i < count and n < buf.len) : (i += 1) {
         const screen = screens.msgSend(objc.Object, "objectAtIndex:", .{i});
         if (screen.value == null) continue;
         const vis = screen.msgSend(c.CGRect, "visibleFrame", .{});
@@ -107,9 +104,10 @@ pub fn displayFrames(alloc: Allocator) ![]DisplayFrame {
                 }
             }
         }
-        try list.append(alloc, df);
+        buf[n] = df;
+        n += 1;
     }
-    return list.toOwnedSlice(alloc);
+    return buf[0..n];
 }
 
 /// The visible frame of the display whose UUID is `uuid`, searched in `frames`

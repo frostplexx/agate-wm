@@ -52,21 +52,21 @@ fn looksLikeUUID(s: []const u8) bool {
 }
 
 /// Every managed display in window-server order, each with its UUID and the
-/// Space currently visible on it. Mirrors yabai's display enumeration
-/// (koekeishiya/yabai, src/display_manager.c). Caller owns the slice.
-pub fn managedDisplays(alloc: Allocator, cid: sl.ConnectionID) ![]ManagedDisplay {
-    const displays = sl.SLSCopyManagedDisplaySpaces(cid) orelse return &.{};
+/// Space currently visible on it, written into `buf` (a caller-owned, typically
+/// stack, buffer — displays are few, so no heap allocation is needed on this
+/// per-flush path). Returns the filled prefix. Mirrors yabai's display
+/// enumeration (koekeishiya/yabai, src/display_manager.c).
+pub fn managedDisplays(buf: []ManagedDisplay, cid: sl.ConnectionID) []ManagedDisplay {
+    const displays = sl.SLSCopyManagedDisplaySpaces(cid) orelse return buf[0..0];
     defer foundation.CFRelease(displays);
 
-    const key_disp = try String.createUtf8("Display Identifier");
+    const key_disp = String.createUtf8("Display Identifier") catch return buf[0..0];
     defer key_disp.release();
 
-    var list: std.ArrayList(ManagedDisplay) = .empty;
-    errdefer list.deinit(alloc);
-
     const ndisp: usize = @intCast(c.CFArrayGetCount(displays));
+    var n: usize = 0;
     var di: usize = 0;
-    while (di < ndisp) : (di += 1) {
+    while (di < ndisp and n < buf.len) : (di += 1) {
         const ddict: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(displays, @intCast(di)));
         var md = ManagedDisplay{};
         if (c.CFDictionaryGetValue(ddict, key_disp.ref())) |v| {
@@ -85,9 +85,10 @@ pub fn managedDisplays(alloc: Allocator, cid: sl.ConnectionID) ![]ManagedDisplay
                 md.uuid_len = if (display.mainDisplayUUID(&md.uuid)) |slice| slice.len else 0;
             }
         }
-        try list.append(alloc, md);
+        buf[n] = md;
+        n += 1;
     }
-    return list.toOwnedSlice(alloc);
+    return buf[0..n];
 }
 
 /// The currently active Space id on the focused display (the one owning the
