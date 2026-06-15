@@ -70,6 +70,12 @@ pub const Rule = struct {
     /// in the background instead.
     // @doc SR|follow|boolean|true|Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
     follow: bool = true,
+    /// Float matched windows on appearance (yabai's `rule --add ... manage=off`):
+    /// they're tracked but lifted out of the tiling, keeping their own size/place.
+    /// Usable on its own (no `space`/`monitor`) to float an app wherever it opens,
+    /// or alongside a Space assignment to float it there.
+    // @doc SR|floating|boolean|true|Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
+    floating: bool = false,
 };
 
 pub const Config = struct {

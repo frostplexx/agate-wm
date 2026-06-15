@@ -30,11 +30,12 @@ fn regexMatches(re: regexp.Regex, s: []const u8) bool {
 
 /// The combined effect of every rule matching this window, or null if none
 /// does. Later rules override earlier ones, like yabai's effect combining.
-fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, monitor: usize, follow: bool } {
+fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, monitor: usize, follow: bool, floating: bool } {
     const cfg = ctx.config orelse return null;
     var space: usize = 0;
     var monitor: usize = 0;
     var follow = false;
+    var floating = false;
     for (cfg.rules.items) |r| {
         if (r.app) |re| {
             if (!regexMatches(re, app_name)) continue;
@@ -45,9 +46,11 @@ fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, m
         space = r.space;
         monitor = r.monitor;
         follow = r.follow;
+        floating = r.floating;
     }
-    if (space == 0) return null;
-    return .{ .space = space, .monitor = monitor, .follow = follow };
+    // Nothing actionable matched: no Space assignment and no float request.
+    if (space == 0 and !floating) return null;
+    return .{ .space = space, .monitor = monitor, .follow = follow, .floating = floating };
 }
 
 /// Apply assignment rules to a freshly tracked window: if a rule matches, send
@@ -58,6 +61,17 @@ fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, m
 pub fn applyRulesToLeaf(app: *state.AppState, leaf: *data.Con, title: []const u8) void {
     const win = if (leaf.window) |w| w else return;
     const eff = matchRules(win.owner, title) orelse return;
+
+    // Float lifts the window out of the tiling; set it first so the flag travels
+    // with the leaf if the rule also reassigns its Space below. With no Space
+    // assignment this is the rule's whole effect — the caller's re-flush of the
+    // active Space reflows the remaining tiles around the now-floating window.
+    if (eff.floating) {
+        leaf.window.?.floating = true;
+        std.debug.print("[rule] {s} #{d} -> floating\n", .{ win.owner, win.id });
+        if (eff.space == 0) return;
+    }
+
     const cur_ws = leaf.parent orelse return; // new leaves sit directly under their Workspace
     // A `monitor` makes `space` count on that display (1-based); else the
     // focused display, the original behaviour.

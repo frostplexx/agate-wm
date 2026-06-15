@@ -50,6 +50,7 @@
 ---@field space? integer 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
 ---@field monitor? integer 1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.
 ---@field follow? boolean Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
+---@field floating? boolean Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
 
 ---@class Agate
 agate = {}
@@ -139,7 +140,7 @@ function agate.focus_monitor(dir) end
 ---@param dir agate.MonitorDir Which display to move the window to.
 function agate.move_to_monitor(dir) end
 
----Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, or both. When several rules match a window, the last registered one wins.
+---Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) and/or floated when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, `floating = true`, or a combination — a rule must have at least one effect. When several rules match a window, the last registered one wins.
 ---@param rule agate.Rule Rule table (see agate.Rule).
 function agate.rule(rule) end
 

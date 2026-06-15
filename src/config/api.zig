@@ -513,7 +513,7 @@ fn agateMoveToMonitor(lua: *Lua) i32 {
 /// Register a window assignment rule (yabai's `yabai -m rule --add app=...
 /// space=N`). `app`/`title` are POSIX extended regexes; at least one must be
 /// given. Matched windows are sent to user space N when they appear.
-// @doc F|rule|Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, or both. When several rules match a window, the last registered one wins.
+// @doc F|rule|Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) and/or floated when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, `floating = true`, or a combination — a rule must have at least one effect. When several rules match a window, the last registered one wins.
 // @doc FP|rule|rule|agate.Rule|false|Rule table (see agate.Rule).
 fn agateRule(lua: *Lua) i32 {
     const cfg = ctx.config orelse return 0;
@@ -541,6 +541,10 @@ fn agateRule(lua: *Lua) i32 {
     if (lua.isBoolean(-1)) rule.follow = lua.toBoolean(-1);
     lua.pop(1);
 
+    _ = lua.getField(1, "floating");
+    if (lua.isBoolean(-1)) rule.floating = lua.toBoolean(-1);
+    lua.pop(1);
+
     _ = lua.getField(1, "app");
     if (lua.isString(-1)) {
         const pat = lua.toString(-1) catch "";
@@ -561,8 +565,8 @@ fn agateRule(lua: *Lua) i32 {
     }
     lua.pop(1);
 
-    if (rule.space == 0 or (rule.app == null and rule.title == null)) {
-        std.debug.print("[config] rule needs a space or monitor, and an app or title matcher; ignored\n", .{});
+    if ((rule.app == null and rule.title == null) or (rule.space == 0 and !rule.floating)) {
+        std.debug.print("[config] rule needs an app or title matcher, and a space/monitor or floating=true; ignored\n", .{});
         rules.freeRule(rule);
         return 0;
     }
