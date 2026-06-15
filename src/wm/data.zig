@@ -118,4 +118,13 @@ pub const Con = struct {
     /// order is the tiling order: index 0 is leftmost (H_SPLIT) or topmost
     /// (V_SPLIT); appending a new leaf places it at the trailing edge.
     children: std.ArrayListUnmanaged(*Con) = .{ .items = &.{}, .capacity = 0 },
+
+    /// Count the leaf (real-window) cons at or under this Con — i.e. the windows
+    /// it holds. Used by the layout pass (smart gaps) and the IPC reporters.
+    pub fn leafCount(self: *const Con) usize {
+        if (self.window != null) return 1;
+        var total: usize = 0;
+        for (self.children.items) |child| total += child.leafCount();
+        return total;
+    }
 };

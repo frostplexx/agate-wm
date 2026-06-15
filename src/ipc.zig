@@ -210,12 +210,6 @@ fn spaceTypeName(t: i64) []const u8 {
     };
 }
 
-fn leafCount(con: *data.Con) usize {
-    if (con.window != null) return 1;
-    var total: usize = 0;
-    for (con.children.items) |child| total += leafCount(child);
-    return total;
-}
 
 fn writeJsonStr(w: *std.Io.Writer, s: []const u8) !void {
     for (s) |ch| switch (ch) {
@@ -357,7 +351,7 @@ fn writeWorkspaces(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
         for (mon.children.items, 1..) |ws, wi| {
             if (ws.con_type != .Workspace) continue;
             const visible = ws.id == cur and cur != 0;
-            const wins = leafCount(ws);
+            const wins = ws.leafCount();
             if (json) {
                 if (!first) try w.writeAll(",");
                 first = false;

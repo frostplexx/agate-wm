@@ -6,19 +6,6 @@
 const std = @import("std");
 const objc = @import("objc");
 
-/// Copy the localized name of the frontmost application into `buf`, returning
-/// the written slice (or null if unavailable / it didn't fit).
-pub fn frontmostAppName(buf: []u8) ?[]const u8 {
-    const NSWorkspace = objc.getClass("NSWorkspace") orelse return null;
-    const shared = NSWorkspace.msgSend(objc.Object, "sharedWorkspace", .{});
-    const app = shared.msgSend(objc.Object, "frontmostApplication", .{});
-    if (app.value == null) return null;
-
-    const name = app.msgSend(objc.Object, "localizedName", .{}); // NSString*
-    if (name.value == null) return null;
-
-    return nsStringToBuf(name, buf);
-}
 
 /// The pids of all running "regular" applications — those with a normal
 /// activation policy (Dock icon, can own standard windows). Excludes

@@ -828,14 +828,15 @@ fn onMouseUp(mgr: *Manager, drop: c.CGPoint) void {
     // A displaced window whose centre now sits on another display is a
     // cross-monitor drag — handle that first (checked for both the resize and
     // move classifications, since a drop onto a smaller display can resize too).
+    const mons = mbuf[0..nmon];
     if (scan.resized) |leaf| {
-        if (moveDraggedAcrossMonitors(app, leaf, drop)) return;
+        if (moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
         _ = tree.applyManualResize(leaf, scan.resized_frame);
         tree.flushActive(app);
         return;
     }
     if (scan.moved) |leaf| {
-        if (moveDraggedAcrossMonitors(app, leaf, drop)) return;
+        if (moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
         _ = tree.applyManualMove(leaf, scan.moved_frame);
         tree.flushActive(app);
     }
@@ -849,13 +850,11 @@ fn onMouseUp(mgr: *Manager, drop: c.CGPoint) void {
 /// mouse-up still resolves to the display the user released over.
 fn moveDraggedAcrossMonitors(
     app: *state.AppState,
+    mons: []const tree.MonitorInfo,
     leaf: *data.Con,
     drop: c.CGPoint,
 ) bool {
-    var buf: [focus.max_monitors]tree.MonitorInfo = undefined;
-    const count = tree.collectMonitors(app, &buf);
-    if (count < 2) return false;
-    const mons = buf[0..count];
+    if (mons.len < 2) return false;
 
     const src_mon = tree.monitorOf(leaf);
     const src_ws = tree.workspaceOf(leaf);

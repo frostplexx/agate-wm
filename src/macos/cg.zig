@@ -12,8 +12,6 @@ pub const WindowListOption = u32;
 /// All windows in the session, including those on other Spaces / off-screen.
 pub const kCGWindowListOptionAll: WindowListOption = 0;
 pub const kCGWindowListOptionOnScreenOnly: WindowListOption = 1 << 0;
-/// With `relativeToWindow` set to a window id, return just that window's info.
-pub const kCGWindowListOptionIncludingWindow: WindowListOption = 1 << 3;
 pub const kCGWindowListExcludeDesktopElements: WindowListOption = 1 << 4;
 
 pub const kCGNullWindowID: WindowID = 0;

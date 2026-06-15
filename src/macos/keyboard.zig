@@ -12,7 +12,6 @@
 //! *current* layout, via Carbon's `UCKeyTranslate`. `parse.lookupKeycode`
 //! consults it for printable keys (falling back to the US table when a character
 //! isn't on the layout or the lookup is unavailable, e.g. in unit tests).
-const std = @import("std");
 const c = @import("c.zig").c;
 
 // Carbon / HIToolbox Text Input Sources SPI. Hand-declared as `extern` (the

@@ -1,4 +1,3 @@
-const std = @import("std");
 const macos = @import("macos");
 const data = @import("../data.zig");
 const window = @import("../window.zig");

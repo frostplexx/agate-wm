@@ -235,11 +235,6 @@ fn averageChildRatio(con: *data.Con) f64 {
     return total / @as(f64, @floatFromInt(count));
 }
 
-/// Append a new leaf window Con built from CoreGraphics metadata. Returns the leaf.
-pub fn addWindowLeaf(alloc: Allocator, ws: *data.Con, info: macos.window_list.WindowInfo) !*data.Con {
-    return addLeaf(alloc, ws, window.init(info));
-}
-
 /// Remove the leaf holding window `wid` from anywhere under `con`. Releases the
 /// window's AX element. Returns true if a leaf was removed.
 pub fn removeWindow(con: *data.Con, wid: u64) bool {
@@ -656,15 +651,14 @@ pub fn swapLeaf(leaf: *data.Con, forward: bool) bool {
     return true;
 }
 
-/// Adjust `leaf`'s main-axis ratio by `delta` pixels (positive = grow, negative
-/// = shrink), transferring the difference to the neighbour on the trailing edge.
-/// Pins every sibling's ratio to its current extent first so the units are
-/// consistent with `applyManualResize`. Returns true if the tree changed.
-pub fn resizeLeaf(leaf: *data.Con, grow: bool, delta: f64) bool {
+/// Grow `leaf` by `delta` pixels along its parent's split axis, transferring the
+/// difference to `neighbor`. Pins every sibling's ratio to its current extent
+/// first so the units are consistent (points), matching `applyManualResize`.
+/// Returns true if the tree changed; false if the parent isn't a split.
+fn transferResize(leaf: *data.Con, neighbor: *data.Con, delta: f64) bool {
     const parent = leaf.parent orelse return false;
     if (parent.layout != .H_SPLIT and parent.layout != .V_SPLIT) return false;
     const horizontal = parent.layout == .H_SPLIT;
-    const neighbor = adjacentSibling(leaf, grow) orelse return false;
     const win = leaf.window orelse return false;
     pinExtents(parent, horizontal);
     const cur = if (horizontal) win.bounds.size.width else win.bounds.size.height;
@@ -673,25 +667,25 @@ pub fn resizeLeaf(leaf: *data.Con, grow: bool, delta: f64) bool {
     return true;
 }
 
+/// Adjust `leaf`'s main-axis ratio by `delta` pixels (positive = grow, negative
+/// = shrink), transferring the difference to the neighbour on the `grow` edge.
+/// Returns true if the tree changed (no-op without a neighbour there).
+pub fn resizeLeaf(leaf: *data.Con, grow: bool, delta: f64) bool {
+    if (leaf.parent == null or leaf.window == null) return false;
+    const neighbor = adjacentSibling(leaf, grow) orelse return false;
+    return transferResize(leaf, neighbor, delta);
+}
+
 /// Resize `leaf` along its parent's split axis *without* a direction (AeroSpace's
 /// `resize smart`): grow the focused window when `delta > 0`, shrink it when
 /// `delta < 0`, transferring the difference to whichever neighbour exists —
 /// preferring the next sibling, falling back to the previous. Because the axis
 /// follows the container, the same key always makes the focused window
 /// bigger/smaller regardless of which slot it occupies (so an edge window, with
-/// no neighbour on one side, still resizes). Pins sibling ratios to their
-/// current extents first, like `resizeLeaf`. Returns true if the tree changed.
+/// no neighbour on one side, still resizes). Returns true if the tree changed.
 pub fn resizeLeafSmart(leaf: *data.Con, delta: f64) bool {
-    const parent = leaf.parent orelse return false;
-    if (parent.layout != .H_SPLIT and parent.layout != .V_SPLIT) return false;
-    const horizontal = parent.layout == .H_SPLIT;
     const neighbor = adjacentSibling(leaf, true) orelse adjacentSibling(leaf, false) orelse return false;
-    const win = leaf.window orelse return false;
-    pinExtents(parent, horizontal);
-    const cur = if (horizontal) win.bounds.size.width else win.bounds.size.height;
-    leaf.ratio = @max(cur + delta, min_extent);
-    neighbor.ratio = @max(neighbor.ratio - delta, min_extent);
-    return true;
+    return transferResize(leaf, neighbor, delta);
 }
 
 // ---------------------------------------------------------------------------

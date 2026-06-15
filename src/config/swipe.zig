@@ -2,7 +2,6 @@
 //! that tracks an in-progress swipe and the dispatch of a committed swipe to its
 //! bound action. Runs on the main run loop (see `wm/gestures.zig` for the
 //! cross-thread marshalling). Bindings are registered in `api.agateGesture`.
-const std = @import("std");
 const macos = @import("macos");
 const gestures = @import("../wm/gestures.zig");
 const types = @import("types.zig");

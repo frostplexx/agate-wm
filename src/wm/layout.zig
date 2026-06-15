@@ -32,15 +32,6 @@ pub var smart_gaps: bool = false;
 /// animator's fixed buffers).
 var zoom_area: Rect = undefined;
 
-/// Count the leaf (real-window) cons under `con`. Used by smart gaps to detect
-/// the "only one window" workspace.
-fn leafCount(con: *data.Con) usize {
-    if (con.window != null) return 1;
-    var total: usize = 0;
-    for (con.children.items) |child| total += leafCount(child);
-    return total;
-}
-
 /// Whether `con` is a floating leaf — lifted out of the tiling layout (see
 /// `data.Window.floating`). Such a leaf is skipped by the split/stack math: it
 /// keeps its own frame on top while its siblings tile as if it weren't there.
@@ -92,7 +83,7 @@ fn animateSink(leaf: *data.Con, area: Rect) void {
 pub fn assignFrames(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
     // Smart gaps: a lone tiled window fills the display (inner gaps are moot with
     // no siblings, so only the outer inset is suppressed).
-    const outer: f64 = if (smart_gaps and leafCount(con) <= 1) 0 else @floatFromInt(con.gaps.outer);
+    const outer: f64 = if (smart_gaps and con.leafCount() <= 1) 0 else @floatFromInt(con.gaps.outer);
     const top = inset(area, outer);
     zoom_area = top; // a zoom-fullscreen leaf fills the whole space (see `place`)
     layoutChildren(con, top, sink);

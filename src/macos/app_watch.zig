@@ -14,7 +14,6 @@
 //! `[NSWorkspace sharedWorkspace].notificationCenter`. We have no .m file, so the
 //! class is built at runtime through the objc runtime bridge (mitchellh/zig-objc):
 //! `allocateClassPair` + `addMethod` + `registerClassPair`.
-const std = @import("std");
 const objc = @import("objc");
 
 /// What happened to an application. Explicit tag type so it can cross the C ABI

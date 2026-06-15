@@ -8,7 +8,6 @@
 //! Control and the window cycle — pure chrome, never managed (the WM's own
 //! windows are never tracked: agate isn't a "regular" app, so its pid is
 //! never observed, and the window's level excludes it from tree builds).
-const std = @import("std");
 const objc = @import("objc");
 const c = @import("c.zig").c;
 

@@ -59,24 +59,6 @@ pub fn list(alloc: Allocator, option: cg.WindowListOption) ![]WindowInfo {
     return out[0..count];
 }
 
-/// Metadata for a single window id (owner/pid/bounds), via CoreGraphics. The
-/// `owner` is allocated with `alloc`. Null if the window no longer exists.
-pub fn infoForId(alloc: Allocator, wid: u32) ?WindowInfo {
-    const arr = cg.CGWindowListCopyWindowInfo(cg.kCGWindowListOptionIncludingWindow, wid) orelse return null;
-    defer foundation.CFRelease(arr);
-    if (c.CFArrayGetCount(arr) == 0) return null;
-
-    const dict: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(arr, 0));
-    const owner = dictString(dict, cg.kCGWindowOwnerName, alloc) orelse (alloc.dupe(u8, "") catch return null);
-    return .{
-        .id = @intCast(foundation.dictI64(dict, cg.kCGWindowNumber) orelse 0),
-        .pid = @intCast(foundation.dictI64(dict, cg.kCGWindowOwnerPID) orelse 0),
-        .layer = @intCast(foundation.dictI64(dict, cg.kCGWindowLayer) orelse 0),
-        .bounds = dictBounds(dict),
-        .owner = owner,
-    };
-}
-
 fn dictString(dict: c.CFDictionaryRef, key: c.CFStringRef, alloc: Allocator) ?[]const u8 {
     const v = c.CFDictionaryGetValue(dict, key) orelse return null;
     const s = foundation.String.fromRef(@ptrCast(v)) orelse return null;

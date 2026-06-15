@@ -1,5 +1,4 @@
 const std = @import("std");
-const macos = @import("macos");
 const state = @import("../state.zig");
 const data = @import("data.zig");
 const tree = @import("tree.zig");

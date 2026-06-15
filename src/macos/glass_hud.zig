@@ -11,7 +11,6 @@
 //! on it. Everything is driven through the Obj-C runtime, the same strategy as
 //! `overlay.zig`; AppKit is main-thread-only, so every entry point here must be
 //! called from the run loop (`wm/gestures.zig` marshals for us).
-const std = @import("std");
 const objc = @import("objc");
 const c = @import("c.zig").c;
 
