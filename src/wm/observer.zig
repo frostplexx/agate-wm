@@ -698,7 +698,11 @@ fn mouseTap(
             mgr.dragging = true;
             schedulePreviewUpdate(mgr);
         },
-        macos.event_tap.kCGEventLeftMouseUp => onMouseUp(mgr),
+        // Capture the cursor's drop location from the event itself. It's the
+        // authoritative "where did you let go" point — unlike the dragged
+        // window's AX frame, which lags behind a fast flick and can still read a
+        // mid-drag position at mouse-up, defeating the cross-monitor hit-test.
+        macos.event_tap.kCGEventLeftMouseUp => onMouseUp(mgr, macos.event_tap.CGEventGetLocation(event)),
         else => {},
     }
     return event; // listen-only: pass the event through unchanged
@@ -780,7 +784,7 @@ fn scanChangedWindows(con: *data.Con, s: *DragScan) void {
 /// resize or a move, let it influence the tree, and re-flush once. Scanning for
 /// the changed window — rather than hit-testing the cursor at mouse-down — avoids
 /// grabbing the wrong window when the press lands on a shared edge or in a gap.
-fn onMouseUp(mgr: *Manager) void {
+fn onMouseUp(mgr: *Manager, drop: c.CGPoint) void {
     if (!mgr.dragging) return; // a plain click, not a drag
     mgr.dragging = false;
     mgr.drag_wid = 0;
@@ -811,25 +815,28 @@ fn onMouseUp(mgr: *Manager) void {
     // cross-monitor drag — handle that first (checked for both the resize and
     // move classifications, since a drop onto a smaller display can resize too).
     if (scan.resized) |leaf| {
-        if (moveDraggedAcrossMonitors(app, leaf, scan.resized_frame)) return;
+        if (moveDraggedAcrossMonitors(app, leaf, drop)) return;
         _ = tree.applyManualResize(leaf, scan.resized_frame);
         tree.flushActive(app);
         return;
     }
     if (scan.moved) |leaf| {
-        if (moveDraggedAcrossMonitors(app, leaf, scan.moved_frame)) return;
+        if (moveDraggedAcrossMonitors(app, leaf, drop)) return;
         _ = tree.applyManualMove(leaf, scan.moved_frame);
         tree.flushActive(app);
     }
 }
 
-/// If the dropped window's centre landed on a display other than its own,
-/// re-home its leaf to that display's visible workspace, tile both displays,
-/// and follow focus to it. Returns true if a cross-monitor move happened.
+/// If the window was dropped (cursor at `drop`, global top-left coords) on a
+/// display other than its own, re-home its leaf to that display's visible
+/// workspace, tile both displays, and follow focus to it. Returns true if a
+/// cross-monitor move happened. The drop *cursor* — not the window's AX centre —
+/// drives the hit-test, so a fast flick whose window frame hasn't settled by
+/// mouse-up still resolves to the display the user released over.
 fn moveDraggedAcrossMonitors(
     app: *state.AppState,
     leaf: *data.Con,
-    frame: macos.window_list.Rect,
+    drop: c.CGPoint,
 ) bool {
     var buf: [focus.max_monitors]tree.MonitorInfo = undefined;
     const count = tree.collectMonitors(app, &buf);
@@ -838,8 +845,8 @@ fn moveDraggedAcrossMonitors(
 
     const src_mon = tree.monitorOf(leaf);
     const src_ws = tree.workspaceOf(leaf);
-    const cx = frame.origin.x + frame.size.width / 2;
-    const cy = frame.origin.y + frame.size.height / 2;
+    const cx = drop.x;
+    const cy = drop.y;
 
     for (mons) |m| {
         if (src_mon != null and m.con == src_mon.?) continue;
