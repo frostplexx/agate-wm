@@ -1247,6 +1247,13 @@ fn followActivation(mgr: *Manager, pid: i32) void {
     defer focused.release();
     const wid = focused.windowId() orelse return;
 
+    // Only follow windows agate actually manages. Clicking an unmanaged window
+    // — a browser Picture-in-Picture overlay, the macOS password/security modal,
+    // and other windows `shouldTile` rejected at creation — activates its app but
+    // must not yank the user to another Space (these float and can report a
+    // foreign space id). If it's not in the tree, we don't manage it: stay put.
+    if (!tree.hasWindow(app.tree orelse return, wid)) return;
+
     // An assignment rule just sent this window to its Space; the activation
     // we're handling is the app's own launch activation, not the user asking to
     // go there. The rule already handled the user's view (its own follow switch,
