@@ -1,11 +1,11 @@
-//! Reads `// @doc` annotations from src/config/lua.zig and emits:
+//! Reads `// @doc` annotations from every `.zig` file in src/config/ and emits:
 //!   * Configuration.md  — settings reference for the GitHub wiki (installed to
 //!                         zig-out, not committed; published by
 //!                         `just publish-docs`)
 //!   * types/agate.lua   — LuaCATS type stub for lua-language-server (committed)
 //!
 //! Invoked by `zig build docs` (see build.zig). Never edit this file when
-//! adding settings — add `// @doc` lines in lua.zig instead.
+//! adding settings — add `// @doc` lines next to the code in src/config/.
 //!
 //! Annotation format (use | as field separator; never use | inside a field
 //! value except in FP type names, which are parsed from both ends):
@@ -286,11 +286,41 @@ fn renderLua(w: anytype, d: ApiData) !void {
 // Entry point
 // ---------------------------------------------------------------------------
 
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// Concatenate every `.zig` file in `dir_path` (sorted by name for determinism)
+/// so the `@doc` annotations can live next to their code across the config
+/// split, not just in one file. Per-file content stays contiguous, so an alias's
+/// `A|`/`AV|` lines (which must appear in order) are never interleaved.
+fn readConfigDir(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) ![]u8 {
+    var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        try names.append(alloc, try alloc.dupe(u8, entry.name)); // name buffer is reused — copy now
+    }
+    std.mem.sort([]const u8, names.items, {}, lessThanStr);
+
+    var src: std.ArrayList(u8) = .empty;
+    for (names.items) |name| {
+        const contents = try dir.readFileAlloc(io, name, alloc, .unlimited);
+        try src.appendSlice(alloc, contents);
+        try src.append(alloc, '\n');
+    }
+    return src.items;
+}
+
 pub fn main(init: std.process.Init) !void {
-    const usage = "usage: gen_docs <lua.zig> <out.md> <out.lua>\n";
+    const usage = "usage: gen_docs <config_dir> <out.md> <out.lua>\n";
     var argv = std.process.Args.iterate(init.minimal.args);
     _ = argv.next(); // exe path
-    const lua_path = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
+    const dir_path = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
     const md_path  = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
     const lua_path2 = argv.next() orelse { std.debug.print("{s}", .{usage}); std.process.exit(1); };
 
@@ -299,7 +329,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = arena.allocator();
 
     const cwd = std.Io.Dir.cwd();
-    const src = try cwd.readFileAlloc(init.io, lua_path, alloc, .unlimited);
+    const src = try readConfigDir(init.io, alloc, dir_path);
     const data = try parse(alloc, src);
 
     var md = std.Io.Writer.Allocating.init(alloc);

@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_macos_tests.step);
 
     // `zig build docs` — compile tools/gen_docs.zig, run it against
-    // src/config/lua.zig (parsing its `// @doc` annotations), and emit:
+    // src/config/ (parsing the `// @doc` annotations across its files), and emit:
     //   * types/agate.lua — LuaCATS type stub, copied into the source tree
     //     (committed; editors read it for completion).
     //   * zig-out/Configuration.md — settings reference for the GitHub wiki.
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     const run_gen_docs = b.addRunArtifact(gen_docs_exe);
-    _ = run_gen_docs.addFileArg(b.path("src/config/lua.zig")); // argv[1]
+    run_gen_docs.addDirectoryArg(b.path("src/config")); // argv[1]
     const md_out = run_gen_docs.addOutputFileArg("configuration.md"); // argv[2]
     const lua_out = run_gen_docs.addOutputFileArg("agate.lua");       // argv[3]
 
