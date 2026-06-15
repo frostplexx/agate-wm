@@ -97,6 +97,7 @@ pub fn handleKey(keycode: u16, raw_flags: u64) bool {
 // String commands accepted as the second argument of `agate.bind`.
 // @doc C|move <dir>|Same as `agate.move(dir)`.
 // @doc C|focus <dir>|Same as `agate.focus(dir)`.
+// @doc C|resize <smart\|dir> [amount]|Same as `agate.resize(target, amount)`. `resize smart 50` grows the focused window along its container axis (negative shrinks); `resize <dir> [amount]` grows toward an edge. Amount defaults to 50.
 // @doc C|cycle <next|prev>|Same as `agate.cycle(dir)`.
 // @doc C|layout <mode>|Same as `agate.layout(mode)`.
 // @doc C|space <n>|Same as `agate.space(n)`.
@@ -128,6 +129,20 @@ pub fn executeCommand(cmd: []const u8) void {
     } else if (std.mem.startsWith(u8, cmd, "focus ")) {
         const dir = parse.parseDir(cmd[6..]) orelse return;
         _ = focus.focusDirection(app, dir);
+    } else if (std.mem.startsWith(u8, cmd, "resize ")) {
+        // "resize <smart|dir> [amount]" — amount defaults to 50, may be negative
+        // for "smart" (shrink). Split on the first space; the rest is the amount.
+        const rest = cmd[7..];
+        const sp = std.mem.indexOfScalar(u8, rest, ' ');
+        const target = if (sp) |i| rest[0..i] else rest;
+        const amount: f64 = if (sp) |i| (std.fmt.parseFloat(f64, rest[i + 1 ..]) catch 50.0) else 50.0;
+        const leaf = focus.currentFocusedLeaf(app) orelse return;
+        if (std.mem.eql(u8, target, "smart")) {
+            if (tree.resizeLeafSmart(leaf, amount)) tree.flushActive(app);
+        } else if (parse.parseDir(target)) |dir| {
+            const grow = dir == .right or dir == .down;
+            if (tree.resizeLeaf(leaf, grow, amount)) tree.flushActive(app);
+        }
     } else if (std.mem.startsWith(u8, cmd, "cycle ")) {
         const arg = cmd[6..];
         const forward = !(std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous") or

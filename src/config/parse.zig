@@ -17,7 +17,45 @@ const MOD_CMD = types.MOD_CMD;
 // ---------------------------------------------------------------------------
 
 const KeyEntry = struct { name: []const u8, code: u16 };
-const key_table = [_]KeyEntry{
+
+/// Layout-independent keys: navigation, editing, the keypad, and the function
+/// keys often remapped to a "hyper" trigger. These occupy the same physical
+/// `kVK_*` keycode on every keyboard layout, so they match by name directly.
+const special_keys = [_]KeyEntry{
+    .{ .name = "return", .code = 36 }, .{ .name = "tab", .code = 48 },
+    .{ .name = "space", .code = 49 },  .{ .name = "delete", .code = 51 },
+    .{ .name = "escape", .code = 53 },
+    .{ .name = "left", .code = 123 },  .{ .name = "right", .code = 124 },
+    .{ .name = "down", .code = 125 },  .{ .name = "up", .code = 126 },
+    // Function keys commonly used as a remapped "hyper" trigger.
+    .{ .name = "f13", .code = 105 }, .{ .name = "f14", .code = 107 },
+    .{ .name = "f15", .code = 113 }, .{ .name = "f16", .code = 106 },
+    .{ .name = "f17", .code = 64 },  .{ .name = "f18", .code = 79 },
+    .{ .name = "f19", .code = 80 },  .{ .name = "f20", .code = 90 },
+    // Keypad keys (numeric pad) — distinct from the main row, so a binding can
+    // target them explicitly (e.g. `hyper+kp_plus`). `kp_`/`keypad_` aliases.
+    .{ .name = "kp_0", .code = 82 }, .{ .name = "keypad_0", .code = 82 },
+    .{ .name = "kp_1", .code = 83 }, .{ .name = "keypad_1", .code = 83 },
+    .{ .name = "kp_2", .code = 84 }, .{ .name = "keypad_2", .code = 84 },
+    .{ .name = "kp_3", .code = 85 }, .{ .name = "keypad_3", .code = 85 },
+    .{ .name = "kp_4", .code = 86 }, .{ .name = "keypad_4", .code = 86 },
+    .{ .name = "kp_5", .code = 87 }, .{ .name = "keypad_5", .code = 87 },
+    .{ .name = "kp_6", .code = 88 }, .{ .name = "keypad_6", .code = 88 },
+    .{ .name = "kp_7", .code = 89 }, .{ .name = "keypad_7", .code = 89 },
+    .{ .name = "kp_8", .code = 91 }, .{ .name = "keypad_8", .code = 91 },
+    .{ .name = "kp_9", .code = 92 }, .{ .name = "keypad_9", .code = 92 },
+    .{ .name = "kp_decimal", .code = 65 }, .{ .name = "kp_multiply", .code = 67 },
+    .{ .name = "kp_plus", .code = 69 },    .{ .name = "keypad_plus", .code = 69 },
+    .{ .name = "kp_clear", .code = 71 },   .{ .name = "kp_divide", .code = 75 },
+    .{ .name = "kp_enter", .code = 76 },   .{ .name = "kp_minus", .code = 78 },
+    .{ .name = "keypad_minus", .code = 78 }, .{ .name = "kp_equals", .code = 81 },
+};
+
+/// Printable keys at their US ANSI positions — the fallback when the active
+/// layout can't resolve the character (no layout map in unit tests, or a
+/// character the layout doesn't type). `plus` maps to the `=`/`+` key so a
+/// `hyper+plus` binding still registers on US layouts.
+const us_printable_keys = [_]KeyEntry{
     .{ .name = "a", .code = 0 },    .{ .name = "s", .code = 1 },
     .{ .name = "d", .code = 2 },    .{ .name = "f", .code = 3 },
     .{ .name = "h", .code = 4 },    .{ .name = "g", .code = 5 },
@@ -30,29 +68,53 @@ const key_table = [_]KeyEntry{
     .{ .name = "2", .code = 19 },   .{ .name = "3", .code = 20 },
     .{ .name = "4", .code = 21 },   .{ .name = "6", .code = 22 },
     .{ .name = "5", .code = 23 },   .{ .name = "equal", .code = 24 },
+    .{ .name = "plus", .code = 24 },
     .{ .name = "9", .code = 25 },   .{ .name = "7", .code = 26 },
     .{ .name = "minus", .code = 27 }, .{ .name = "8", .code = 28 },
     .{ .name = "0", .code = 29 },   .{ .name = "o", .code = 31 },
     .{ .name = "u", .code = 32 },   .{ .name = "i", .code = 34 },
-    .{ .name = "p", .code = 35 },   .{ .name = "return", .code = 36 },
-    .{ .name = "l", .code = 37 },   .{ .name = "j", .code = 38 },
-    .{ .name = "k", .code = 40 },   .{ .name = "n", .code = 45 },
-    .{ .name = "m", .code = 46 },   .{ .name = "tab", .code = 48 },
-    .{ .name = "space", .code = 49 }, .{ .name = "grave", .code = 50 },
-    .{ .name = "delete", .code = 51 }, .{ .name = "escape", .code = 53 },
-    .{ .name = "comma", .code = 43 }, .{ .name = "period", .code = 47 },
-    .{ .name = "slash", .code = 44 }, .{ .name = "semicolon", .code = 41 },
-    .{ .name = "left", .code = 123 }, .{ .name = "right", .code = 124 },
-    .{ .name = "down", .code = 125 }, .{ .name = "up", .code = 126 },
-    // Function keys commonly used as a remapped "hyper" trigger.
-    .{ .name = "f13", .code = 105 }, .{ .name = "f14", .code = 107 },
-    .{ .name = "f15", .code = 113 }, .{ .name = "f16", .code = 106 },
-    .{ .name = "f17", .code = 64 },  .{ .name = "f18", .code = 79 },
-    .{ .name = "f19", .code = 80 },  .{ .name = "f20", .code = 90 },
+    .{ .name = "p", .code = 35 },   .{ .name = "l", .code = 37 },
+    .{ .name = "j", .code = 38 },   .{ .name = "k", .code = 40 },
+    .{ .name = "n", .code = 45 },   .{ .name = "m", .code = 46 },
+    .{ .name = "grave", .code = 50 }, .{ .name = "comma", .code = 43 },
+    .{ .name = "period", .code = 47 }, .{ .name = "slash", .code = 44 },
+    .{ .name = "semicolon", .code = 41 },
 };
 
+/// Optional layout-aware resolver, installed at startup
+/// (`macos.keyboard.keycodeForChar` via `api.register`). Left null in unit
+/// tests so key parsing stays pure and deterministic (US fallback only).
+pub var charToKeycode: ?*const fn (u8) ?u16 = null;
+
+/// The ASCII character a printable key *name* stands for, so it can be resolved
+/// against the active layout. Single-character names are themselves; the rest
+/// are punctuation aliases. Special keys are deliberately absent — they're
+/// layout-independent and matched by `special_keys`.
+fn nameToChar(name: []const u8) ?u8 {
+    if (name.len == 1) return name[0];
+    const eql = std.mem.eql;
+    if (eql(u8, name, "minus")) return '-';
+    if (eql(u8, name, "plus")) return '+';
+    if (eql(u8, name, "equal")) return '=';
+    if (eql(u8, name, "comma")) return ',';
+    if (eql(u8, name, "period")) return '.';
+    if (eql(u8, name, "slash")) return '/';
+    if (eql(u8, name, "semicolon")) return ';';
+    if (eql(u8, name, "grave")) return '`';
+    return null;
+}
+
+/// Resolve a key name to its hardware virtual keycode. Layout-independent keys
+/// (`special_keys`) match by name; printable keys resolve to the physical key
+/// that types that character on the *active* keyboard layout — so `minus`,
+/// `plus`, `z`, … land correctly on German/AZERTY/Dvorak/… keyboards — and fall
+/// back to the US ANSI positions when the layout map is unavailable.
 pub fn lookupKeycode(name: []const u8) ?u16 {
-    for (key_table) |e| if (std.mem.eql(u8, e.name, name)) return e.code;
+    for (special_keys) |e| if (std.mem.eql(u8, e.name, name)) return e.code;
+    if (nameToChar(name)) |ch| {
+        if (charToKeycode) |f| if (f(ch)) |code| return code;
+    }
+    for (us_printable_keys) |e| if (std.mem.eql(u8, e.name, name)) return e.code;
     return null;
 }
 
@@ -186,6 +248,39 @@ test "parseKeySpec expands hyper to the configured modifier set" {
 test "parseKeySpec rejects unknown or missing keys" {
     try testing.expect(parseKeySpec("ctrl+notakey", 0) == null);
     try testing.expect(parseKeySpec("ctrl+shift", 0) == null); // modifiers only
+}
+
+test "lookupKeycode: US fallback for plus/minus and the keypad" {
+    try testing.expectEqual(@as(u16, 27), lookupKeycode("minus").?);
+    try testing.expectEqual(@as(u16, 24), lookupKeycode("equal").?);
+    try testing.expectEqual(@as(u16, 24), lookupKeycode("plus").?); // alias of the =/+ key
+    try testing.expectEqual(@as(u16, 69), lookupKeycode("kp_plus").?);
+    try testing.expectEqual(@as(u16, 78), lookupKeycode("keypad_minus").?);
+    try testing.expectEqual(@as(u16, 49), lookupKeycode("space").?);
+    try testing.expect(lookupKeycode("nope") == null);
+}
+
+test "lookupKeycode resolves printable keys against the active layout when set" {
+    // Stand-in layout map: "+" lives on an unshifted key (code 200), as on a
+    // German keyboard — proving the layout hook wins over the US fallback for
+    // printable keys, while special keys stay layout-independent.
+    const Stub = struct {
+        fn f(ch: u8) ?u16 {
+            return switch (ch) {
+                '+' => 200,
+                '-' => 201,
+                else => null, // not on this "layout" → US fallback
+            };
+        }
+    };
+    charToKeycode = &Stub.f;
+    defer charToKeycode = null;
+
+    try testing.expectEqual(@as(u16, 200), lookupKeycode("plus").?); // layout, not 24
+    try testing.expectEqual(@as(u16, 201), lookupKeycode("minus").?); // layout, not 27
+    try testing.expectEqual(@as(u16, 24), lookupKeycode("equal").?); // '=' absent → US fallback
+    try testing.expectEqual(@as(u16, 49), lookupKeycode("space").?); // special: never via layout
+    try testing.expectEqual(@as(u16, 69), lookupKeycode("kp_plus").?); // keypad stays fixed
 }
 
 test "layoutFromName maps names and synonyms" {

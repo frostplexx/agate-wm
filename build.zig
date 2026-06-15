@@ -124,6 +124,9 @@ fn linkMacOSFrameworks(b: *std.Build, m: *std.Build.Module) !void {
     m.linkFramework("CoreGraphics", .{});
     m.linkFramework("ApplicationServices", .{});
     m.linkFramework("AppKit", .{});
+    // Carbon: legacy umbrella, linked for HIToolbox's UCKeyTranslate / Text Input
+    // Sources SPI used by keyboard.zig to resolve keys on the active layout.
+    m.linkFramework("Carbon", .{});
     // SkyLight: private window-server framework; API hand-declared in skylight.zig.
     m.linkFramework("SkyLight", .{});
 }

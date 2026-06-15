@@ -37,6 +37,8 @@ pub const event_tap = @import("event_tap.zig");
 pub const app_watch = @import("app_watch.zig");
 /// Raw trackpad touches via the private MultitouchSupport framework (dlopen'd).
 pub const multitouch = @import("multitouch.zig");
+/// Active-keyboard-layout key resolution (Carbon UCKeyTranslate).
+pub const keyboard = @import("keyboard.zig");
 /// Menu-bar Space indicator (NSStatusItem via the Obj-C runtime).
 pub const statusbar = @import("statusbar.zig");
 /// Drag-preview overlay window (borderless translucent NSWindow).

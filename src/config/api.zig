@@ -437,15 +437,20 @@ fn agateSpacePrev(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|resize|Resize the focused tile, transferring the delta to its neighbour.
-// @doc FP|resize|dir|agate.Direction|false|Edge to grow toward.
-// @doc FP|resize|amount|number|true|Pixels to resize by. Default 50.
+// @doc F|resize|Resize the focused tile, transferring the delta to its neighbour. Pass `"smart"` (recommended) to resize along the focused window's container axis without picking an edge: a positive `amount` grows it, a negative one shrinks it, taking from whichever neighbour exists — so the same binding always enlarges/shrinks the focused window wherever it sits. A direction (`left`/`right`/`up`/`down`) instead grows the window toward that edge, by stealing from the neighbour there.
+// @doc FP|resize|target|agate.Direction|string|false|`"smart"` to resize along the container axis, or an edge (`left`/`right`/`up`/`down`) to grow toward.
+// @doc FP|resize|amount|number|true|Pixels to resize by. Default 50. With `"smart"`, a negative value shrinks.
 fn agateResize(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
-    const dir_z = lua.toString(1) catch return 0;
+    const target_z = lua.toString(1) catch return 0;
+    const target = std.mem.sliceTo(target_z, 0);
     const amount = lua.toNumber(2) catch 50.0;
-    const dir = parse.parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
     const leaf = focus.currentFocusedLeaf(app) orelse return 0;
+    if (std.mem.eql(u8, target, "smart")) {
+        if (tree.resizeLeafSmart(leaf, @floatCast(amount))) tree.flushActive(app);
+        return 0;
+    }
+    const dir = parse.parseDir(target) orelse return 0;
     const grow = dir == .right or dir == .down;
     if (tree.resizeLeaf(leaf, grow, @floatCast(amount))) tree.flushActive(app);
     return 0;
@@ -607,6 +612,10 @@ const agate_fns = [_]zlua.FnReg{
 
 /// Install the `agate` global table into `lua` (called once from `lua.init`).
 pub fn register(lua: *Lua) void {
+    // Resolve printable keyspecs against the user's active keyboard layout, so
+    // `minus`/`plus`/`z`/… bind the physical key that types them on non-US
+    // layouts (issue #6). Done here — before init.lua's `agate.bind` calls run.
+    parse.charToKeycode = macos.keyboard.keycodeForChar;
     lua.newLib(&agate_fns);
     lua.setGlobal("agate");
 }

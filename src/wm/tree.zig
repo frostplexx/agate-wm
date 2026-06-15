@@ -673,6 +673,27 @@ pub fn resizeLeaf(leaf: *data.Con, grow: bool, delta: f64) bool {
     return true;
 }
 
+/// Resize `leaf` along its parent's split axis *without* a direction (AeroSpace's
+/// `resize smart`): grow the focused window when `delta > 0`, shrink it when
+/// `delta < 0`, transferring the difference to whichever neighbour exists —
+/// preferring the next sibling, falling back to the previous. Because the axis
+/// follows the container, the same key always makes the focused window
+/// bigger/smaller regardless of which slot it occupies (so an edge window, with
+/// no neighbour on one side, still resizes). Pins sibling ratios to their
+/// current extents first, like `resizeLeaf`. Returns true if the tree changed.
+pub fn resizeLeafSmart(leaf: *data.Con, delta: f64) bool {
+    const parent = leaf.parent orelse return false;
+    if (parent.layout != .H_SPLIT and parent.layout != .V_SPLIT) return false;
+    const horizontal = parent.layout == .H_SPLIT;
+    const neighbor = adjacentSibling(leaf, true) orelse adjacentSibling(leaf, false) orelse return false;
+    const win = leaf.window orelse return false;
+    pinExtents(parent, horizontal);
+    const cur = if (horizontal) win.bounds.size.width else win.bounds.size.height;
+    leaf.ratio = @max(cur + delta, min_extent);
+    neighbor.ratio = @max(neighbor.ratio - delta, min_extent);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -888,6 +909,35 @@ test "resizeLeaf grows by delta at the neighbour's expense" {
     try testing.expectEqual(130.0, a.ratio);
     try testing.expectEqual(70.0, b.ratio);
     try testing.expect(!resizeLeaf(b, true, 30)); // no trailing neighbour
+}
+
+test "resizeLeafSmart grows/shrinks the focused window, picking a neighbour" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1); // H_SPLIT
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 100, testRect(100, 0, 100, 100)));
+
+    // Grow the leftmost window: no left neighbour, so it takes from the next one.
+    try testing.expect(resizeLeafSmart(a, 30));
+    try testing.expectEqual(130.0, a.ratio);
+    try testing.expectEqual(70.0, b.ratio);
+
+    // A negative delta shrinks the focused window (the edge window still works,
+    // unlike a directional resize toward a missing neighbour). Reflect the grow
+    // above in both windows' frames first — `pinExtents` reads from bounds.
+    a.window.?.bounds = testRect(0, 0, 130, 100);
+    b.window.?.bounds = testRect(130, 0, 70, 100);
+    try testing.expect(resizeLeafSmart(b, -20));
+    try testing.expectEqual(50.0, b.ratio); // 70 - 20
+    try testing.expectEqual(150.0, a.ratio); // previous neighbour absorbs it
+
+    // A lone window has no neighbour to trade with.
+    const solo = try makeCon(alloc, .Workspace, null, 0, 2);
+    const only = try addLeaf(alloc, solo, testWindow(3, 100, testRect(0, 0, 100, 100)));
+    try testing.expect(!resizeLeafSmart(only, 30));
 }
 
 test "moveLeafToWorkspace reparents the leaf and collapses the source" {

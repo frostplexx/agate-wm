@@ -118,10 +118,10 @@ function agate.space_next() end
 ---Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 function agate.space_prev() end
 
----Resize the focused tile, transferring the delta to its neighbour.
----@param dir agate.Direction Edge to grow toward.
----@param amount? number Pixels to resize by. Default 50.
-function agate.resize(dir, amount) end
+---Resize the focused tile, transferring the delta to its neighbour. Pass `"smart"` (recommended) to resize along the focused window's container axis without picking an edge: a positive `amount` grows it, a negative one shrinks it, taking from whichever neighbour exists — so the same binding always enlarges/shrinks the focused window wherever it sits. A direction (`left`/`right`/`up`/`down`) instead grows the window toward that edge, by stealing from the neighbour there.
+---@param target agate.Direction|string `"smart"` to resize along the container axis, or an edge (`left`/`right`/`up`/`down`) to grow toward.
+---@param amount? number Pixels to resize by. Default 50. With `"smart"`, a negative value shrinks.
+function agate.resize(target, amount) end
 
 ---Swap the focused window with its neighbour in a direction. Works across nested containers.
 ---@param dir agate.Direction Direction to move the window.
