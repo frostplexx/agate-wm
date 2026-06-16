@@ -3,11 +3,11 @@
 # get the same artifact that's published for everyone else, with no Zig
 # toolchain or compile step.
 #
-# Updating to a new release: bump `version` to the tag (without the leading `v`),
-# set `hash` to `lib.fakeHash`, run `nix build .#agate`, and copy the real hash
-# Nix prints back here. (The hash can only be known once the release asset is
-# published, so it lands in a commit *after* the tag — Nix users pin a commit or
-# branch, not the tag.)
+# `version` and `hash` here are updated automatically by the release workflow:
+# pushing a `v*` tag builds the binary, publishes the release, and commits the
+# pinned version + artifact hash back to this file on main. (The hash can only be
+# known once the asset is published, so it lands in a commit *after* the tag —
+# Nix consumers pin a commit or branch, not the tag.) No manual edits needed.
 {
   lib,
   stdenv,

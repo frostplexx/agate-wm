@@ -2,10 +2,11 @@ name: Release
 
 # Cut a release by pushing a semver tag, e.g.
 #   git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1
-# The job builds the aarch64-darwin (Apple Silicon) binary and publishes a
-# GitHub Release with it attached, via softprops/action-gh-release. Tags with a
-# pre-release suffix (anything containing `-`, e.g. `-alpha.1`) are marked as a
-# GitHub pre-release automatically.
+# The job builds the aarch64-darwin (Apple Silicon) binary, publishes a GitHub
+# Release with it attached (via softprops/action-gh-release), and then pins the
+# artifact's hash into nix/package.nix on main so `nix build`/home-manager fetch
+# it. Tags with a pre-release suffix (anything containing `-`, e.g. `-alpha.1`)
+# are marked as a GitHub pre-release automatically.
 
 on:
   push:
@@ -25,6 +26,8 @@ jobs:
     runs-on: macos-15 # Apple Silicon runner → native arm64 build
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # need main's history to commit the pinned hash back
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -51,3 +54,37 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
+
+      # Pin the just-published artifact into the Nix package so `nix build .#agate`
+      # (and the home-manager module) fetch this release. The SRI hash can only be
+      # known once the asset exists, so it's committed to main here — Nix consumers
+      # pin a commit/branch, not the tag.
+      - name: Pin release artifact in nix/package.nix
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sri="sha256-$(openssl dgst -sha256 -binary dist/agate-aarch64-apple-darwin.tar.gz | openssl base64 -A)"
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version hash=$sri"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+
+          # Portable in-place edit (BSD/macOS sed mangles `-i ''`): rewrite to a
+          # temp file and move it back.
+          sed -E \
+            -e "s|version = \"[^\"]*\";|version = \"${version}\";|" \
+            -e "s|hash = \"sha256-[^\"]*\";|hash = \"${sri}\";|" \
+            nix/package.nix > nix/package.nix.tmp
+          mv nix/package.nix.tmp nix/package.nix
+
+          if git diff --quiet -- nix/package.nix; then
+            echo "nix/package.nix already pinned to this release"
+          else
+            git add nix/package.nix
+            git commit -m "chore(nix): pin ${GITHUB_REF_NAME} release artifact hash [skip ci]"
+            git push origin main
+          fi
