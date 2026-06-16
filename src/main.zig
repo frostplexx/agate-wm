@@ -26,10 +26,16 @@ pub fn main(init: std.process.Init) !void {
         .acquired => |held| _ = held, // keep the lock for the process lifetime
     }
 
-    // Managing windows requires accessibility permission.
+    // Managing windows requires accessibility permission. Show the system dialog
+    // and spin-wait so the process stays alive after kickstart — launchd KeepAlive
+    // would restart it anyway, but keeping it alive re-shows the dialog each loop.
     if (!macos.isProcessTrusted()) {
-        std.debug.print("This process is not trusted for accessibility. Please grant permission in System Settings > Security & Privacy > Accessibility.\n", .{});
-        std.process.exit(1);
+        _ = macos.isProcessTrustedPrompt();
+        std.debug.print("Waiting for Accessibility permission (System Settings → Privacy & Security → Accessibility)...\n", .{});
+        while (!macos.isProcessTrusted()) {
+            const ts = std.c.timespec{ .sec = 1, .nsec = 0 };
+            _ = std.c.nanosleep(&ts, null);
+        }
     }
 
     // init app state
