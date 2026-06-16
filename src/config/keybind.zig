@@ -12,6 +12,7 @@ const ctx = @import("context.zig");
 const parse = @import("parse.zig");
 const actions = @import("actions.zig");
 const exec = @import("exec.zig");
+const events = @import("events.zig");
 
 const Config = types.Config;
 const BindingAction = types.BindingAction;
@@ -31,6 +32,7 @@ pub fn enterModeByName(cfg: *Config, name: []const u8) void {
         if (std.fmt.bufPrintZ(&buf, "◆ {s}", .{name})) |label| {
             macos.statusbar.setText(label);
         } else |_| {}
+        events.emitModeChanged(m.name);
         return;
     }
     std.debug.print("[config] enter_mode: no mode named '{s}'\n", .{name});
@@ -44,6 +46,7 @@ pub fn exitActiveMode(cfg: *Config) void {
     if (ctx.appstate) |app| {
         macos.statusbar.setSpaceNumber(macos.spaces.activeUserIndex(app.gpa, app.skylight_cid));
     }
+    events.emitModeChanged(null);
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ const actions = @import("actions.zig");
 const rules = @import("rules.zig");
 const small_screen = @import("small_screen.zig");
 const paths = @import("paths.zig");
+const events = @import("events.zig");
 
 const Config = types.Config;
 
@@ -58,6 +59,12 @@ pub const runPendingMove = actions.runPendingMove;
 pub const applyRulesToLeaf = rules.applyRulesToLeaf;
 pub const applySmallScreenMode = small_screen.applySmallScreenMode;
 
+// Event callbacks (`agate.on`) — emit helpers the WM event sites call.
+pub const emitSpaceChanged = events.emitSpaceChanged;
+pub const emitModeChanged = events.emitModeChanged;
+pub const emitWindowCreated = events.emitWindowCreated;
+pub const emitWindowDestroyed = events.emitWindowDestroyed;
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -85,6 +92,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .gesture_bindings = .empty,
         .modes = .empty,
         .rules = .empty,
+        .event_handlers = .empty,
         .lua = try Lua.init(gpa),
     };
     ctx.config = cfg;
@@ -144,6 +152,8 @@ pub fn deinit(cfg: *Config) void {
     cfg.modes.deinit(cfg.alloc);
     for (cfg.rules.items) |r| rules.freeRule(r);
     cfg.rules.deinit(cfg.alloc);
+    for (cfg.event_handlers.items) |h| cfg.lua.unref(zlua.registry_index, h.lua_fn);
+    cfg.event_handlers.deinit(cfg.alloc);
     cfg.lua.deinit();
     cfg.alloc.destroy(cfg);
     ctx.config = null;

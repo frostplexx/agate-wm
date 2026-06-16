@@ -8,6 +8,7 @@ const Lua = zlua.Lua;
 const regexp = @import("../lib/regexp.zig");
 const gestures = @import("../wm/gestures.zig");
 const data = @import("../wm/data.zig");
+const events = @import("events.zig");
 
 // CGEventFlag modifier bits.
 pub const MOD_SHIFT: u64 = 0x0002_0000;
@@ -136,5 +137,8 @@ pub const Config = struct {
     /// Window assignment rules in registration order. All matching rules
     /// combine; the last match wins (yabai's `rule_combine_effects` order).
     rules: std.ArrayList(Rule),
+    /// Event callbacks registered with `agate.on`, in registration order; all
+    /// handlers for a fired event run (see `events.emit`).
+    event_handlers: std.ArrayList(events.Handler),
     lua: *Lua,
 };

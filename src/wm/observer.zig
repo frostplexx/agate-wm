@@ -74,6 +74,7 @@ fn graceTimerFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void 
     if (tree.removeWindow(root, ctx.wid)) {
         std.debug.print("[observer] -window #{d} (tab grace expired)\n", .{ctx.wid});
         tree.flushActive(mgr.appState);
+        lua_config.emitWindowDestroyed(ctx.wid);
         if (ws) |w| focus.focusAfterClose(w, ctx.pid, idx);
     }
 }
@@ -578,6 +579,10 @@ fn onSpaceChanged(
     // tracks the frontmost app, so activate a window on the now-active space to
     // pull the menu bar over. No-op on an empty space (nothing to focus).
     focusActiveSpace(mgr.appState);
+    // Let init.lua react to the switch (e.g. run a command per Space) — pass the
+    // new active Space's 1-based position, matching `agate.space(n)` numbering.
+    if (macos.spaces.activeUserIndex(mgr.appState.gpa, mgr.appState.skylight_cid)) |idx|
+        lua_config.emitSpaceChanged(idx);
     std.debug.print("[observer] space changed → retiled\n", .{});
 }
 
@@ -1384,6 +1389,7 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     if (leaf.parent == ws and (ws.layout == .H_STACK or ws.layout == .V_STACK)) {
         _ = focus.focusLeaf(leaf);
     }
+    lua_config.emitWindowCreated(leaf.id);
 }
 
 /// Re-pair `leaf` onto a surviving sibling tab after the tab it tracked was
@@ -1474,6 +1480,7 @@ fn onWindowDestroyed(mgr: *Manager, observer: ax.AXObserverRef, wid: u32) void {
     if (tree.removeWindow(root, wid)) {
         std.debug.print("[observer] -window #{d}\n", .{wid});
         tree.flushActive(app);
+        lua_config.emitWindowDestroyed(wid);
         // Feature 1: if that was the app's last window here, focus the tile to
         // its left so focus doesn't fall onto an unrelated app (yabai-style).
         if (ws) |parent| focus.focusAfterClose(parent, pid, idx);

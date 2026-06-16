@@ -22,6 +22,7 @@ const actions = @import("actions.zig");
 const rules = @import("rules.zig");
 const keybind = @import("keybind.zig");
 const exec = @import("exec.zig");
+const events = @import("events.zig");
 
 const Rule = types.Rule;
 const Mode = types.Mode;
@@ -241,6 +242,35 @@ fn agateGesture(lua: *Lua) i32 {
             cfg.alloc.free(cmd);
         };
     }
+    return 0;
+}
+
+/// `agate.on(event, callback)` — run a Lua function whenever agate performs the
+/// named action (a Space change, mode switch, window create/destroy). The
+/// callback gets a single table argument describing the event (see the event
+/// list in the doc comment). Unlike `agate.bind`, the trigger is a WM event, not
+/// a key chord — so init.lua can react to things agate does on its own. Several
+/// callbacks may be registered for the same event; all run, in registration order.
+// @doc F|on|Run a Lua callback whenever agate performs an action. The callback receives a single table describing the event. Register more than one for the same event and they all run, in order. Events: `space_changed` (`{ space = N }` — the new 1-based Space position), `mode_changed` (`{ mode = "name" }` on enter, `{ mode = nil }` on exit), `window_created` / `window_destroyed` (`{ window = id }`). Use it to e.g. run a shell command on every Space switch via `agate.exec`.
+// @doc FP|on|event|string|false|Event name: `"space_changed"`, `"mode_changed"`, `"window_created"`, or `"window_destroyed"`.
+// @doc FP|on|callback|fun(event:table)|false|A Lua function called with a table of event data (fields depend on the event).
+fn agateOn(lua: *Lua) i32 {
+    const cfg = ctx.config orelse return 0;
+    const name_z = lua.toString(1) catch return 0;
+    const name = std.mem.sliceTo(name_z, 0);
+    const event = events.Event.fromName(name) orelse {
+        std.debug.print("[config] agate.on: unknown event '{s}'\n", .{name});
+        return 0;
+    };
+    if (!lua.isFunction(2)) {
+        std.debug.print("[config] agate.on('{s}', ...): second argument must be a function\n", .{name});
+        return 0;
+    }
+    lua.pushValue(2);
+    const fn_ref = lua.ref(zlua.registry_index);
+    cfg.event_handlers.append(cfg.alloc, .{ .event = event, .lua_fn = fn_ref }) catch {
+        lua.unref(zlua.registry_index, fn_ref);
+    };
     return 0;
 }
 
@@ -589,6 +619,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "config",      .func = zlua.wrap(agateConfig) },
     .{ .name = "bind",        .func = zlua.wrap(agateBind) },
     .{ .name = "gesture",     .func = zlua.wrap(agateGesture) },
+    .{ .name = "on",          .func = zlua.wrap(agateOn) },
     .{ .name = "mode",        .func = zlua.wrap(agateMode) },
     .{ .name = "enter_mode",  .func = zlua.wrap(agateEnterMode) },
     .{ .name = "exit_mode",   .func = zlua.wrap(agateExitMode) },

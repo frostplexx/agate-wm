@@ -69,6 +69,11 @@ function agate.bind(spec, action) end
 ---@param action fun()|string A Lua callback, or a string command (see Commands below).
 function agate.gesture(spec, action) end
 
+---Run a Lua callback whenever agate performs an action. The callback receives a single table describing the event. Register more than one for the same event and they all run, in order. Events: `space_changed` (`{ space = N }` — the new 1-based Space position), `mode_changed` (`{ mode = "name" }` on enter, `{ mode = nil }` on exit), `window_created` / `window_destroyed` (`{ window = id }`). Use it to e.g. run a shell command on every Space switch via `agate.exec`.
+---@param event string Event name: `"space_changed"`, `"mode_changed"`, `"window_created"`, or `"window_destroyed"`.
+---@param callback fun(event:table) A Lua function called with a table of event data (fields depend on the event).
+function agate.on(event, callback) end
+
 ---Define a modal keybind group (Hyprland-style submap): a named table of `keyspec = action` entries that are live only while the mode is active. Enter with `agate.enter_mode(name)`, leave with `agate.exit_mode()`. While a mode is active only its bindings fire — global binds are suppressed and unbound keys pass through to the focused app. Bind `escape` to `agate.exit_mode` so there's always a way out.
 ---@param name string Mode name, referenced by `enter_mode`/`exit_mode` and the `mode <name>` command.
 ---@param bindings table Table mapping a key chord (e.g. `"h"`, `"shift+l"`) to a Lua function or string command.
