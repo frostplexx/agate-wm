@@ -68,34 +68,38 @@ fn agateConfig(lua: *Lua) i32 {
     // accept "accordion_padding" or the shorter "accordion"
     if (!numberField(lua, "accordion_padding", &cfg.accordion_padding))
         _ = numberField(lua, "accordion", &cfg.accordion_padding);
-    // hyper: array of modifier strings {"ctrl","alt","cmd","shift"}
-    _ = lua.getField(1, "hyper");
-    if (lua.isTable(-1)) {
-        cfg.hyper_mods = 0;
-        var i: zlua.Integer = 1;
-        while (true) {
-            _ = lua.getIndex(-1, i);
-            if (lua.isNil(-1)) { lua.pop(1); break; }
-            if (lua.isString(-1)) {
-                const s = lua.toString(-1) catch "";
-                if (std.mem.eql(u8, s, "ctrl") or std.mem.eql(u8, s, "control")) cfg.hyper_mods |= MOD_CTRL;
-                if (std.mem.eql(u8, s, "alt") or std.mem.eql(u8, s, "opt")) cfg.hyper_mods |= MOD_ALT;
-                if (std.mem.eql(u8, s, "cmd") or std.mem.eql(u8, s, "command")) cfg.hyper_mods |= MOD_CMD;
-                if (std.mem.eql(u8, s, "shift")) cfg.hyper_mods |= MOD_SHIFT;
-            }
-            lua.pop(1);
-            i += 1;
-        }
-    }
-    lua.pop(1);
-    // hyper_key: name of the physical key whose held state means "hyper" (for
-    // remappers that hide the real modifiers from our tap). e.g. "f18".
+    // hyper_key: { enabled = bool, keys = {modifier strings} }. The built-in
+    // hyper key (ported from LazyKeys): `enabled` toggles the Caps Lock → F18
+    // remap, `keys` is the modifier set the held key (and the `hyper` macro)
+    // expands to.
+    // @doc HK|enabled|boolean|true|Master switch (default `true`). When on, agate remaps Caps Lock to F18 via `hidutil` and treats it as the hyper key; the remap is restored on exit. Turn it off to leave Caps Lock alone.
+    // @doc HK|keys|string[]|true|Modifier set the held hyper key — and the `hyper` macro in key specs — expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. Default `{"ctrl","alt","cmd","shift"}`.
     _ = lua.getField(1, "hyper_key");
-    if (lua.isString(-1)) {
-        const s = lua.toString(-1) catch "";
-        if (parse.lookupKeycode(std.mem.sliceTo(s, 0))) |code| cfg.hyper_key = code;
+    if (lua.isTable(-1)) {
+        _ = lua.getField(-1, "enabled");
+        if (lua.isBoolean(-1)) cfg.hyper_enabled = lua.toBoolean(-1);
+        lua.pop(1);
+        _ = lua.getField(-1, "keys");
+        if (lua.isTable(-1)) {
+            cfg.hyper_mods = 0;
+            var i: zlua.Integer = 1;
+            while (true) {
+                _ = lua.getIndex(-1, i);
+                if (lua.isNil(-1)) { lua.pop(1); break; }
+                if (lua.isString(-1)) {
+                    const s = lua.toString(-1) catch "";
+                    if (std.mem.eql(u8, s, "ctrl") or std.mem.eql(u8, s, "control")) cfg.hyper_mods |= MOD_CTRL;
+                    if (std.mem.eql(u8, s, "alt") or std.mem.eql(u8, s, "opt")) cfg.hyper_mods |= MOD_ALT;
+                    if (std.mem.eql(u8, s, "cmd") or std.mem.eql(u8, s, "command")) cfg.hyper_mods |= MOD_CMD;
+                    if (std.mem.eql(u8, s, "shift")) cfg.hyper_mods |= MOD_SHIFT;
+                }
+                lua.pop(1);
+                i += 1;
+            }
+        }
+        lua.pop(1); // keys
     }
-    lua.pop(1);
+    lua.pop(1); // hyper_key
     // small_screen: { enabled = bool, max_width = number, layout = string }.
     // `layout` accepts every layoutFromName name plus "tabs"/"tabbed" (a
     // zero-peek stack: full-area windows flipped through like tabs).

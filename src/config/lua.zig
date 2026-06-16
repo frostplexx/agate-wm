@@ -16,6 +16,7 @@
 const std = @import("std");
 const zlua = @import("zlua");
 const Lua = zlua.Lua;
+const macos = @import("macos");
 const state = @import("../state.zig");
 const tree = @import("../wm/tree.zig");
 
@@ -44,6 +45,7 @@ pub const MOD_MASK = types.MOD_MASK;
 
 pub const hyperMods = ctx.hyperMods;
 pub const hyperKey = ctx.hyperKey;
+pub const hyperEnabled = ctx.hyperEnabled;
 pub const spaceIndicatorEnabled = ctx.spaceIndicatorEnabled;
 pub const dragPreviewEnabled = ctx.dragPreviewEnabled;
 
@@ -79,7 +81,8 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .outer_gaps = 8,
         .accordion_padding = 40,
         .hyper_mods = types.MOD_CTRL | types.MOD_ALT | types.MOD_CMD | types.MOD_SHIFT,
-        .hyper_key = 79, // kVK_F18 — common remapped-hyper trigger
+        .hyper_enabled = true, // built-in Caps Lock → F18 hyper key (LazyKeys port)
+        .hyper_key = macos.hyperkey.F18_KEYCODE, // trigger = F18 (Caps Lock is remapped to it)
         .small_screen_enabled = true,
         .small_screen_max_width = 0, // built-in display detection only
         .small_screen_layout = .H_STACK,

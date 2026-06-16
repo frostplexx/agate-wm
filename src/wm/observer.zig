@@ -138,9 +138,9 @@ const Manager = struct {
 /// The single WM instance, reached from the C observer callback.
 var g_manager: ?*Manager = null;
 
-/// Whether the configured hyper trigger key (e.g. F18) is currently held. A key
-/// remapper applies the real hyper modifiers downstream of our tap, so we track
-/// the trigger key ourselves and synthesize the modifiers in `keyTap`.
+/// Whether the hyper trigger key (F18) is currently held. agate's built-in hyper
+/// key remaps Caps Lock → F18 (see `macos.hyperkey`, ported from LazyKeys); we
+/// track F18 here and synthesize the hyper modifiers in `keyTap`.
 var g_hyper_held: bool = false;
 
 /// `CFAbsoluteTime` of the last user input that legitimately raises an app — a
@@ -219,13 +219,12 @@ pub fn run(appState: *state.AppState) !void {
     //   * a nil result means the permission (Accessibility / Input Monitoring) is
     //     missing — there is no separate query, the create just fails.
     //
-    // A remapper (lazykeys) injects the hyper modifiers from its own session tap,
-    // and our tap can land ahead of it in the chain, so the modifier flags are
-    // often absent from the key *event* we receive (observed: mods=0x0). We don't
-    // rely on the event's flags — `keyTap` queries the live modifier state
-    // instead (see `CGEventSourceFlagsState`), which is order-independent. So tap
-    // location/placement only needs to support swallowing: a session tap with the
-    // Default option does (and tail-append is harmless here).
+    // The built-in hyper key (see `macos.hyperkey`) remaps Caps Lock → F18, so
+    // the hyper trigger arrives as plain F18 key events at this tap — `keyTap`
+    // tracks F18's held state and folds the hyper modifiers into other keys
+    // itself (no separate remapper, no reliance on flags injected elsewhere).
+    // The tap is intercepting (Default option) so it can swallow F18 and any
+    // matched chord; tail-append placement is harmless.
     // KeyDown for bindings; KeyUp so we can track a held "hyper" key (see keyTap).
     const kmask = macos.event_tap.mask(macos.event_tap.kCGEventKeyDown) |
         macos.event_tap.mask(macos.event_tap.kCGEventKeyUp);
@@ -244,6 +243,12 @@ pub fn run(appState: *state.AppState) !void {
     } else {
         std.debug.print("[observer] keyboard tap unavailable; keybindings disabled\n", .{});
     }
+
+    // Built-in hyper key (ported from LazyKeys): remap Caps Lock → F18 at the HID
+    // level so the keyboard tap above can treat a held Caps Lock as the hyper
+    // modifiers. Only when enabled in the config; restored on exit via signal
+    // handlers installed by `enable`.
+    if (lua_config.hyperEnabled()) macos.hyperkey.enable();
 
     // Menu-bar space indicator. The config is already loaded (wm.zig runs
     // lua_config.init before us), so the toggle is settled by now.
@@ -518,14 +523,15 @@ fn keyTap(
             if (code == kVK_Tab and (macos.event_tap.CGEventGetFlags(event) & lua_config.MOD_CMD) != 0) {
                 g_last_activation_input = c.CFAbsoluteTimeGetCurrent();
             }
-            // The hyper trigger key (e.g. F18, from a Caps→F18 remap): track its
-            // held state and pass it through so other apps still get it.
+            // The hyper trigger key (F18, from agate's built-in Caps→F18 remap):
+            // track its held state and swallow it so the synthetic F18 never
+            // reaches an app (ported from LazyKeys, which suppresses F18 too).
             const hk = lua_config.hyperKey();
             if (hk != 0 and code == hk) {
                 g_hyper_held = true;
-                return event;
+                return null;
             }
-            // Synthesize the hyper modifiers a remapper hides from our tap.
+            // While hyper is held, fold its modifiers into the event flags.
             var flags = macos.event_tap.CGEventGetFlags(event);
             if (g_hyper_held) flags |= lua_config.hyperMods();
             // Decide fast (swallow or pass through) here; run the slow action off
@@ -535,11 +541,29 @@ fn keyTap(
                 scheduleKeyAction(code, flags);
                 return null; // swallow — chord is ours
             }
+            // Hyper held but not one of our chords: rewrite the event's flags so
+            // the focused app receives the full hyper combo (LazyKeys behaviour),
+            // making the hyper key usable for app shortcuts, not just agate binds.
+            if (g_hyper_held) {
+                macos.event_tap.CGEventSetFlags(event, flags);
+                return event;
+            }
         },
         macos.event_tap.kCGEventKeyUp => {
             const code: u16 = @intCast(macos.event_tap.CGEventGetIntegerValueField(event, macos.event_tap.kCGKeyboardEventKeycode));
             const hk = lua_config.hyperKey();
-            if (hk != 0 and code == hk) g_hyper_held = false;
+            if (hk != 0 and code == hk) {
+                g_hyper_held = false;
+                return null; // swallow the synthetic F18 release as well
+            }
+            // Mirror the key-down flag rewrite on release so the app sees a
+            // matching hyper-modified key-up (no half-applied modifier state).
+            if (g_hyper_held) {
+                var flags = macos.event_tap.CGEventGetFlags(event);
+                flags |= lua_config.hyperMods();
+                macos.event_tap.CGEventSetFlags(event, flags);
+                return event;
+            }
         },
         else => {},
     }

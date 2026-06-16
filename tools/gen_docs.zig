@@ -13,6 +13,7 @@
 //!   // @doc S|name|lua_type|default|description
 //!   // @doc SS|name|lua_type|optional|description      (small_screen fields)
 //!   // @doc SR|name|lua_type|optional|description      (rule fields)
+//!   // @doc HK|name|lua_type|optional|description       (hyper_key fields)
 //!   // @doc A|name|description                         (start an alias)
 //!   // @doc AV|alias_name|value                        (alias value; follows its A)
 //!   // @doc F|name|description                         (api function)
@@ -34,6 +35,7 @@ const Command = struct { form: []const u8, doc: []const u8 };
 const ApiData = struct {
     settings: []Setting,
     small_screen: []Param,
+    hyper_key: []Param,
     rule_fields: []Param,
     aliases: []Alias,
     funcs: []Func,
@@ -48,6 +50,7 @@ const ApiData = struct {
 fn parse(alloc: std.mem.Allocator, src: []const u8) !ApiData {
     var settings: std.ArrayList(Setting) = .empty;
     var small_screen: std.ArrayList(Param) = .empty;
+    var hyper_key: std.ArrayList(Param) = .empty;
     var rule_fields: std.ArrayList(Param) = .empty;
     const AliasBuilder = struct { name: []const u8, doc: []const u8, values: std.ArrayList([]const u8) };
     var alias_builders: std.ArrayList(AliasBuilder) = .empty;
@@ -82,6 +85,13 @@ fn parse(alloc: std.mem.Allocator, src: []const u8) !ApiData {
             const ty = it.next() orelse continue;
             const opt = it.next() orelse continue;
             try rule_fields.append(alloc, .{ .name = name, .ty = ty, .optional = eql(opt, "true"), .doc = it.rest() });
+
+        } else if (std.mem.startsWith(u8, rest, "HK|")) {
+            var it = std.mem.splitScalar(u8, rest[3..], '|');
+            const name = it.next() orelse continue;
+            const ty = it.next() orelse continue;
+            const opt = it.next() orelse continue;
+            try hyper_key.append(alloc, .{ .name = name, .ty = ty, .optional = eql(opt, "true"), .doc = it.rest() });
 
         } else if (std.mem.startsWith(u8, rest, "AV|")) {
             // Append value to the last alias (A lines must precede their AV lines).
@@ -134,6 +144,7 @@ fn parse(alloc: std.mem.Allocator, src: []const u8) !ApiData {
     return .{
         .settings = try settings.toOwnedSlice(alloc),
         .small_screen = try small_screen.toOwnedSlice(alloc),
+        .hyper_key = try hyper_key.toOwnedSlice(alloc),
         .rule_fields = try rule_fields.toOwnedSlice(alloc),
         .aliases = aliases,
         .funcs = try funcs.toOwnedSlice(alloc),
@@ -185,6 +196,13 @@ fn renderMarkdown(w: anytype, d: ApiData) !void {
         try w.print("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, if (p.optional) " _(optional)_" else "" });
     try w.writeByte('\n');
 
+    try w.writeAll("## `hyper_key` fields (built-in hyper key)\n\n");
+    try w.writeAll("Ported from [LazyKeys](https://github.com/frostplexx/LazyKeys): when enabled, agate remaps Caps Lock to F18 at the HID level (via `hidutil`) and treats a held Caps Lock as the modifiers in `keys` — for both agate's own keybindings and the focused app, so `hyper`-based shortcuts work everywhere. The remap is restored when agate exits. No separate remapper (LazyKeys, Karabiner) is needed.\n\n");
+    try w.writeAll("| Key | Type | Description |\n| --- | --- | --- |\n");
+    for (d.hyper_key) |p|
+        try w.print("| `{s}` | `{s}` | {s}{s} |\n", .{ p.name, p.ty, p.doc, if (p.optional) " _(optional)_" else "" });
+    try w.writeByte('\n');
+
     try w.writeAll("## `agate.rule{}` fields\n\n");
     try w.writeAll("| Key | Type | Description |\n| --- | --- | --- |\n");
     for (d.rule_fields) |p|
@@ -224,7 +242,7 @@ fn renderMarkdown(w: anytype, d: ApiData) !void {
         \\## Example
         \\
         \\```lua
-        \\agate.config({ gaps = 8, accordion_padding = 40, hyper = { "ctrl", "alt", "cmd" } })
+        \\agate.config({ gaps = 8, accordion_padding = 40, hyper_key = { enabled = true, keys = { "ctrl", "alt", "cmd" } } })
         \\agate.bind("hyper+l", function() agate.focus("right") end)
         \\agate.bind("hyper+shift+l", "move right")
         \\agate.bind("hyper+s", function() agate.layout("accordion") end)
@@ -258,6 +276,11 @@ fn renderLua(w: anytype, d: ApiData) !void {
 
     try w.writeAll("---@class agate.SmallScreen\n");
     for (d.small_screen) |p|
+        try w.print("---@field {s}{s} {s} {s}\n", .{ p.name, if (p.optional) "?" else "", p.ty, p.doc });
+    try w.writeByte('\n');
+
+    try w.writeAll("---@class agate.HyperKey\n");
+    for (d.hyper_key) |p|
         try w.print("---@field {s}{s} {s} {s}\n", .{ p.name, if (p.optional) "?" else "", p.ty, p.doc });
     try w.writeByte('\n');
 

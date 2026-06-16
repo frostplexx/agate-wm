@@ -31,8 +31,7 @@
 ---@field gaps? number Pixels between adjacent tiles. (default `8`)
 ---@field outer_gaps? number Pixels inset from the screen edge. (default `8`)
 ---@field accordion_padding? number Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`. (default `40`)
----@field hyper? string[] Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. (default `{"ctrl","alt","cmd","shift"}`)
----@field hyper_key? string Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables. (default `"f18"`)
+---@field hyper_key? agate.HyperKey Built-in hyper key (see agate.HyperKey), ported from LazyKeys. When enabled, agate remaps Caps Lock to F18 at the HID level (via `hidutil`) and treats a held Caps Lock as the modifier set in `keys` — for both agate keybindings and the focused app. The `hyper` macro in key specs expands to `keys`. (default `{ enabled = true, keys = {"ctrl","alt","cmd","shift"} }`)
 ---@field small_screen? agate.SmallScreen Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over. (default `{ enabled = true, layout = "h_accordion", max_width = 0 }`)
 ---@field animations? boolean Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`. (default `false`)
 ---@field space_indicator? boolean Show the active space's number as a menu-bar status item. (default `true`)
@@ -43,6 +42,10 @@
 ---@field enabled? boolean Master switch (default `true`).
 ---@field layout? string Layout small workspaces get: any layout name (default `"h_accordion"`), or `"tabs"` for a zero-peek stack — full-area windows flipped through like tabs.
 ---@field max_width? number Width (points) at or under which a display counts as small, in addition to the built-in panel. `0` (default) = built-in display detection only.
+
+---@class agate.HyperKey
+---@field enabled? boolean Master switch (default `true`). When on, agate remaps Caps Lock to F18 via `hidutil` and treats it as the hyper key; the remap is restored on exit. Turn it off to leave Caps Lock alone.
+---@field keys? string[] Modifier set the held hyper key — and the `hyper` macro in key specs — expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`. Default `{"ctrl","alt","cmd","shift"}`.
 
 ---@class agate.Rule
 ---@field app? string POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.

@@ -64,6 +64,10 @@ pub const kCGKeyboardEventKeycode: CGEventField = 9;
 
 pub extern fn CGEventGetIntegerValueField(event: EventRef, field: CGEventField) i64;
 pub extern fn CGEventGetFlags(event: EventRef) u64;
+/// Overwrite an event's modifier flags. Used by the keyboard tap to inject the
+/// hyper modifiers into a key event while the hyper key is held, so the focused
+/// app receives the full chord (the built-in hyper key, ported from LazyKeys).
+pub extern fn CGEventSetFlags(event: EventRef, flags: u64) void;
 
 /// The *current* modifier-flag state for an event source, independent of any
 /// particular event. We need this because a key remapper (lazykeys) can hold a

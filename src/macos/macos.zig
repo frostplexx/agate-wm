@@ -31,6 +31,8 @@ pub const spaces = @import("spaces.zig");
 pub const display = @import("display.zig");
 /// CoreGraphics event tap and Space-switch gesture synthesis (macOS 27+).
 pub const event_tap = @import("event_tap.zig");
+/// Built-in hyper key: Caps Lock → F18 HID remap via hidutil (ported from LazyKeys).
+pub const hyperkey = @import("hyperkey.zig");
 /// NSWorkspace app launch/terminate notifications (event-driven, real-time).
 pub const app_watch = @import("app_watch.zig");
 /// Raw trackpad touches via the private MultitouchSupport framework (dlopen'd).

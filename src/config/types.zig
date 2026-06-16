@@ -89,15 +89,16 @@ pub const Config = struct {
     /// past the one in front. See `data.gaps.accordion`.
     // @doc S|accordion_padding|number|40|Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`.
     accordion_padding: f64,
-    /// CGEventFlag mask for the "hyper" macro key.
-    // @doc S|hyper|string[]|{"ctrl","alt","cmd","shift"}|Modifier set the `hyper` macro in key specs expands to. Any of: `ctrl`/`control`, `alt`/`opt`, `cmd`/`command`, `shift`.
+    /// CGEventFlag mask the held hyper key expands to (and the `hyper` macro in
+    /// key specs). Set from `hyper_key.keys`.
+    // @doc S|hyper_key|agate.HyperKey|{ enabled = true, keys = {"ctrl","alt","cmd","shift"} }|Built-in hyper key (see agate.HyperKey), ported from LazyKeys. When enabled, agate remaps Caps Lock to F18 at the HID level (via `hidutil`) and treats a held Caps Lock as the modifier set in `keys` — for both agate keybindings and the focused app. The `hyper` macro in key specs expands to `keys`.
     hyper_mods: u64,
-    /// Virtual keycode of a physical key whose held state means "hyper". Needed
-    /// when a remapper (lazykeys, Karabiner) turns e.g. Caps Lock into F18 and
-    /// applies the real modifiers downstream of our event tap, where we can't see
-    /// them: we instead watch this key go down/up and synthesize `hyper_mods`.
-    /// Default 79 = kVK_F18. 0 disables the feature.
-    // @doc S|hyper_key|string|"f18"|Physical key whose held state is treated as `hyper`, for remappers (lazykeys/Karabiner) that hide the real modifiers from the event tap. A key name like `"f18"`; empty disables.
+    /// Whether the built-in hyper key is on. When true, agate performs the
+    /// Caps Lock → F18 HID remap at startup (and restores it on exit) and treats
+    /// the held F18 as `hyper_mods`. From `hyper_key.enabled`.
+    hyper_enabled: bool,
+    /// Virtual keycode of the hyper trigger key. Fixed to 79 (kVK_F18) because the
+    /// built-in remap turns Caps Lock into F18; `hyper_enabled` gates the feature.
     hyper_key: u16,
     /// Small Screen Mode: on a small main display (the built-in panel, or any
     /// display at or under `small_screen_max_width` points), workspaces still

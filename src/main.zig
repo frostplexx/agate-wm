@@ -52,6 +52,7 @@ test {
     _ = @import("config/lua.zig");
     _ = @import("config/parse.zig");
     _ = @import("config/events.zig");
+    _ = @import("config/context.zig");
     _ = @import("config/small_screen.zig");
     _ = @import("lock.zig");
     _ = @import("ipc.zig");
