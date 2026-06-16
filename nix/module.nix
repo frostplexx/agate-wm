@@ -135,5 +135,11 @@ in
         };
       };
     };
+
+    # Kickstart (or restart) the agent on every `home-manager switch` so the
+    # new store-path binary is picked up immediately without a re-login.
+    home.activation.agateRestart = lib.hm.dag.entryAfter [ "launchctlActivation" ] ''
+      $DRY_RUN_CMD /bin/launchctl kickstart -k gui/"$(id -u)"/org.nix-community.home.agate 2>/dev/null || true
+    '';
   };
 }
