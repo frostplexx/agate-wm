@@ -1,12 +1,26 @@
-# nix-darwin module for agate. Imported curried with the flake's `self` so
+# home-manager module for agate. Imported curried with the flake's `self` so
 # `services.agate.package` defaults to the flake's own package:
 #
-#   # flake.nix of your system config
+#   # flake.nix of your home-manager / nix-darwin+home-manager config
 #   inputs.agate.url = "github:frostplexx/agate-wm";
 #   ...
-#   darwinConfigurations.myhost = darwin.lib.darwinSystem {
-#     modules = [ inputs.agate.darwinModules.default { services.agate.enable = true; } ];
+#   # in your home-manager configuration:
+#   imports = [ inputs.agate.homeManagerModules.default ];
+#   services.agate = {
+#     enable = true;
+#     config = ''
+#       agate.config({ gaps = 8, outer_gaps = 8 })
+#       agate.bind("hyper+l", "focus right")
+#     '';
 #   };
+#
+# What it does:
+#   * installs the agate package into the user environment,
+#   * writes the init.lua you give it (inline `config` or a `configFile`) to
+#     `~/.config/agate/init.lua` — agate's own config search path — so the
+#     config you declare in Nix is the config agate actually loads,
+#   * runs agate as a per-user launchd agent so it starts at login and is
+#     restarted if it exits (a macOS "service").
 #
 # NOTE: agate needs the Accessibility permission (System Settings → Privacy &
 # Security → Accessibility). macOS keys that grant on the binary's path, and
@@ -21,13 +35,16 @@ self:
 }:
 let
   cfg = config.services.agate;
-  configFile =
-    if cfg.configFile != null then
-      cfg.configFile
-    else if cfg.config != null then
-      pkgs.writeText "agate-init.lua" cfg.config
-    else
-      null;
+
+  # Whether the user wants Nix to manage the init.lua at all. When false, agate
+  # falls back to whatever is already on its search path (hand-written, or a
+  # `~/.config/agate/init.lua` you manage with another home.file entry).
+  manageConfig = cfg.config != null || cfg.configFile != null;
+
+  # The path the managed init.lua lands at — agate's primary search location.
+  # Exported as WM_CONFIG too, so the agent finds it even if XDG_CONFIG_HOME is
+  # not propagated into the launchd session.
+  configTarget = "${config.xdg.configHome}/agate/init.lua";
 in
 {
   options.services.agate = {
@@ -49,35 +66,34 @@ in
         agate.bind("hyper+h", "focus left")
       '';
       description = ''
-        Contents of agate's init.lua, managed by Nix. When neither this nor
-        {option}`services.agate.configFile` is set, agate falls back to its
-        own search path (`$XDG_CONFIG_HOME/agate/init.lua`,
-        `~/.config/agate/init.lua`), which you can manage by hand or with
-        home-manager.
+        Contents of agate's init.lua, managed by Nix. Written verbatim to
+        `~/.config/agate/init.lua` (under {option}`xdg.configHome`), which is
+        where agate loads its config from. Mutually exclusive with
+        {option}`services.agate.configFile`. When neither is set, agate falls
+        back to whatever already exists on its search path.
       '';
     };
 
     configFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      example = lib.literalExpression ''"''${config.users.users.me.home}/.config/agate/init.lua"'';
+      example = lib.literalExpression ''./agate/init.lua'';
       description = ''
-        Path to an init.lua to use (exported as `WM_CONFIG`). Mutually
-        exclusive with {option}`services.agate.config`. Point this at a file
-        in your home directory if you want to edit the config without a
-        darwin-rebuild.
+        Path to an init.lua to use. Symlinked to `~/.config/agate/init.lua`,
+        so you can keep the config in your dotfiles repo. Mutually exclusive
+        with {option}`services.agate.config`.
       '';
     };
 
     logFile = lib.mkOption {
       type = lib.types.str;
-      default = "/tmp/agate.log";
+      default = "${config.home.homeDirectory}/Library/Logs/agate.log";
       description = "Where the agent's stdout goes.";
     };
 
     errorLogFile = lib.mkOption {
       type = lib.types.str;
-      default = "/tmp/agate.error.log";
+      default = "${config.home.homeDirectory}/Library/Logs/agate.error.log";
       description = "Where the agent's stderr goes (agate logs to stderr).";
     };
   };
@@ -90,20 +106,32 @@ in
       }
     ];
 
-    environment.systemPackages = [ cfg.package ];
+    home.packages = [ cfg.package ];
 
-    # User agent, not a daemon: agate must run inside the user's GUI session
-    # to reach the window server and Accessibility.
-    launchd.user.agents.agate = {
-      serviceConfig = {
+    # Write the declared config to agate's real search path. agate then loads it
+    # with no env-var indirection — so inline `config` is actually applied.
+    xdg.configFile."agate/init.lua" = lib.mkIf manageConfig (
+      if cfg.configFile != null then
+        { source = cfg.configFile; }
+      else
+        { text = cfg.config; }
+    );
+
+    # Per-user launchd agent: agate must run inside the user's GUI session to
+    # reach the window server and Accessibility, so it's an agent, not a daemon.
+    launchd.agents.agate = {
+      enable = true;
+      config = {
         ProgramArguments = [ (lib.getExe cfg.package) ];
         RunAtLoad = true;
         KeepAlive = true;
         ProcessType = "Interactive";
         StandardOutPath = cfg.logFile;
         StandardErrorPath = cfg.errorLogFile;
-        EnvironmentVariables = lib.mkIf (configFile != null) {
-          WM_CONFIG = "${configFile}";
+      }
+      // lib.optionalAttrs manageConfig {
+        EnvironmentVariables = {
+          WM_CONFIG = configTarget;
         };
       };
     };

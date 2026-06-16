@@ -28,8 +28,9 @@
         default = agate;
       });
 
+      # home-manager module. Add it to your home-manager imports and set
       # `services.agate.enable = true;` — see nix/module.nix for all options.
-      darwinModules = rec {
+      homeManagerModules = rec {
         agate = import ./nix/module.nix self;
         default = agate;
       };
