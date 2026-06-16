@@ -1,98 +1,44 @@
-# agate package derivation. Built with the Zig build system; Zig package
-# dependencies (build.zig.zon) are prefetched into a fixed-output derivation
-# (`deps`) so the main, sandboxed build is fully offline.
+# agate package. Installs the prebuilt aarch64-darwin binary from the matching
+# GitHub Release (see .github/workflows/release.yml) — so `nix run`/home-manager
+# get the same artifact that's published for everyone else, with no Zig
+# toolchain or compile step.
 #
-# SkyLight (private framework) links against the stub bundled with the
-# nixpkgs apple-sdk; build.zig finds it via $SDKROOT, which the darwin
-# stdenv sets — no Xcode or xcrun needed.
+# Updating to a new release: bump `version` to the tag (without the leading `v`),
+# set `hash` to `lib.fakeHash`, run `nix build .#agate`, and copy the real hash
+# Nix prints back here. (The hash can only be known once the release asset is
+# published, so it lands in a commit *after* the tag — Nix users pin a commit or
+# branch, not the tag.)
 {
   lib,
   stdenv,
-  zig,
+  fetchurl,
 }:
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "agate";
-  version = "0.0.0";
+  version = "0.1.0-alpha.1";
 
-  # Only what the zig build needs; keeps zig-pkg/zig-out/.zig-cache and
-  # unrelated files out of the source hash.
-  src = lib.fileset.toSource {
-    root = ../.;
-    fileset = lib.fileset.unions [
-      ../build.zig
-      ../build.zig.zon
-      ../src
-      ../tools
-    ];
+  src = fetchurl {
+    url = "https://github.com/frostplexx/agate-wm/releases/download/v${finalAttrs.version}/agate-aarch64-apple-darwin.tar.gz";
+    hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
   };
 
-  # All build.zig.zon dependencies as Zig's global package cache (`p/` of
-  # tarballs, named by content hash). Fixed-output so it may touch the
-  # network; refresh outputHash after changing build.zig.zon
-  # (set it to lib.fakeHash, build, copy the reported hash).
-  deps = stdenv.mkDerivation {
-    pname = "${finalAttrs.pname}-deps";
-    version = finalAttrs.version;
-    src = finalAttrs.src;
-    nativeBuildInputs = [ zig ];
-    dontConfigure = true;
-    dontInstall = true;
-    dontFixup = true;
-    buildPhase = ''
-      runHook preBuild
-      export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-global-cache
-      zig build --fetch=all
-      mv $ZIG_GLOBAL_CACHE_DIR/p $out
-      runHook postBuild
-    '';
-    outputHashMode = "recursive";
-    outputHashAlgo = "sha256";
-    outputHash = "sha256-Pm+QKg//OA1H9oRraTFAteABei/EMLG22/zAUUMt+lY=";
-  };
-
-  nativeBuildInputs = [ zig ];
-
+  # The tarball is just the binary — nothing to configure or compile.
+  sourceRoot = ".";
   dontConfigure = true;
-  dontInstall = true; # `zig build install --prefix $out` is the install
-  doCheck = true;
+  dontBuild = true;
 
-  # Zig normally locates the macOS libc headers by running xcrun, which the
-  # sandbox doesn't have; without them it falls back to its bundled headers,
-  # whose newer mach headers break the CoreFoundation @cImport. `--libc`
-  # points it at the stdenv's apple-sdk explicitly (SDKROOT is set by the
-  # darwin stdenv).
-  preBuild = ''
-    cat > "$TMPDIR/libc.txt" <<EOF
-    include_dir=$SDKROOT/usr/include
-    sys_include_dir=$SDKROOT/usr/include
-    crt_dir=
-    msvc_lib_dir=
-    kernel32_lib_dir=
-    gcc_dir=
-    EOF
-  '';
-
-  buildPhase = ''
-    runHook preBuild
-    export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-global-cache
-    mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
-    cp -r ${finalAttrs.deps} "$ZIG_GLOBAL_CACHE_DIR/p"
-    chmod -R u+w "$ZIG_GLOBAL_CACHE_DIR"
-    zig build install --libc "$TMPDIR/libc.txt" -Doptimize=ReleaseFast --color off --prefix $out
-    runHook postBuild
-  '';
-
-  checkPhase = ''
-    runHook preCheck
-    zig build test --libc "$TMPDIR/libc.txt" --color off
-    runHook postCheck
+  installPhase = ''
+    runHook preInstall
+    install -Dm755 agate_wm "$out/bin/agate_wm"
+    runHook postInstall
   '';
 
   meta = {
     description = "Tiling window manager for macOS, scripted in Lua";
     homepage = "https://github.com/frostplexx/agate-wm";
-    platforms = lib.platforms.darwin;
+    license = lib.licenses.mit;
+    platforms = [ "aarch64-darwin" ];
     mainProgram = "agate_wm";
   };
 })

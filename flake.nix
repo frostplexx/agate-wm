@@ -12,6 +12,9 @@
     }:
     let
       lib = nixpkgs.lib;
+      # We only ship a prebuilt Apple Silicon binary (see nix/package.nix), so
+      # the package/checks are aarch64-darwin only.
+      packageSystems = [ "aarch64-darwin" ];
       darwinSystems = [
         "aarch64-darwin"
         "x86_64-darwin"
@@ -23,7 +26,7 @@
       forSystems = systems: f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      packages = forSystems darwinSystems (pkgs: rec {
+      packages = forSystems packageSystems (pkgs: rec {
         agate = pkgs.callPackage ./nix/package.nix { };
         default = agate;
       });
@@ -39,7 +42,7 @@
         agate = final.callPackage ./nix/package.nix { };
       };
 
-      checks = forSystems darwinSystems (pkgs: {
+      checks = forSystems packageSystems (pkgs: {
         package = self.packages.${pkgs.stdenv.hostPlatform.system}.agate;
       });
 

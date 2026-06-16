@@ -1,0 +1,53 @@
+name: Release
+
+# Cut a release by pushing a semver tag, e.g.
+#   git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1
+# The job builds the aarch64-darwin (Apple Silicon) binary and publishes a
+# GitHub Release with it attached, via softprops/action-gh-release. Tags with a
+# pre-release suffix (anything containing `-`, e.g. `-alpha.1`) are marked as a
+# GitHub pre-release automatically.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build & publish (aarch64-darwin)
+    runs-on: macos-15 # Apple Silicon runner → native arm64 build
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast --summary all
+
+      - name: Verify the binary is arm64
+        run: |
+          file zig-out/bin/agate_wm
+          lipo -archs zig-out/bin/agate_wm | grep -qw arm64
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          tar -czf dist/agate-aarch64-apple-darwin.tar.gz -C zig-out/bin agate_wm
+          shasum -a 256 dist/agate-aarch64-apple-darwin.tar.gz
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/agate-aarch64-apple-darwin.tar.gz
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
