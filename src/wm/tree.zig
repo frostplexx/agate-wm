@@ -58,6 +58,7 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
 
         const workspace = try makeCon(alloc, .Workspace, monitor, 2, sp.id);
         workspace.gaps = default_gaps;
+        workspace.layout = .SCROLL; // every workspace is a Flow strip
         workspace.space_type = sp.type;
         try monitor.children.append(alloc, workspace);
 
@@ -99,6 +100,7 @@ pub fn ensureMonitor(alloc: Allocator, root: *data.Con, idx: usize) !*data.Con {
 pub fn addWorkspace(alloc: Allocator, mon: *data.Con, sid: u64, space_type: i64) !*data.Con {
     const ws = try makeCon(alloc, .Workspace, mon, 2, sid);
     ws.gaps = default_gaps;
+    ws.layout = .SCROLL; // every workspace is a Flow strip
     ws.space_type = space_type;
     try mon.children.append(alloc, ws);
     return ws;
@@ -112,7 +114,8 @@ fn resetWorkspace(ws: *data.Con, mon: *data.Con, sid: u64, space_type: i64) void
     ws.con_type = .Workspace;
     ws.space_type = space_type;
     ws.window = null;
-    ws.layout = .H_SPLIT;
+    ws.layout = .SCROLL; // every workspace is a Flow strip
+    ws.scroll_offset = 0;
     ws.auto_small = false;
     ws.gaps = default_gaps;
     ws.parent = mon;
@@ -228,6 +231,59 @@ pub fn addLeaf(alloc: Allocator, ws: *data.Con, win: data.Window) !*data.Con {
     leaf.ratio = averageChildRatio(ws);
     try ws.children.append(alloc, leaf);
     return leaf;
+}
+
+/// Add a new window as its own column on a Flow strip, inserted immediately
+/// after the column `after` (a direct child of `ws`), or appended to the trailing
+/// edge when `after` is null or isn't a child of `ws`. The niri/paneru insertion
+/// rule: a new window lands just right of the focused column rather than always at
+/// the end. The new column keeps `width_frac = 0` (the layout uses the configured
+/// default width) and neighbours keep theirs, so opening a window never resizes
+/// the others.
+pub fn insertColumnAfter(alloc: Allocator, ws: *data.Con, win: data.Window, after: ?*data.Con) !*data.Con {
+    const leaf = try makeCon(alloc, .Container, ws, ws.depth + 1, win.id);
+    leaf.window = win;
+    leaf.ratio = 1.0;
+    const at: usize = blk: {
+        if (after) |a| if (childIndexOf(ws, a)) |i| break :blk i + 1;
+        break :blk ws.children.items.len;
+    };
+    try ws.children.insert(alloc, at, leaf);
+    return leaf;
+}
+
+/// The column (a direct child of workspace `ws`) that contains `leaf`, or null if
+/// `leaf` isn't under `ws`. A column is either the leaf itself (a single-window
+/// column) or the nested container holding it.
+pub fn columnOf(ws: *data.Con, leaf: *data.Con) ?*data.Con {
+    var node: *data.Con = leaf;
+    while (node.parent) |parent| : (node = parent) {
+        if (parent == ws) return node;
+    }
+    return null;
+}
+
+/// Eject `leaf` from its internal column-container into its own top-level column
+/// on the strip (niri's "expel"), placed just after the container it left when
+/// `forward`, else just before it. No-op when `leaf` is already its own column (a
+/// direct child of the workspace) or its container isn't itself a direct
+/// workspace column. Returns true if the tree changed (the caller re-flushes).
+pub fn expelLeaf(alloc: Allocator, leaf: *data.Con, forward: bool) bool {
+    const container = leaf.parent orelse return false;
+    if (container.con_type == .Workspace) return false; // already its own column
+    const ws = workspaceOf(leaf) orelse return false;
+    if (container.parent != ws) return false; // only un-nest one level
+    const ci = childIndexOf(ws, container) orelse return false;
+    const li = childIndexOf(container, leaf) orelse return false;
+
+    _ = container.children.orderedRemove(li);
+    leaf.parent = ws;
+    leaf.depth = ws.depth + 1;
+    leaf.ratio = 1.0;
+    leaf.width_frac = 0; // adopt the default column width
+    ws.children.insert(alloc, if (forward) ci + 1 else ci, leaf) catch return false;
+    collapseIfDegenerate(container); // the container may now have a single child
+    return true;
 }
 
 /// Mean ratio of `con`'s children (1.0 if it has none).
@@ -719,6 +775,75 @@ test "addLeaf appends at the trailing edge with the average sibling ratio" {
     try testing.expectEqual(@as(usize, 2), ws.children.items.len);
     try testing.expectEqual(ws, b.parent.?);
     try testing.expectEqual(ws.depth + 1, b.depth);
+}
+
+test "insertColumnAfter places a new column right of the focused one" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    ws.layout = .SCROLL;
+    const a = try insertColumnAfter(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)), null);
+    const b = try insertColumnAfter(alloc, ws, testWindow(2, 100, testRect(0, 0, 100, 100)), null);
+    // Insert C after A → order becomes A, C, B (not appended at the end).
+    const c = try insertColumnAfter(alloc, ws, testWindow(3, 100, testRect(0, 0, 100, 100)), a);
+
+    try testing.expectEqual(@as(usize, 3), ws.children.items.len);
+    try testing.expectEqual(a, ws.children.items[0]);
+    try testing.expectEqual(c, ws.children.items[1]);
+    try testing.expectEqual(b, ws.children.items[2]);
+    try testing.expectEqual(@as(f64, 0), c.width_frac); // uses the default width
+}
+
+test "columnOf resolves the workspace-level column for a nested leaf" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    ws.layout = .SCROLL;
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const cont = try makeCon(alloc, .Container, ws, 1, 0);
+    cont.layout = .V_SPLIT;
+    try ws.children.append(alloc, cont);
+    const b1 = try addLeaf(alloc, cont, testWindow(2, 100, testRect(0, 0, 100, 100)));
+
+    try testing.expectEqual(a, columnOf(ws, a).?); // a leaf column is its own column
+    try testing.expectEqual(cont, columnOf(ws, b1).?); // a nested leaf → its container
+}
+
+test "expelLeaf ejects a nested window into its own column after the container" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const root = try makeCon(alloc, .Root, null, 0, 0);
+    const mon = try makeCon(alloc, .Monitor, root, 1, 0);
+    try root.children.append(alloc, mon);
+    const ws = try makeCon(alloc, .Workspace, mon, 2, 1);
+    ws.layout = .SCROLL;
+    try mon.children.append(alloc, ws);
+
+    // Column 0: a leaf. Column 1: a vertical split of two windows.
+    const a = try addLeaf(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)));
+    const cont = try makeCon(alloc, .Container, ws, 3, 0);
+    cont.layout = .V_SPLIT;
+    try ws.children.append(alloc, cont);
+    const b1 = try addLeaf(alloc, cont, testWindow(2, 100, testRect(0, 0, 100, 100)));
+    const b2 = try addLeaf(alloc, cont, testWindow(3, 100, testRect(0, 0, 100, 100)));
+
+    // Expel b1 forward: the container collapses to just b2 (promoted into its
+    // slot), and b1 becomes its own column right after it. Order: a, b2, b1.
+    try testing.expect(expelLeaf(alloc, b1, true));
+    try testing.expectEqual(@as(usize, 3), ws.children.items.len);
+    try testing.expectEqual(a, ws.children.items[0]);
+    try testing.expectEqual(b2, ws.children.items[1]);
+    try testing.expectEqual(b1, ws.children.items[2]);
+    try testing.expectEqual(ws, b1.parent.?);
+
+    // Expelling an already-top-level column is a no-op.
+    try testing.expect(!expelLeaf(alloc, a, true));
 }
 
 test "findLeaf / findWorkspace / hasWindow / removeWindow" {

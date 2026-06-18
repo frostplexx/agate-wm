@@ -37,6 +37,11 @@
 ---@field space_indicator? boolean Show the active space's number as a menu-bar status item. (default `true`)
 ---@field drag_preview? boolean While dragging a window, highlight the tile it will swap into on drop with a translucent overlay. (default `true`)
 ---@field smart_gaps? boolean When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`). (default `false`)
+---@field default_column_width? number Flow strip: the width a freshly opened column targets, as a fraction of the viewport (0–1). Acts as a proportional weight while the strip fits the screen, or the column's width once the strip scrolls. (default `0.5`)
+---@field min_column_width? number Flow strip soft bound (fraction of the viewport): while all columns fit at this width the strip fills the screen like a classic tiler; only with more columns than fit at this width does it scroll. Controls the strip's on-screen capacity. (default `0.22`)
+---@field preset_column_widths? number[] Flow strip: the column widths (fractions of the viewport) `agate.column_width` cycles through with `"next"`/`"prev"`, and that the `"1/3"`/`"1/2"`/`"2/3"`/`"full"` names snap to. (default `{ 0.333, 0.5, 0.667, 1.0 }`)
+---@field scroll_sliver? number Flow strip: width (px) of the sliver of an off-screen column kept peeking at the screen edge while the strip is scrolled, so nothing is ever fully hidden. (default `24`)
+---@field swipe_scroll_fingers? integer Flow strip: number of fingers for the trackpad swipe that scrolls the strip live (drag the columns under your fingers, snapping to a column on release). Set 0 to disable. (default `3`)
 
 ---@class agate.SmallScreen
 ---@field enabled? boolean Master switch (default `true`).
@@ -111,6 +116,25 @@ function agate.zoom_fullscreen() end
 
 ---Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
 function agate.toggle_float() end
+
+---Flow strip: set or cycle the focused column's width. `"wider"`/`"narrower"` (aliases `"next"`/`"prev"`) step through `preset_column_widths`; `"full"`, `"half"`, or a fraction like `"1/3"`/`"2/3"` set it directly. Only the focused column changes — its neighbours keep their widths.
+---@param target string `"wider"`/`"narrower"`/`"next"`/`"prev"`, or a width: `"full"`, `"half"`, `"1/3"`, `"1/2"`, `"2/3"`, a fraction `"a/b"`, or a number (`0.4`, or `40` for 40%).
+function agate.column_width(target) end
+
+---Flow strip: re-equalize every column on the workspace so they tile the viewport evenly (balanced classic tiling). Undoes manual `column_width` changes.
+function agate.fit() end
+
+---Flow strip: scroll or jump along the strip. `"left"`/`"right"` step focus to the adjacent column (auto-scrolling it into view), `"start"`/`"end"` focus the first/last column, `"center"` centers the focused column.
+---@param target "left"|"right"|"start"|"end"|"center" Where to scroll.
+function agate.scroll(target) end
+
+---Flow strip: pull the adjacent column into the focused column, merging the two into a single vertical split (niri's "consume into column"). The focused window stays focused.
+---@param dir agate.Direction Which neighbour column to absorb.
+function agate.consume(dir) end
+
+---Flow strip: eject the focused window out of its column into its own column on the strip (the inverse of `consume`).
+---@param dir agate.Direction `"left"` ejects before the column, otherwise after it.
+function agate.expel(dir) end
 
 ---Run a shell command in the background, like skhd's `:` commands. The command line is handed to `$SHELL -c` (falling back to `/bin/sh -c`), so pipes, globs, and `&&` all work. agate does not wait for it — use it to launch apps or scripts from a keybind.
 ---@param cmd string The shell command line to run.

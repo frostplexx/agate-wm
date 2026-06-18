@@ -9,7 +9,9 @@ const focus = @import("../wm/focus/focus.zig");
 const tree = @import("../wm/tree.zig");
 const data = @import("../wm/data.zig");
 const window = @import("../wm/window.zig");
+const wm_layout = @import("../wm/layout.zig");
 const parse = @import("parse.zig");
+const ctx = @import("context.zig");
 
 /// Rewrite every workspace and nested split container's gaps to the configured
 /// values, leaving leaf cons untouched (they don't carry the gaps the layout reads).
@@ -34,6 +36,12 @@ pub fn setActiveLayout(app: *state.AppState, name: []const u8) void {
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
     const target = if (focus.currentFocusedLeaf(app)) |leaf| (leaf.parent orelse ws) else ws;
+    // Every workspace is a Flow strip (SCROLL); the classic layouts apply to a
+    // *column*, not the strip itself. When the focused column is still a bare
+    // single-window leaf there's no container to restyle yet — `agate.consume`
+    // makes one — so changing layout here would be a no-op at best and would
+    // break the strip at worst. Leave the workspace alone.
+    if (target.con_type == .Workspace) return;
     if (std.mem.eql(u8, name, "toggle")) {
         target.layout = switch (target.layout) {
             .H_SPLIT => .V_SPLIT,
@@ -192,4 +200,129 @@ pub fn runPendingMove(app: *state.AppState) void {
     tree.flushWorkspace(app, dst); // tile the destination
     app.pending_focus = .{ .wid = pm.wid, .sid = pm.target_sid };
     std.debug.print("[move] fullscreen exited; #{d} -> space {d}\n", .{ pm.wid, pm.target_sid });
+}
+
+// ---------------------------------------------------------------------------
+// Flow strip (SCROLL) actions
+// ---------------------------------------------------------------------------
+
+/// The focused column: the ancestor of the focused window that is a direct child
+/// of its workspace (a single-window leaf or the container holding it). Null when
+/// nothing is focused or focus can't be resolved to a column.
+fn focusedColumn(app: *state.AppState) ?*data.Con {
+    const leaf = focus.currentFocusedLeaf(app) orelse return null;
+    const ws = tree.workspaceOf(leaf) orelse return null;
+    return tree.columnOf(ws, leaf);
+}
+
+/// The active workspace's Con (the visible Space on the focused display).
+fn activeWorkspace(app: *state.AppState) ?*data.Con {
+    const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return null;
+    return tree.findWorkspace(app.tree orelse return null, sid);
+}
+
+/// Resolve the next preset width strictly above (`up`) or below `cur` from the
+/// sorted-ish preset list, wrapping at the ends. `presets` need not be sorted; we
+/// scan for the nearest in the requested direction and fall back to the extreme.
+fn nextPreset(presets: []const f64, cur: f64, up: bool) f64 {
+    const eps: f64 = 0.001;
+    var best: ?f64 = null;
+    var extreme: f64 = cur;
+    for (presets) |p| {
+        if (up) {
+            if (p > extreme) extreme = p; // remember the largest for wrap-around
+            if (p > cur + eps and (best == null or p < best.?)) best = p;
+        } else {
+            if (p < extreme) extreme = p; // remember the smallest for wrap-around
+            if (p < cur - eps and (best == null or p > best.?)) best = p;
+        }
+    }
+    if (best) |b| return b;
+    // No preset beyond `cur` in this direction — wrap to the opposite extreme.
+    var wrap = cur;
+    for (presets) |p| {
+        if (up) {
+            if (wrap == cur or p < wrap) wrap = p; // smallest
+        } else {
+            if (wrap == cur or p > wrap) wrap = p; // largest
+        }
+    }
+    return wrap;
+}
+
+/// Set or cycle the focused column's target width (`agate.column_width`).
+/// `target` is `"wider"`/`"next"` or `"narrower"`/`"prev"` to step through the
+/// configured `preset_column_widths`, or a width name (`"full"`, `"1/2"`, …)
+/// parsed by `parse.columnWidthFromName`. Re-tiles; only the focused column
+/// changes weight, so its neighbours keep theirs.
+pub fn cycleColumnWidth(app: *state.AppState, target: []const u8) void {
+    const col = focusedColumn(app) orelse return;
+    const cfg = ctx.config orelse return;
+    const cur = if (col.width_frac > 0) col.width_frac else wm_layout.default_column_width;
+
+    const next: f64 = blk: {
+        if (std.mem.eql(u8, target, "wider") or std.mem.eql(u8, target, "next") or std.mem.eql(u8, target, "grow"))
+            break :blk nextPreset(cfg.preset_column_widths, cur, true);
+        if (std.mem.eql(u8, target, "narrower") or std.mem.eql(u8, target, "prev") or
+            std.mem.eql(u8, target, "previous") or std.mem.eql(u8, target, "shrink"))
+            break :blk nextPreset(cfg.preset_column_widths, cur, false);
+        break :blk parse.columnWidthFromName(target) orelse return;
+    };
+    col.width_frac = std.math.clamp(next, 0.05, 1.0);
+    tree.flushActive(app);
+}
+
+/// Re-equalize every column on the active workspace so fit mode tiles the strip
+/// evenly (`agate.fit`): clears each column's explicit width so they all fall
+/// back to the default weight. Balanced classic tiling, below capacity.
+pub fn fitColumns(app: *state.AppState) void {
+    const ws = activeWorkspace(app) orelse return;
+    for (ws.children.items) |child| child.width_frac = 0;
+    ws.scroll_offset = 0;
+    tree.flushActive(app);
+}
+
+/// Scroll / jump along the Flow strip (`agate.scroll`). `target`:
+///  - `"left"`/`"right"` — step focus to the adjacent column (auto-scrolls).
+///  - `"start"`/`"end"` — focus the first / last column.
+///  - `"center"` — center the focused column in the viewport.
+pub fn scrollStrip(app: *state.AppState, target: []const u8) void {
+    if (std.mem.eql(u8, target, "left")) {
+        _ = focus.focusDirection(app, .left);
+    } else if (std.mem.eql(u8, target, "right")) {
+        _ = focus.focusDirection(app, .right);
+    } else if (std.mem.eql(u8, target, "start") or std.mem.eql(u8, target, "first")) {
+        _ = focus.focusColumnEdge(app, false);
+    } else if (std.mem.eql(u8, target, "end") or std.mem.eql(u8, target, "last")) {
+        _ = focus.focusColumnEdge(app, true);
+    } else if (std.mem.eql(u8, target, "center") or std.mem.eql(u8, target, "centre")) {
+        const ws = activeWorkspace(app) orelse return;
+        wm_layout.centerFocusedColumn(ws, tree.areaForWorkspace(app, ws));
+        tree.flushWorkspace(app, ws);
+    }
+}
+
+/// Consume the adjacent column into the focused column (`agate.consume`): the two
+/// columns merge into one vertical split, so the neighbour's window stacks below
+/// (or above) the focused one. niri's "consume into column". Reuses
+/// `tree.joinWithNeighbor` on the column nodes.
+pub fn consume(app: *state.AppState, dir: focus.Direction) void {
+    const col = focusedColumn(app) orelse return;
+    const forward = dir == .right or dir == .down;
+    if (tree.joinWithNeighbor(app.arena, col, forward, .V_SPLIT)) |_| {
+        tree.flushActive(app);
+        if (focus.currentFocusedLeaf(app)) |leaf| _ = focus.focusLeaf(leaf);
+    }
+}
+
+/// Expel the focused window out of its column into its own column on the strip
+/// (`agate.expel`): the inverse of `consume`. `dir` left ejects before the
+/// column, right (or up/down) after it.
+pub fn expel(app: *state.AppState, dir: focus.Direction) void {
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    const forward = dir != .left;
+    if (tree.expelLeaf(app.arena, leaf, forward)) {
+        tree.flushActive(app);
+        _ = focus.focusLeaf(leaf);
+    }
 }

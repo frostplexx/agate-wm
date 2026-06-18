@@ -75,11 +75,23 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
     ctx.appstate = app;
 
     const cfg = try gpa.create(Config);
+    // Default Flow strip width presets (fractions of the viewport). Owned by the
+    // config allocator so a user `preset_column_widths` can free and replace it.
+    const default_presets = try gpa.alloc(f64, 4);
+    default_presets[0] = 1.0 / 3.0;
+    default_presets[1] = 0.5;
+    default_presets[2] = 2.0 / 3.0;
+    default_presets[3] = 1.0;
     cfg.* = .{
         .alloc = gpa,
         .gaps = 8,
         .outer_gaps = 8,
         .accordion_padding = 40,
+        .default_column_width = 0.5,
+        .min_column_width = 0.22,
+        .preset_column_widths = default_presets,
+        .scroll_sliver = 24,
+        .swipe_scroll_fingers = 3,
         .hyper_mods = types.MOD_CTRL | types.MOD_ALT | types.MOD_CMD | types.MOD_SHIFT,
         .hyper_enabled = true, // built-in Caps Lock → F18 hyper key (LazyKeys port)
         .hyper_key = macos.hyperkey.F18_KEYCODE, // trigger = F18 (Caps Lock is remapped to it)

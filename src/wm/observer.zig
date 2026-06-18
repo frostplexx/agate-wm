@@ -1379,7 +1379,10 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     // meaningless there and used to *swallow* the existing leaf, leaving its
     // window untracked at full size. In those layouts a genuine new native tab
     // simply gets its own (harmlessly overlapping) leaf.
-    const frame_identity_is_tab = ws.layout == .H_SPLIT or ws.layout == .V_SPLIT;
+    // Scroll columns and splits give each window a distinct frame, so a same-app
+    // window appearing at an identical frame is a native tab join. Stacks/floats
+    // overlap naturally, so frame identity there is meaningless (see below).
+    const frame_identity_is_tab = ws.layout == .H_SPLIT or ws.layout == .V_SPLIT or ws.layout == .SCROLL;
     const frame_sibling: ?*data.Con = if (frame_identity_is_tab)
         tree.findTabSibling(ws, win.pid, win.bounds)
     else
@@ -1400,7 +1403,19 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     }
 
     std.debug.print("[observer] +window #{d} {s}\n", .{ win.id, win.owner });
-    const leaf = tree.addLeaf(app.arena, ws, win) catch return;
+    // On a Flow strip the new window becomes its own column inserted right of the
+    // focused column (niri/paneru), so it appears next to where you are working
+    // instead of at the far end of the strip. When focus is elsewhere (or the
+    // destination isn't a strip), it appends at the trailing edge.
+    const after: ?*data.Con = if (ws.layout == .SCROLL) blk: {
+        const cur = focus.currentFocusedLeaf(app) orelse break :blk null;
+        if (tree.workspaceOf(cur) != ws) break :blk null;
+        break :blk tree.columnOf(ws, cur);
+    } else null;
+    const leaf = if (ws.layout == .SCROLL)
+        tree.insertColumnAfter(app.arena, ws, win, after) catch return
+    else
+        tree.addLeaf(app.arena, ws, win) catch return;
 
     // `fromElement` already cached the AX element, so this just returns it.
     if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);

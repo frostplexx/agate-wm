@@ -13,6 +13,14 @@ pub const Layout = enum {
     FLOAT,
     H_STACK,
     V_STACK,
+    /// "Flow": a horizontally scrollable strip of columns (niri/PaperWM-style),
+    /// the fundamental layout of every Workspace. Its direct children are columns;
+    /// while they fit at a usable width the strip fills the viewport like a classic
+    /// tiler, degrading into scrolling (with off-screen columns kept as edge peeks)
+    /// only past a predictable capacity. See `layout.layoutScroll`. A column is a
+    /// leaf or a nested container that tiles its own windows with the classic modes
+    /// above, so traditional tiling lives *inside* a column.
+    SCROLL,
 };
 
 /// Gaps between windows and screen edges. These can be configured by the user.
@@ -107,6 +115,16 @@ pub const Con = struct {
     /// by the sum of siblings' ratios, so the units are arbitrary but must be
     /// consistent across siblings.
     ratio: f64 = 1.0,
+    /// For a *column* (a direct child of a `SCROLL` workspace): its target width as
+    /// a fraction of the viewport. In fit mode it acts as a proportional weight
+    /// (like `ratio` does for `H_SPLIT`); in scroll mode it's the column's absolute
+    /// target width. `0` means "unset" — the layout uses the configured default.
+    /// Unused for non-column cons (their internal split uses `ratio`).
+    width_frac: f64 = 0,
+    /// For a `SCROLL` workspace: the strip's horizontal translation in points
+    /// (how far the columns have scrolled left of the viewport origin). Always 0
+    /// in fit mode, where everything is on-screen. See `layout.layoutScroll`.
+    scroll_offset: f64 = 0,
     /// Depth of this Con in the tree. Root is 0, its children are 1, etc.
     depth: u32 = 0,
     /// The child this container last held focus through, so directional focus can

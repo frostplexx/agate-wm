@@ -54,6 +54,38 @@ fn boolField(lua: *Lua, idx: i32, name: [:0]const u8, dst: *bool) void {
     if (lua.isBoolean(-1)) dst.* = lua.toBoolean(-1);
 }
 
+/// Replace `cfg.preset_column_widths` from a `preset_column_widths` array of
+/// numbers (each a viewport fraction). Left unchanged when absent; an empty or
+/// all-invalid list is rejected so `agate.column_width` always has something to
+/// cycle. The old slice is freed and a fresh one allocated from `cfg.alloc`.
+fn parsePresetWidths(lua: *Lua, cfg: *types.Config) void {
+    _ = lua.getField(1, "preset_column_widths");
+    defer lua.pop(1);
+    if (!lua.isTable(-1)) return;
+
+    var vals: [16]f64 = undefined;
+    var count: usize = 0;
+    var i: zlua.Integer = 1;
+    while (count < vals.len) : (i += 1) {
+        _ = lua.getIndex(-1, i);
+        defer lua.pop(1);
+        if (lua.isNil(-1)) break;
+        if (lua.isNumber(-1)) {
+            const v = lua.toNumber(-1) catch continue;
+            if (v > 0 and v <= 1.0) {
+                vals[count] = v;
+                count += 1;
+            }
+        }
+    }
+    if (count == 0) return; // keep the existing presets rather than empty them
+
+    const slice = cfg.alloc.alloc(f64, count) catch return;
+    @memcpy(slice, vals[0..count]);
+    cfg.alloc.free(cfg.preset_column_widths);
+    cfg.preset_column_widths = slice;
+}
+
 // ---------------------------------------------------------------------------
 // agate.* functions
 // ---------------------------------------------------------------------------
@@ -150,6 +182,20 @@ fn agateConfig(lua: *Lua) i32 {
     boolField(lua, 1, "drag_preview", &cfg.drag_preview);
     boolField(lua, 1, "smart_gaps", &cfg.smart_gaps);
     wm_layout.smart_gaps = cfg.smart_gaps;
+    // Flow strip tuning. Clamped to sane ranges so a bad value can't wedge the
+    // layout (a 0 min width would make capacity infinite again).
+    if (numberField(lua, "default_column_width", &cfg.default_column_width))
+        cfg.default_column_width = std.math.clamp(cfg.default_column_width, 0.1, 1.0);
+    if (numberField(lua, "min_column_width", &cfg.min_column_width))
+        cfg.min_column_width = std.math.clamp(cfg.min_column_width, 0.05, 1.0);
+    _ = numberField(lua, "scroll_sliver", &cfg.scroll_sliver);
+    var swipe_fingers: f64 = @floatFromInt(cfg.swipe_scroll_fingers);
+    if (numberField(lua, "swipe_scroll_fingers", &swipe_fingers))
+        cfg.swipe_scroll_fingers = @intFromFloat(std.math.clamp(swipe_fingers, 0, 5));
+    parsePresetWidths(lua, cfg);
+    wm_layout.default_column_width = cfg.default_column_width;
+    wm_layout.min_column_width = cfg.min_column_width;
+    wm_layout.scroll_sliver = cfg.scroll_sliver;
     // space_animation: how much of the Space-switch transition plays.
     // TODO: Remove this option
     // @doc S|space_animation|string|"instant"|How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation).
@@ -436,6 +482,51 @@ fn agateToggleFloat(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|column_width|Flow strip: set or cycle the focused column's width. `"wider"`/`"narrower"` (aliases `"next"`/`"prev"`) step through `preset_column_widths`; `"full"`, `"half"`, or a fraction like `"1/3"`/`"2/3"` set it directly. Only the focused column changes — its neighbours keep their widths.
+// @doc FP|column_width|target|string|false|`"wider"`/`"narrower"`/`"next"`/`"prev"`, or a width: `"full"`, `"half"`, `"1/3"`, `"1/2"`, `"2/3"`, a fraction `"a/b"`, or a number (`0.4`, or `40` for 40%).
+fn agateColumnWidth(lua: *Lua) i32 {
+    const app = ctx.appstate orelse return 0;
+    const t_z = lua.toString(1) catch return 0;
+    actions.cycleColumnWidth(app, std.mem.sliceTo(t_z, 0));
+    return 0;
+}
+
+// @doc F|fit|Flow strip: re-equalize every column on the workspace so they tile the viewport evenly (balanced classic tiling). Undoes manual `column_width` changes.
+fn agateFit(lua: *Lua) i32 {
+    _ = lua;
+    actions.fitColumns(ctx.appstate orelse return 0);
+    return 0;
+}
+
+// @doc F|scroll|Flow strip: scroll or jump along the strip. `"left"`/`"right"` step focus to the adjacent column (auto-scrolling it into view), `"start"`/`"end"` focus the first/last column, `"center"` centers the focused column.
+// @doc FP|scroll|target|"left"|"right"|"start"|"end"|"center"|false|Where to scroll.
+fn agateScroll(lua: *Lua) i32 {
+    const app = ctx.appstate orelse return 0;
+    const t_z = lua.toString(1) catch return 0;
+    actions.scrollStrip(app, std.mem.sliceTo(t_z, 0));
+    return 0;
+}
+
+// @doc F|consume|Flow strip: pull the adjacent column into the focused column, merging the two into a single vertical split (niri's "consume into column"). The focused window stays focused.
+// @doc FP|consume|dir|agate.Direction|false|Which neighbour column to absorb.
+fn agateConsume(lua: *Lua) i32 {
+    const app = ctx.appstate orelse return 0;
+    const dir_z = lua.toString(1) catch return 0;
+    const dir = parse.parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    actions.consume(app, dir);
+    return 0;
+}
+
+// @doc F|expel|Flow strip: eject the focused window out of its column into its own column on the strip (the inverse of `consume`).
+// @doc FP|expel|dir|agate.Direction|false|`"left"` ejects before the column, otherwise after it.
+fn agateExpel(lua: *Lua) i32 {
+    const app = ctx.appstate orelse return 0;
+    const dir_z = lua.toString(1) catch return 0;
+    const dir = parse.parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    actions.expel(app, dir);
+    return 0;
+}
+
 // @doc F|exec|Run a shell command in the background, like skhd's `:` commands. The command line is handed to `$SHELL -c` (falling back to `/bin/sh -c`), so pipes, globs, and `&&` all work. agate does not wait for it — use it to launch apps or scripts from a keybind.
 // @doc FP|exec|cmd|string|false|The shell command line to run.
 fn agateExec(lua: *Lua) i32 {
@@ -639,6 +730,11 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },
     .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
+    .{ .name = "column_width", .func = zlua.wrap(agateColumnWidth) },
+    .{ .name = "fit",         .func = zlua.wrap(agateFit) },
+    .{ .name = "scroll",      .func = zlua.wrap(agateScroll) },
+    .{ .name = "consume",     .func = zlua.wrap(agateConsume) },
+    .{ .name = "expel",       .func = zlua.wrap(agateExpel) },
     .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
     .{ .name = "toggle_float", .func = zlua.wrap(agateToggleFloat) },
     .{ .name = "exec",        .func = zlua.wrap(agateExec) },

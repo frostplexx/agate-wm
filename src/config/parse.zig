@@ -189,7 +189,28 @@ pub fn layoutFromName(name: []const u8) ?data.Layout {
     if (eql(u8, name, "v_stack") or eql(u8, name, "v_accordion") or
         eql(u8, name, "accordion") or eql(u8, name, "stacking") or eql(u8, name, "stacked")) return .V_STACK;
     if (eql(u8, name, "float") or eql(u8, name, "floating")) return .FLOAT;
+    if (eql(u8, name, "scroll") or eql(u8, name, "flow") or eql(u8, name, "strip")) return .SCROLL;
     return null;
+}
+
+/// Parse a column-width target name into a viewport fraction (0–1) for
+/// `agate.column_width`. Accepts `"full"`/`"max"` (1.0), `"half"` (0.5), a
+/// fraction like `"1/3"` or `"2/3"`, or a bare number (`"0.4"` or `"40"` for a
+/// percentage). Returns null for the cycle keywords (`next`/`prev`/…), which the
+/// caller resolves against the preset list instead.
+pub fn columnWidthFromName(s: []const u8) ?f64 {
+    const eql = std.mem.eql;
+    if (eql(u8, s, "full") or eql(u8, s, "max") or eql(u8, s, "maximize")) return 1.0;
+    if (eql(u8, s, "half")) return 0.5;
+    if (std.mem.indexOfScalar(u8, s, '/')) |i| {
+        const num = std.fmt.parseFloat(f64, s[0..i]) catch return null;
+        const den = std.fmt.parseFloat(f64, s[i + 1 ..]) catch return null;
+        if (den == 0) return null;
+        return num / den;
+    }
+    const v = std.fmt.parseFloat(f64, s) catch return null;
+    // A value above 1 is read as a percentage (e.g. "40" → 0.4).
+    return if (v > 1.0) v / 100.0 else v;
 }
 
 // @doc A|agate.Direction|A focus/move/resize direction.

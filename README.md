@@ -18,12 +18,52 @@
 
 Features:
 
+- **Flow**: a hybrid scrollable + traditional tiling layout (see below)
 - Instant space switching 
 - Moving windows between spaces
 - Correctly detect native tabs
 - Lua configuration
 - built-in global shortcuts daemon
 - Built-in hyper key functionality
+
+## Flow — hybrid scrollable tiling
+
+Every workspace in agate is a **Flow strip**: a horizontally scrollable row of
+columns, in the spirit of [niri] / [PaperWM] / [paneru]. It blends sliding and
+traditional tiling into one model, with no mode switch:
+
+- **Few windows → classic tiling.** While the columns fit at a usable width the
+  strip *fills the whole screen* like a normal tiler. One window fills the
+  screen; two share it; N share it down to a minimum width.
+- **Many windows → scrolling strip.** Only once there are more columns than fit at
+  `min_column_width` does the strip start to scroll. Opening a window then
+  **never resizes** the others — it just adds a column next to the focused one.
+- **Never lost.** It's *bounded*, not infinite: the screen stays full until a
+  predictable capacity, and once it scrolls, off-screen columns always keep a
+  thin **edge-peek** sliver visible, so the next window is one nudge away.
+- **Tile inside a column.** A column can itself be a traditional split/stack of
+  windows (`agate.consume`/`agate.expel` merge and split columns), so you get
+  vertical tiling within the horizontal strip.
+
+```lua
+agate.bind("hyper+h", "focus left")          -- move between columns (auto-scrolls)
+agate.bind("hyper+l", "focus right")
+agate.bind("hyper+r", "column_width wider")   -- cycle the focused column's width
+agate.bind("hyper+f", "fit")                  -- re-tile columns evenly (classic)
+agate.bind("hyper+comma", "consume left")     -- pull the left column into this one
+agate.bind("hyper+period", "expel right")     -- eject the focused window to its own column
+agate.bind("hyper+0", "scroll center")        -- center the focused column
+```
+
+A 3-finger horizontal trackpad swipe scrolls the strip live and snaps to a column
+on release (`swipe_scroll_fingers`). Tune the strip with
+`agate.config{ default_column_width = 0.5, min_column_width = 0.22,
+preset_column_widths = { 1/3, 1/2, 2/3, 1.0 } }`. See the
+[wiki](https://github.com/frostplexx/agate-wm/wiki) for the full reference.
+
+[niri]: https://github.com/YaLTeR/niri
+[PaperWM]: https://github.com/paperwm/PaperWM
+[paneru]: https://github.com/karinushka/paneru
 
 ## Getting Started
 

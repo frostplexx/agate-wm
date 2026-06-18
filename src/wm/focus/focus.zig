@@ -147,17 +147,44 @@ pub fn focusDirection(appState: *state.AppState, dir: Direction) bool {
 
     var node = cur;
     while (node.parent) |parent| : (node = parent) {
+        // A Flow strip (SCROLL) is a horizontal axis: left/right step between
+        // columns; up/down fall through to the column's internal vertical split.
         const axis_matches = if (horizontal)
-            (parent.layout == .H_SPLIT or parent.layout == .H_STACK)
+            (parent.layout == .H_SPLIT or parent.layout == .H_STACK or parent.layout == .SCROLL)
         else
             (parent.layout == .V_SPLIT or parent.layout == .V_STACK);
         if (!axis_matches) continue; // perpendicular split — keep climbing
         if (tree.adjacentSibling(node, forward)) |sib| {
-            return focusLeaf(descendToLeaf(sib, forward));
+            const ok = focusLeaf(descendToLeaf(sib, forward));
+            if (ok) scrollFlushIfNeeded(appState);
+            return ok;
         }
         // Axis matches but `node` is at the edge — climb and try a higher level.
     }
     return false;
+}
+
+/// Focus the first (`last=false`) or last column of the focused window's Flow
+/// strip, descending into the column to its edge leaf. Returns false when there
+/// is nothing to focus. The follow-up flush scrolls the strip into view.
+pub fn focusColumnEdge(appState: *state.AppState, last: bool) bool {
+    const root = appState.tree orelse return false;
+    const sid = macos.spaces.activeSpace(appState.skylight_cid) orelse return false;
+    const ws = tree.findWorkspace(root, sid) orelse return false;
+    if (ws.children.items.len == 0) return false;
+    const idx = if (last) ws.children.items.len - 1 else 0;
+    const ok = focusLeaf(descendToLeaf(ws.children.items[idx], !last));
+    if (ok) scrollFlushIfNeeded(appState);
+    return ok;
+}
+
+/// After a focus move, re-tile the focused window's workspace if it's a Flow
+/// strip so `layoutScroll` scrolls the now-focused column into view. A no-op for
+/// classic layouts (their flush wouldn't move anything, so we skip the AX churn).
+fn scrollFlushIfNeeded(appState: *state.AppState) void {
+    const leaf = currentFocusedLeaf(appState) orelse return;
+    const ws = tree.workspaceOf(leaf) orelse return;
+    if (ws.layout == .SCROLL) tree.flushWorkspace(appState, ws);
 }
 
 /// Cycle focus to the next (`forward`) or previous sibling of the focused
@@ -179,7 +206,9 @@ pub fn cycleFocus(appState: *state.AppState, forward: bool) bool {
     if (n < 2) return false;
     const i = tree.childIndexOf(parent, cur) orelse return false;
     const next = if (forward) (i + 1) % n else (i + n - 1) % n;
-    return focusLeaf(descendToLeaf(parent.children.items[next], forward));
+    const ok = focusLeaf(descendToLeaf(parent.children.items[next], forward));
+    if (ok) scrollFlushIfNeeded(appState);
+    return ok;
 }
 
 /// Descend `con` to a leaf. At each level prefer the container's last-focused

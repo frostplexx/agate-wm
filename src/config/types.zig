@@ -128,6 +128,30 @@ pub const Config = struct {
     /// `no_gaps_when_only`). Mirrored into `wm_layout.smart_gaps` on config load.
     // @doc S|smart_gaps|boolean|false|When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`).
     smart_gaps: bool,
+    /// Flow strip: target width (fraction of the viewport, 0–1) a new column gets.
+    /// Mirrored into `wm_layout.default_column_width` on config load.
+    // @doc S|default_column_width|number|0.5|Flow strip: the width a freshly opened column targets, as a fraction of the viewport (0–1). Acts as a proportional weight while the strip fits the screen, or the column's width once the strip scrolls.
+    default_column_width: f64,
+    /// Flow strip soft bound: the smallest a column may be squeezed to (fraction of
+    /// the viewport). While every column fits at this width the strip tiles the
+    /// whole screen; past that capacity it starts scrolling. Mirrored into
+    /// `wm_layout.min_column_width`.
+    // @doc S|min_column_width|number|0.22|Flow strip soft bound (fraction of the viewport): while all columns fit at this width the strip fills the screen like a classic tiler; only with more columns than fit at this width does it scroll. Controls the strip's on-screen capacity.
+    min_column_width: f64,
+    /// Flow strip: width presets (fractions of the viewport) that
+    /// `agate.column_width("next"/"prev"/…)` cycles through. Owned by `Config.alloc`.
+    // @doc S|preset_column_widths|number[]|{ 0.333, 0.5, 0.667, 1.0 }|Flow strip: the column widths (fractions of the viewport) `agate.column_width` cycles through with `"next"`/`"prev"`, and that the `"1/3"`/`"1/2"`/`"2/3"`/`"full"` names snap to.
+    preset_column_widths: []f64,
+    /// Flow strip edge peek (points): how wide a sliver of a fully off-screen
+    /// column stays visible at the screen edge once the strip scrolls (also the
+    /// macOS workaround for windows moved fully off-screen). Mirrored into
+    /// `wm_layout.scroll_sliver`.
+    // @doc S|scroll_sliver|number|24|Flow strip: width (px) of the sliver of an off-screen column kept peeking at the screen edge while the strip is scrolled, so nothing is ever fully hidden.
+    scroll_sliver: f64,
+    /// Flow strip: finger count for the continuous swipe-to-scroll gesture that
+    /// drags the strip live. See `config/swipe.zig`.
+    // @doc S|swipe_scroll_fingers|integer|3|Flow strip: number of fingers for the trackpad swipe that scrolls the strip live (drag the columns under your fingers, snapping to a column on release). Set 0 to disable.
+    swipe_scroll_fingers: u8,
     bindings: std.ArrayList(Binding),
     gesture_bindings: std.ArrayList(GestureBinding),
     /// Registered modal keybind groups (`agate.mode`). Indexed by `active_mode`.

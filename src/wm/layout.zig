@@ -24,6 +24,29 @@ pub var animate: bool = false;
 /// from the Lua config (`agate.config{ smart_gaps = true }`).
 pub var smart_gaps: bool = false;
 
+// --- Flow strip tuning (the `SCROLL` layout). Mirrored from the Lua config in
+// `api.agateConfig`; file-scope is safe on the single-threaded main loop. ---
+
+/// Target width (viewport fraction) a column with no explicit `width_frac` gets.
+pub var default_column_width: f64 = 0.5;
+/// Soft bound: smallest column width (viewport fraction) before the strip scrolls.
+/// While every column fits at this width the strip tiles the whole viewport.
+pub var min_column_width: f64 = 0.22;
+/// Edge-peek width (points): the sliver of a fully off-screen column kept visible
+/// at the screen edge once the strip scrolls (also the macOS off-screen fix).
+pub var scroll_sliver: f64 = 24;
+
+/// Whether a live trackpad swipe is currently driving the active workspace's
+/// `scroll_offset`. While set, `layoutScroll` leaves the offset alone (the finger
+/// owns it) instead of snapping the focused column into view. Set from
+/// `config/swipe.zig`. Mirrors `animate`.
+pub var scrolling: bool = false;
+
+/// Most columns one strip lays out. Past this the extra columns are dropped from
+/// the pass (they'd be off-screen regardless) — a workspace with this many
+/// columns is already well past any sane capacity.
+const max_columns = 64;
+
 /// The current workspace's full tiling area (after the outer-gap inset), set at
 /// the top of each `assignFrames` pass. A leaf marked `fake_full_screen`
 /// (yabai's zoom-fullscreen) is given this area instead of its tiled slot, so it
@@ -104,6 +127,7 @@ fn layoutChildren(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect
     if (n == 0) return;
 
     switch (con.layout) {
+        .SCROLL => return layoutScroll(con, area, sink),
         .H_STACK, .V_STACK => return layoutStack(con, area, sink),
         // FLOAT: leave each window filling the area (no real float model yet).
         .FLOAT => {
@@ -188,6 +212,274 @@ fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) v
         place(child, rect, sink);
         i += 1;
     }
+}
+
+/// The "Flow" strip (niri/PaperWM via paneru): `ws`'s direct children are
+/// columns laid out left→right. While every column fits at `min_column_width`
+/// the strip *fills the viewport* like a classic tiler (fit mode); past that
+/// capacity it scrolls, keeping off-screen columns as edge peeks (scroll mode).
+/// Each column is itself `place`d, so a column that is a nested container tiles
+/// its own windows with the classic layouts — traditional tiling inside a column.
+fn layoutScroll(ws: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
+    var cols: [max_columns]*data.Con = undefined;
+    var out: [max_columns]f64 = undefined;
+    const fl = flowWidths(ws, area, &cols, &out);
+    if (fl.n == 0) return; // every column floats — nothing to tile
+
+    if (fl.fit) {
+        // Fit mode: the columns fill the viewport like a classic tiler, so there
+        // is nothing to scroll.
+        ws.scroll_offset = 0;
+        placeColumns(cols[0..fl.n], out[0..fl.n], area, area.origin.x, fl.gap, sink, false);
+    } else {
+        // Scroll mode: the strip slides so the focused column stays in view, and
+        // off-screen columns peek at the edges (unless a live swipe owns the
+        // offset).
+        if (!scrolling) ensureColumnVisible(ws, cols[0..fl.n], out[0..fl.n], area, fl.gap);
+        placeColumns(cols[0..fl.n], out[0..fl.n], area, area.origin.x - ws.scroll_offset, fl.gap, sink, true);
+    }
+}
+
+/// Result of `flowWidths`: how many columns were collected, whether the strip
+/// fits the viewport (fit mode) or overflows (scroll mode), and the inner gap.
+const FlowLayout = struct { n: usize, fit: bool, gap: f64 };
+
+/// Collect `ws`'s tiled columns into `cols` and compute their pixel widths into
+/// `out`, applying the fit-vs-scroll rule. Shared by `layoutScroll` (which then
+/// places them) and `centerFocusedColumn` (which only needs the geometry). A
+/// floating leaf is lifted out of the strip, as in `layoutChildren`.
+fn flowWidths(ws: *data.Con, area: Rect, cols: []*data.Con, out: []f64) FlowLayout {
+    var weights: [max_columns]f64 = undefined;
+    var n: usize = 0;
+    var total_t: f64 = 0;
+    for (ws.children.items) |child| {
+        if (isFloating(child)) continue;
+        if (n == max_columns) break;
+        const t = if (child.width_frac > 0) child.width_frac else default_column_width;
+        cols[n] = child;
+        weights[n] = t;
+        total_t += t;
+        n += 1;
+    }
+    if (n == 0) return .{ .n = 0, .fit = true, .gap = 0 };
+    if (total_t <= 0) total_t = 1;
+
+    const W = area.size.width;
+    const gap: f64 = @floatFromInt(ws.gaps.inner);
+    const nf: f64 = @floatFromInt(n);
+    const avail = W - gap * (nf - 1);
+    const min_w = min_column_width * W;
+
+    if (nf * min_w <= avail) {
+        // Fit mode: proportional to weights, floored at min, summing to avail.
+        fitWidths(weights[0..n], out[0..n], avail, min_w);
+        return .{ .n = n, .fit = true, .gap = gap };
+    }
+    // Scroll mode: absolute target widths, floored at min.
+    for (0..n) |i| out[i] = @max(min_w, weights[i] * W);
+    return .{ .n = n, .fit = false, .gap = gap };
+}
+
+/// Set `ws.scroll_offset` so the focused column is centered in the viewport
+/// (`agate.scroll("center")`). In fit mode the strip already fills the viewport,
+/// so the offset is reset to 0. Called outside the flush; the next flush keeps
+/// the centered offset because the column is then fully visible.
+pub fn centerFocusedColumn(ws: *data.Con, area: Rect) void {
+    var cols: [max_columns]*data.Con = undefined;
+    var out: [max_columns]f64 = undefined;
+    const fl = flowWidths(ws, area, &cols, &out);
+    if (fl.n == 0 or fl.fit) {
+        ws.scroll_offset = 0;
+        return;
+    }
+    const focused = validFocusedColumn(ws) orelse return;
+    var x: f64 = 0;
+    var fx: f64 = 0;
+    var fw: f64 = 0;
+    var found = false;
+    for (cols[0..fl.n], out[0..fl.n]) |c, w| {
+        if (c == focused) {
+            fx = x;
+            fw = w;
+            found = true;
+        }
+        x += w + fl.gap;
+    }
+    if (!found) return;
+    // On-screen left = area.x + fx - offset; center it: fx - off + fw/2 == W/2.
+    ws.scroll_offset = fx + fw / 2 - area.size.width / 2;
+}
+
+/// Total width (points) of `ws`'s columns laid end to end (widths + inner gaps),
+/// or 0 in fit mode (the strip never overflows then). Used to bound scrolling.
+fn contentWidth(ws: *data.Con, area: Rect) f64 {
+    var cols: [max_columns]*data.Con = undefined;
+    var out: [max_columns]f64 = undefined;
+    const fl = flowWidths(ws, area, &cols, &out);
+    if (fl.n == 0 or fl.fit) return 0;
+    var total: f64 = 0;
+    for (out[0..fl.n]) |w| total += w + fl.gap;
+    return total - fl.gap; // no trailing gap after the last column
+}
+
+/// Clamp `ws.scroll_offset` to the legal range `[0, content − viewport]` so a
+/// live swipe can't fling the strip past its ends into empty space. Used by the
+/// continuous trackpad scroll (`config/swipe.zig`).
+pub fn clampScroll(ws: *data.Con, area: Rect) void {
+    const total = contentWidth(ws, area);
+    if (total <= 0) {
+        ws.scroll_offset = 0;
+        return;
+    }
+    const max_off = @max(0, total - area.size.width);
+    ws.scroll_offset = std.math.clamp(ws.scroll_offset, 0, max_off);
+}
+
+/// Snap `ws.scroll_offset` to the nearest column's left edge, so a swipe settles
+/// with a column aligned to the viewport edge instead of mid-column. No-op in fit
+/// mode. Called on swipe release (`config/swipe.zig`).
+pub fn snapStrip(ws: *data.Con, area: Rect) void {
+    var cols: [max_columns]*data.Con = undefined;
+    var out: [max_columns]f64 = undefined;
+    const fl = flowWidths(ws, area, &cols, &out);
+    if (fl.n == 0 or fl.fit) {
+        ws.scroll_offset = 0;
+        return;
+    }
+    var x: f64 = 0;
+    var best: f64 = 0;
+    var best_dist: f64 = std.math.floatMax(f64);
+    for (out[0..fl.n]) |w| {
+        const d = @abs(x - ws.scroll_offset);
+        if (d < best_dist) {
+            best_dist = d;
+            best = x;
+        }
+        x += w + fl.gap;
+    }
+    const total = x - fl.gap;
+    const max_off = @max(0, total - area.size.width);
+    ws.scroll_offset = std.math.clamp(best, 0, max_off);
+}
+
+/// Distribute `avail` points among columns in proportion to `weights`, with each
+/// column floored at `min_w`. Standard iterative water-filling: pin any column
+/// whose proportional share falls below `min_w` to exactly `min_w` and re-divide
+/// the rest among the unpinned, until no new pins appear. The caller guarantees
+/// `n * min_w <= avail`, so the result sums to `avail`.
+fn fitWidths(weights: []const f64, out: []f64, avail: f64, min_w: f64) void {
+    const n = weights.len;
+    var pinned: [max_columns]bool = undefined;
+    for (0..n) |i| pinned[i] = false;
+
+    while (true) {
+        var rem_avail = avail;
+        var rem_weight: f64 = 0;
+        for (0..n) |i| {
+            if (pinned[i]) rem_avail -= min_w else rem_weight += weights[i];
+        }
+        if (rem_weight <= 0) {
+            for (0..n) |i| if (!pinned[i]) {
+                out[i] = min_w;
+            };
+            return;
+        }
+        var newly_pinned = false;
+        for (0..n) |i| {
+            if (pinned[i]) continue;
+            const px = rem_avail * (weights[i] / rem_weight);
+            if (px < min_w) {
+                pinned[i] = true;
+                out[i] = min_w;
+                newly_pinned = true;
+            } else {
+                out[i] = px;
+            }
+        }
+        if (!newly_pinned) return;
+    }
+}
+
+/// Place each column left→right starting at `base` (the strip's left edge in
+/// screen coords), advancing by width + inner gap. In scroll mode a column that
+/// would sit fully off-screen is clamped to a `scroll_sliver`-wide edge peek (the
+/// columns inside slide with it). Mirrors paneru's edge math in
+/// `position_layout_windows` (src/ecs/layout.rs).
+fn placeColumns(
+    cols: []const *data.Con,
+    widths: []const f64,
+    area: Rect,
+    base: f64,
+    gap: f64,
+    comptime sink: fn (*data.Con, Rect) void,
+    scroll_mode: bool,
+) void {
+    var cursor = base;
+    for (cols, widths) |col, w| {
+        var rect: Rect = .{
+            .origin = .{ .x = cursor, .y = area.origin.y },
+            .size = .{ .width = w, .height = area.size.height },
+        };
+        if (scroll_mode) rect = peekClamp(rect, area);
+        place(col, rect, sink);
+        cursor += w + gap;
+    }
+}
+
+/// Keep a fully off-screen column as a thin sliver at the screen edge: macOS
+/// relocates windows pushed *entirely* off-screen, and a peek is friendlier than
+/// a vanished window. A column straddling the edge is left where it is.
+fn peekClamp(rect: Rect, area: Rect) Rect {
+    const left = area.origin.x;
+    const right = area.origin.x + area.size.width;
+    var r = rect;
+    if (r.origin.x + r.size.width <= left + scroll_sliver) {
+        r.origin.x = left - r.size.width + scroll_sliver; // peek on the left edge
+    } else if (r.origin.x >= right - scroll_sliver) {
+        r.origin.x = right - scroll_sliver; // peek on the right edge
+    }
+    return r;
+}
+
+/// Nudge `ws.scroll_offset` by the minimum needed to bring the focused column
+/// (`ws.last_focused_child`, validated against the current children) fully into
+/// the viewport. If it already fits, the offset is untouched. Mirrors paneru's
+/// `ensure_visible_in_strip` (src/ecs/layout.rs).
+fn ensureColumnVisible(ws: *data.Con, cols: []const *data.Con, widths: []const f64, area: Rect, gap: f64) void {
+    const focused = validFocusedColumn(ws) orelse return;
+    var x: f64 = 0; // left edge of each column in strip coords (offset 0)
+    var fx: f64 = 0;
+    var fw: f64 = 0;
+    var found = false;
+    for (cols, widths) |c, w| {
+        if (c == focused) {
+            fx = x;
+            fw = w;
+            found = true;
+        }
+        x += w + gap;
+    }
+    if (!found) return;
+
+    const W = area.size.width;
+    var off = ws.scroll_offset;
+    const left_rel = fx - off; // column's left edge relative to the viewport
+    const right_rel = left_rel + fw;
+    if (left_rel < 0) {
+        off += left_rel; // scroll to reveal the left edge
+    } else if (right_rel > W) {
+        off += right_rel - W; // scroll to reveal the right edge
+    }
+    ws.scroll_offset = off;
+}
+
+/// The focused column of a `SCROLL` workspace: its `last_focused_child` when that
+/// is still one of its children (the breadcrumb `focus.recordFocusPath` keeps),
+/// else null. A column is always a direct child of the workspace.
+fn validFocusedColumn(ws: *data.Con) ?*data.Con {
+    const lf = ws.last_focused_child orelse return null;
+    for (ws.children.items) |c| if (c == lf) return lf;
+    return null;
 }
 
 /// Emit `area` for a leaf window, or recurse if it's a nested split container.
@@ -459,4 +751,156 @@ test "single window fills the workspace area" {
 
     assignFrames(ws, testRect(0, 25, 1512, 920), recordSink);
     try expectRect(testRect(0, 25, 1512, 920), a.window.?.bounds);
+}
+
+// ---------------------------------------------------------------------------
+// Flow strip (SCROLL) tests.
+// ---------------------------------------------------------------------------
+
+/// Reset the Flow tuning to defaults around a test (file-scope mutable state).
+fn resetFlowDefaults() void {
+    default_column_width = 0.5;
+    min_column_width = 0.22;
+    scroll_sliver = 24;
+    scrolling = false;
+}
+
+test "SCROLL fit mode: equal-weight columns fill the viewport like H_SPLIT" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Three default (0.5) columns: 3 * 0.22 = 0.66 <= 1, so fit mode. Equal
+    // weights split the 1200px viewport into even thirds (no inner gap).
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    const c = try testLeaf(alloc, ws, 3, 1.0);
+
+    assignFrames(ws, testRect(0, 0, 1200, 800), recordSink);
+    try expectRect(testRect(0, 0, 400, 800), a.window.?.bounds);
+    try expectRect(testRect(400, 0, 400, 800), b.window.?.bounds);
+    try expectRect(testRect(800, 0, 400, 800), c.window.?.bounds);
+    try testing.expectEqual(@as(f64, 0), ws.scroll_offset);
+}
+
+test "SCROLL fit mode: per-column width_frac biases the split" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Two columns weighted 1:3 fill the viewport in those proportions.
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    a.width_frac = 0.25;
+    b.width_frac = 0.75;
+
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+    try expectRect(testRect(0, 0, 250, 600), a.window.?.bounds);
+    try expectRect(testRect(250, 0, 750, 600), b.window.?.bounds);
+}
+
+test "SCROLL fit mode: a column is floored at min_column_width" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // min 0.2 of 1000 = 200px. A tiny-weighted column is pinned to 200; the
+    // other takes the remaining 800. Still fit mode (2 * 200 <= 1000).
+    min_column_width = 0.2;
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    a.width_frac = 0.01;
+    b.width_frac = 0.99;
+
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+    try expectRect(testRect(0, 0, 200, 600), a.window.?.bounds);
+    try expectRect(testRect(200, 0, 800, 600), b.window.?.bounds);
+}
+
+test "SCROLL scroll mode: past capacity columns keep target width and scroll" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // min 0.3 of 1000 = 300px capacity = floor(1000/300) = 3 columns. Four
+    // 0.5-width (500px) columns exceed it → scroll mode, each at 500px.
+    min_column_width = 0.3;
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    const c = try testLeaf(alloc, ws, 3, 1.0);
+    const d = try testLeaf(alloc, ws, 4, 1.0);
+    for ([_]*data.Con{ a, b, c, d }) |col| col.width_frac = 0.5;
+
+    // Focus the third column; the strip scrolls just enough to reveal it.
+    ws.last_focused_child = c;
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+
+    // c's strip-left is 1000; to fit its right edge (1500) in the 1000 viewport
+    // the offset becomes 500, so c lands at x=500 and fills to the right edge.
+    try testing.expectEqual(@as(f64, 500), ws.scroll_offset);
+    try expectRect(testRect(500, 0, 500, 600), c.window.?.bounds);
+    try testing.expectEqual(@as(f64, 500), d.window.?.bounds.size.width);
+}
+
+test "SCROLL scroll mode: an off-screen column is clamped to an edge peek" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    min_column_width = 0.3;
+    scroll_sliver = 20;
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    const c = try testLeaf(alloc, ws, 3, 1.0);
+    const d = try testLeaf(alloc, ws, 4, 1.0);
+    for ([_]*data.Con{ a, b, c, d }) |col| col.width_frac = 0.5;
+
+    ws.last_focused_child = d; // focus last → offset 1000, a is far off-left
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+
+    // a would sit at x = -1000 (fully off-screen); it's clamped so 20px peeks
+    // at the left edge: x = 0 - 500 + 20 = -480 (right edge at +20).
+    try expectRect(testRect(-480, 0, 500, 600), a.window.?.bounds);
+    // d is the focused last column, flush against the right edge.
+    try expectRect(testRect(500, 0, 500, 600), d.window.?.bounds);
+}
+
+test "SCROLL: a column that is a nested split tiles internally" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Two columns; the second is a vertical split of two windows. Classic tiling
+    // lives inside the column.
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const col = try testContainer(alloc, .Container, .V_SPLIT);
+    col.parent = ws;
+    col.depth = ws.depth + 1;
+    try ws.children.append(alloc, col);
+    const b1 = try testLeaf(alloc, col, 2, 1.0);
+    const b2 = try testLeaf(alloc, col, 3, 1.0);
+
+    assignFrames(ws, testRect(0, 0, 1000, 800), recordSink);
+    // Two equal columns of 500px; the right one splits its height.
+    try expectRect(testRect(0, 0, 500, 800), a.window.?.bounds);
+    try expectRect(testRect(500, 0, 500, 400), b1.window.?.bounds);
+    try expectRect(testRect(500, 400, 500, 400), b2.window.?.bounds);
 }

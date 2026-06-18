@@ -108,6 +108,11 @@ pub fn handleKey(keycode: u16, raw_flags: u64) bool {
 // @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
 // @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
 // @doc C|exec <cmd>|Run a shell command in the background through `$SHELL -c`. Same as `agate.exec(cmd)`.
+// @doc C|column_width <target>|Same as `agate.column_width(target)`.
+// @doc C|fit|Same as `agate.fit()`.
+// @doc C|scroll <target>|Same as `agate.scroll(target)`.
+// @doc C|consume <dir>|Same as `agate.consume(dir)`.
+// @doc C|expel <dir>|Same as `agate.expel(dir)`.
 // @doc C|zoom_fullscreen|Same as `agate.zoom_fullscreen()`.
 // @doc C|toggle_float|Same as `agate.toggle_float()`.
 // @doc C|mode <name>|Same as `agate.enter_mode(name)`.
@@ -169,6 +174,18 @@ pub fn executeCommand(cmd: []const u8) void {
         if (ctx.config) |cfg| enterModeByName(cfg, cmd[5..]);
     } else if (std.mem.eql(u8, cmd, "exit_mode")) {
         if (ctx.config) |cfg| exitActiveMode(cfg);
+    } else if (std.mem.startsWith(u8, cmd, "column_width ")) {
+        actions.cycleColumnWidth(app, cmd[13..]);
+    } else if (std.mem.eql(u8, cmd, "fit")) {
+        actions.fitColumns(app);
+    } else if (std.mem.startsWith(u8, cmd, "scroll ")) {
+        actions.scrollStrip(app, cmd[7..]);
+    } else if (std.mem.startsWith(u8, cmd, "consume ")) {
+        const dir = parse.parseDir(cmd[8..]) orelse return;
+        actions.consume(app, dir);
+    } else if (std.mem.startsWith(u8, cmd, "expel ")) {
+        const dir = parse.parseDir(cmd[6..]) orelse return;
+        actions.expel(app, dir);
     } else if (std.mem.eql(u8, cmd, "zoom_fullscreen")) {
         actions.toggleZoomFullscreen(app);
     } else if (std.mem.eql(u8, cmd, "toggle_float")) {

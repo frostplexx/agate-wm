@@ -198,6 +198,7 @@ fn layoutName(l: data.Layout) []const u8 {
         .H_STACK => "h_stack",
         .V_STACK => "v_stack",
         .FLOAT => "float",
+        .SCROLL => "scroll",
     };
 }
 
@@ -352,16 +353,20 @@ fn writeWorkspaces(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
             if (ws.con_type != .Workspace) continue;
             const visible = ws.id == cur and cur != 0;
             const wins = ws.leafCount();
+            // On a Flow strip the direct children are columns; report their count
+            // and the strip's scroll offset so status bars can show strip state.
+            const columns = ws.children.items.len;
             if (json) {
                 if (!first) try w.writeAll(",");
                 first = false;
-                try w.print("{{\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"type\":\"{s}\",\"visible\":{},\"windows\":{d}}}", .{
-                    wi, mon.id + 1, layoutName(ws.layout), spaceTypeName(ws.space_type), visible, wins,
+                try w.print("{{\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"type\":\"{s}\",\"visible\":{},\"windows\":{d},\"columns\":{d},\"scroll\":{d:.0}}}", .{
+                    wi, mon.id + 1, layoutName(ws.layout), spaceTypeName(ws.space_type), visible, wins, columns, ws.scroll_offset,
                 });
             } else {
-                try w.print("ws {d}\tmon {d}\t{s}\t{s}\t{d} window{s}", .{
-                    wi, mon.id + 1, layoutName(ws.layout), spaceTypeName(ws.space_type), wins, if (wins == 1) "" else "s",
+                try w.print("ws {d}\tmon {d}\t{s}\t{s}\t{d} window{s}\t{d} col{s}", .{
+                    wi, mon.id + 1, layoutName(ws.layout), spaceTypeName(ws.space_type), wins, if (wins == 1) "" else "s", columns, if (columns == 1) "" else "s",
                 });
+                if (ws.scroll_offset != 0) try w.print("\tscroll {d:.0}", .{ws.scroll_offset});
                 if (visible) try w.writeAll("\t(visible)");
                 try w.writeByte('\n');
             }
