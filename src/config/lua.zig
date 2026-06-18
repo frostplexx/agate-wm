@@ -86,11 +86,10 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .alloc = gpa,
         .gaps = 8,
         .outer_gaps = 8,
-        .accordion_padding = 40,
+        .peek = 48,
         .default_column_width = 0.5,
         .min_column_width = 0.22,
         .preset_column_widths = default_presets,
-        .scroll_sliver = 24,
         .swipe_scroll_fingers = 3,
         .hyper_mods = types.MOD_CTRL | types.MOD_ALT | types.MOD_CMD | types.MOD_SHIFT,
         .hyper_enabled = true, // built-in Caps Lock → F18 hyper key (LazyKeys port)

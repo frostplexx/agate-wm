@@ -273,7 +273,7 @@ pub fn cycleColumnWidth(app: *state.AppState, target: []const u8) void {
 }
 
 /// Re-equalize every column on the active workspace so fit mode tiles the strip
-/// evenly (`agate.fit`): clears each column's explicit width so they all fall
+/// evenly (`agate.column_width("fit")`): clears each column's explicit width so they all fall
 /// back to the default weight. Balanced classic tiling, below capacity.
 pub fn fitColumns(app: *state.AppState) void {
     const ws = activeWorkspace(app) orelse return;

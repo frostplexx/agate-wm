@@ -36,7 +36,7 @@ traditional tiling into one model, with no mode switch:
   strip *fills the whole screen* like a normal tiler. One window fills the
   screen; two share it; N share it down to a minimum width.
 - **Many windows → scrolling strip.** Only once there are more columns than fit at
-  `min_column_width` does the strip start to scroll. Opening a window then
+  `columns.min_width` does the strip start to scroll. Opening a window then
   **never resizes** the others — it just adds a column next to the focused one.
 - **Never lost.** It's *bounded*, not infinite: the screen stays full until a
   predictable capacity, and once it scrolls, off-screen columns always keep a
@@ -49,7 +49,7 @@ traditional tiling into one model, with no mode switch:
 agate.bind("hyper+h", "focus left")          -- move between columns (auto-scrolls)
 agate.bind("hyper+l", "focus right")
 agate.bind("hyper+r", "column_width wider")   -- cycle the focused column's width
-agate.bind("hyper+f", "fit")                  -- re-tile columns evenly (classic)
+agate.bind("hyper+f", "column_width fit")     -- re-tile columns evenly (classic)
 agate.bind("hyper+comma", "consume left")     -- pull the left column into this one
 agate.bind("hyper+period", "expel right")     -- eject the focused window to its own column
 agate.bind("hyper+0", "scroll center")        -- center the focused column
@@ -57,8 +57,8 @@ agate.bind("hyper+0", "scroll center")        -- center the focused column
 
 A 3-finger horizontal trackpad swipe scrolls the strip live and snaps to a column
 on release (`swipe_scroll_fingers`). Tune the strip with
-`agate.config{ default_column_width = 0.5, min_column_width = 0.22,
-preset_column_widths = { 1/3, 1/2, 2/3, 1.0 } }`. See the
+`agate.config{ columns = { default_width = 0.5, min_width = 0.22,
+presets = { 1/3, 1/2, 2/3, 1.0 } } }`. See the
 [wiki](https://github.com/frostplexx/agate-wm/wiki) for the full reference.
 
 [niri]: https://github.com/YaLTeR/niri
@@ -87,7 +87,7 @@ configuration:
     enable = true;
     # inline config, written to ~/.config/agate/init.lua:
     config = ''
-      agate.config({ gaps = 8, outer_gaps = 8 })
+      agate.config({ gaps = 8 })
       agate.bind("hyper+l", "focus right")
       agate.bind("hyper+h", "focus left")
     '';

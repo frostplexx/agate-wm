@@ -66,11 +66,20 @@ fn parse(alloc: std.mem.Allocator, src: []const u8) !ApiData {
         const rest = line[pfx.len..];
 
         if (std.mem.startsWith(u8, rest, "S|")) {
-            var it = std.mem.splitScalar(u8, rest[2..], '|');
-            const name = it.next() orelse continue;
-            const ty = it.next() orelse continue;
-            const def = it.next() orelse continue;
-            try settings.append(alloc, .{ .name = name, .ty = ty, .default = def, .doc = it.rest() });
+            // Fields are |-separated, but a setting's type may itself be a union
+            // (`number|table`), so a literal pipe in a field is written `\|`.
+            const s = rest[2..];
+            const p1 = nextPipe(s) orelse continue;
+            const r1 = s[p1 + 1 ..];
+            const p2 = nextPipe(r1) orelse continue;
+            const r2 = r1[p2 + 1 ..];
+            const p3 = nextPipe(r2) orelse continue;
+            try settings.append(alloc, .{
+                .name = try unescPipes(alloc, s[0..p1]),
+                .ty = try unescPipes(alloc, r1[0..p2]),
+                .default = try unescPipes(alloc, r2[0..p3]),
+                .doc = try unescPipes(alloc, r2[p3 + 1 ..]),
+            });
 
         } else if (std.mem.startsWith(u8, rest, "SS|")) {
             var it = std.mem.splitScalar(u8, rest[3..], '|');
@@ -155,6 +164,33 @@ fn parse(alloc: std.mem.Allocator, src: []const u8) !ApiData {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// Index of the next unescaped `|` in `s`, treating `\|` as a literal pipe.
+fn nextPipe(s: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '|') {
+            i += 1;
+            continue;
+        }
+        if (s[i] == '|') return i;
+    }
+    return null;
+}
+
+/// Drop the backslash from any `\|` escape, leaving a literal pipe.
+fn unescPipes(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '\\') == null) return s;
+    const out = try alloc.alloc(u8, s.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len and s[i + 1] == '|') continue;
+        out[n] = s[i];
+        n += 1;
+    }
+    return out[0..n];
 }
 
 // ---------------------------------------------------------------------------
@@ -242,11 +278,12 @@ fn renderMarkdown(w: anytype, d: ApiData) !void {
         \\## Example
         \\
         \\```lua
-        \\agate.config({ gaps = 8, accordion_padding = 40, hyper_key = { enabled = true, keys = { "ctrl", "alt", "cmd" } } })
+        \\agate.config({ gaps = { inner = 8, outer = 8, smart = true }, peek = 40, hyper_key = { enabled = true, keys = { "ctrl", "alt", "cmd" } } })
         \\agate.bind("hyper+l", function() agate.focus("right") end)
         \\agate.bind("hyper+shift+l", "move right")
         \\agate.bind("hyper+s", function() agate.layout("accordion") end)
-        \\agate.bind("hyper+g", function() agate.join("right") end)
+        \\agate.bind("hyper+space", function() agate.toggle("fullscreen") end)
+        \\agate.bind("hyper+1", function() agate.space(1) end)
         \\agate.rule({ app = "^Music$", space = 5 })
         \\agate.rule({ app = "^Firefox$", title = "Library", space = 2, follow = false })
         \\```

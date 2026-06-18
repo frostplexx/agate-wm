@@ -432,7 +432,19 @@ fn onFrontWindowChanged(mgr: *Manager, observer: ax.AXObserverRef, element: ax.A
     const root = app.tree orelse return;
     const el = macos.Element.fromRef(element) orelse return;
     const wid = el.windowId() orelse return; // non-window front element: ignore
-    if (tree.hasWindow(root, wid)) return; // tracked window — ordinary focus change
+    if (tree.hasWindow(root, wid)) {
+        // An ordinary focus change of a tracked window — e.g. the user clicked a
+        // peeking column at the screen edge. On a Flow strip, scroll it into view
+        // (record the focus path without re-asserting AX focus, so no loop, then
+        // re-tile to slide the column on-screen). Other layouts: nothing to do.
+        if (tree.findLeaf(root, wid)) |leaf| {
+            if (tree.workspaceOf(leaf)) |ws| if (ws.layout == .SCROLL) {
+                focus.markFocused(leaf);
+                tree.flushWorkspace(app, ws);
+            };
+        }
+        return;
+    }
 
     const pid = el.pid() orelse return;
     const pos = el.position() orelse return;

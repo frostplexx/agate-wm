@@ -32,9 +32,13 @@ pub var default_column_width: f64 = 0.5;
 /// Soft bound: smallest column width (viewport fraction) before the strip scrolls.
 /// While every column fits at this width the strip tiles the whole viewport.
 pub var min_column_width: f64 = 0.22;
-/// Edge-peek width (points): the sliver of a fully off-screen column kept visible
-/// at the screen edge once the strip scrolls (also the macOS off-screen fix).
-pub var scroll_sliver: f64 = 24;
+/// Edge-peek width (points): how much of a fully off-screen column stays visible
+/// at the screen edge once the strip scrolls. Big enough to see and *click* the
+/// adjacent column (clicking it scrolls it in); also the macOS off-screen fix
+/// (paneru's `sliver_width` is only ~5px because it navigates by scroll, not
+/// click). Fed from the unified `peek` setting (`agate.config{ peek = N }`), the
+/// same value that drives the accordion fan.
+pub var scroll_sliver: f64 = 48;
 
 /// Whether a live trackpad swipe is currently driving the active workspace's
 /// `scroll_offset`. While set, `layoutScroll` leaves the offset alone (the finger

@@ -79,6 +79,8 @@ const us_printable_keys = [_]KeyEntry{
     .{ .name = "grave", .code = 50 }, .{ .name = "comma", .code = 43 },
     .{ .name = "period", .code = 47 }, .{ .name = "slash", .code = 44 },
     .{ .name = "semicolon", .code = 41 },
+    .{ .name = "bracketleft", .code = 33 }, .{ .name = "bracketright", .code = 30 },
+    .{ .name = "backslash", .code = 42 }, .{ .name = "quote", .code = 39 },
 };
 
 /// Optional layout-aware resolver, installed at startup
@@ -101,6 +103,10 @@ fn nameToChar(name: []const u8) ?u8 {
     if (eql(u8, name, "slash")) return '/';
     if (eql(u8, name, "semicolon")) return ';';
     if (eql(u8, name, "grave")) return '`';
+    if (eql(u8, name, "bracketleft")) return '[';
+    if (eql(u8, name, "bracketright")) return ']';
+    if (eql(u8, name, "backslash")) return '\\';
+    if (eql(u8, name, "quote")) return '\'';
     return null;
 }
 

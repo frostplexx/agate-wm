@@ -75,20 +75,20 @@ pub const Rule = struct {
     /// they're tracked but lifted out of the tiling, keeping their own size/place.
     /// Usable on its own (no `space`/`monitor`) to float an app wherever it opens,
     /// or alongside a Space assignment to float it there.
-    // @doc SR|floating|boolean|true|Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
+    // @doc SR|floating|boolean|true|Float matched windows when they appear (like `agate.toggle("float")` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
     floating: bool = false,
 };
 
 pub const Config = struct {
     alloc: std.mem.Allocator,
-    // @doc S|gaps|number|8|Pixels between adjacent tiles.
     gaps: f64,
-    // @doc S|outer_gaps|number|8|Pixels inset from the screen edge.
     outer_gaps: f64,
-    /// Accordion/stack peek inset (px): how far each stacked window is fanned
-    /// past the one in front. See `data.gaps.accordion`.
-    // @doc S|accordion_padding|number|40|Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`.
-    accordion_padding: f64,
+    /// Window "peek" (px): how much of a hidden window stays visible. Drives both
+    /// the accordion/stack fan (how far each stacked window peeks past the one in
+    /// front, `data.gaps.accordion`) and the Flow strip's off-screen edge peek
+    /// (`wm_layout.scroll_sliver`) — one knob for "how far a window peeks".
+    // @doc S|peek|number|48|How much of a hidden window stays visible (px): the accordion/stack fan (how far each stacked window peeks past the one in front) **and** the Flow strip's off-screen edge peek (an off-screen column kept clickable at the screen edge). Aliases: `accordion_padding`, `accordion`.
+    peek: f64,
     /// CGEventFlag mask the held hyper key expands to (and the `hyper` macro in
     /// key specs). Set from `hyper_key.keys`.
     // @doc S|hyper_key|agate.HyperKey|{ enabled = true, keys = {"ctrl","alt","cmd","shift"} }|Built-in hyper key (see agate.HyperKey), ported from LazyKeys. When enabled, agate remaps Caps Lock to F18 at the HID level (via `hidutil`) and treats a held Caps Lock as the modifier set in `keys` — for both agate keybindings and the focused app. The `hyper` macro in key specs expands to `keys`.
@@ -116,7 +116,6 @@ pub const Config = struct {
     small_screen_tabs: bool,
     /// Animate AX-driven frame changes (AppKit's window slide) instead of
     /// snapping. Mirrored into `wm_layout.animate` on config load.
-    // @doc S|animations|boolean|false|Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`.
     animations: bool,
     /// Show the active space number as a menu-bar status item.
     // @doc S|space_indicator|boolean|true|Show the active space's number as a menu-bar status item.
@@ -126,28 +125,18 @@ pub const Config = struct {
     drag_preview: bool,
     /// Drop the outer gap when a workspace holds a single window (Hyprland's
     /// `no_gaps_when_only`). Mirrored into `wm_layout.smart_gaps` on config load.
-    // @doc S|smart_gaps|boolean|false|When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`).
     smart_gaps: bool,
     /// Flow strip: target width (fraction of the viewport, 0–1) a new column gets.
     /// Mirrored into `wm_layout.default_column_width` on config load.
-    // @doc S|default_column_width|number|0.5|Flow strip: the width a freshly opened column targets, as a fraction of the viewport (0–1). Acts as a proportional weight while the strip fits the screen, or the column's width once the strip scrolls.
     default_column_width: f64,
     /// Flow strip soft bound: the smallest a column may be squeezed to (fraction of
     /// the viewport). While every column fits at this width the strip tiles the
     /// whole screen; past that capacity it starts scrolling. Mirrored into
     /// `wm_layout.min_column_width`.
-    // @doc S|min_column_width|number|0.22|Flow strip soft bound (fraction of the viewport): while all columns fit at this width the strip fills the screen like a classic tiler; only with more columns than fit at this width does it scroll. Controls the strip's on-screen capacity.
     min_column_width: f64,
     /// Flow strip: width presets (fractions of the viewport) that
     /// `agate.column_width("next"/"prev"/…)` cycles through. Owned by `Config.alloc`.
-    // @doc S|preset_column_widths|number[]|{ 0.333, 0.5, 0.667, 1.0 }|Flow strip: the column widths (fractions of the viewport) `agate.column_width` cycles through with `"next"`/`"prev"`, and that the `"1/3"`/`"1/2"`/`"2/3"`/`"full"` names snap to.
     preset_column_widths: []f64,
-    /// Flow strip edge peek (points): how wide a sliver of a fully off-screen
-    /// column stays visible at the screen edge once the strip scrolls (also the
-    /// macOS workaround for windows moved fully off-screen). Mirrored into
-    /// `wm_layout.scroll_sliver`.
-    // @doc S|scroll_sliver|number|24|Flow strip: width (px) of the sliver of an off-screen column kept peeking at the screen edge while the strip is scrolled, so nothing is ever fully hidden.
-    scroll_sliver: f64,
     /// Flow strip: finger count for the continuous swipe-to-scroll gesture that
     /// drags the strip live. See `config/swipe.zig`.
     // @doc S|swipe_scroll_fingers|integer|3|Flow strip: number of fingers for the trackpad swipe that scrolls the strip live (drag the columns under your fingers, snapping to a column on release). Set 0 to disable.

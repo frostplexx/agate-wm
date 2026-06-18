@@ -39,11 +39,29 @@ const MOD_CMD = types.MOD_CMD;
 /// `dst`. Returns whether the field was present and numeric; `dst` is left
 /// unchanged otherwise.
 fn numberField(lua: *Lua, name: [:0]const u8, dst: *f64) bool {
-    _ = lua.getField(1, name);
+    return numberFieldAt(lua, 1, name, dst);
+}
+
+/// Like `numberField`, but reads the field from the table at stack index `idx`
+/// (used for the grouped `gaps`/`columns` sub-tables).
+fn numberFieldAt(lua: *Lua, idx: i32, name: [:0]const u8, dst: *f64) bool {
+    _ = lua.getField(idx, name);
     defer lua.pop(1);
     if (!lua.isNumber(-1)) return false;
     dst.* = lua.toNumber(-1) catch return false;
     return true;
+}
+
+/// Normalise an animation duration to milliseconds. The knob used to be in
+/// seconds; a sub-5 value can only be the old unit (a 5 ms animation is
+/// invisible), so convert it instead of silently disabling animations for
+/// configs written against the old docs.
+fn normalizeAnimMs(v: f64) f64 {
+    if (v > 0 and v < 5) {
+        std.debug.print("[config] animation duration is in milliseconds now; treating {d} as {d} ms\n", .{ v, v * 1000 });
+        return v * 1000;
+    }
+    return v;
 }
 
 /// Read the boolean field `name` from the table at `idx` into `dst` (left
@@ -54,12 +72,13 @@ fn boolField(lua: *Lua, idx: i32, name: [:0]const u8, dst: *bool) void {
     if (lua.isBoolean(-1)) dst.* = lua.toBoolean(-1);
 }
 
-/// Replace `cfg.preset_column_widths` from a `preset_column_widths` array of
-/// numbers (each a viewport fraction). Left unchanged when absent; an empty or
-/// all-invalid list is rejected so `agate.column_width` always has something to
-/// cycle. The old slice is freed and a fresh one allocated from `cfg.alloc`.
-fn parsePresetWidths(lua: *Lua, cfg: *types.Config) void {
-    _ = lua.getField(1, "preset_column_widths");
+/// Replace `cfg.preset_column_widths` from the field `name` of the table at
+/// stack index `idx` (an array of numbers, each a viewport fraction). Left
+/// unchanged when absent; an empty or all-invalid list is rejected so
+/// `agate.column_width` always has something to cycle. The old slice is freed
+/// and a fresh one allocated from `cfg.alloc`.
+fn parsePresetWidths(lua: *Lua, idx: i32, name: [:0]const u8, cfg: *types.Config) void {
+    _ = lua.getField(idx, name);
     defer lua.pop(1);
     if (!lua.isTable(-1)) return;
 
@@ -95,11 +114,30 @@ fn parsePresetWidths(lua: *Lua, cfg: *types.Config) void {
 fn agateConfig(lua: *Lua) i32 {
     const cfg = ctx.config orelse return 0;
     if (!lua.isTable(1)) return 0;
-    _ = numberField(lua, "gaps", &cfg.gaps);
-    _ = numberField(lua, "outer_gaps", &cfg.outer_gaps);
-    // accept "accordion_padding" or the shorter "accordion"
-    if (!numberField(lua, "accordion_padding", &cfg.accordion_padding))
-        _ = numberField(lua, "accordion", &cfg.accordion_padding);
+    // gaps: a bare number sets both the inner and outer gap; a table
+    // `{ inner, outer, smart }` sets each. The pre-grouping flat keys
+    // (`outer_gaps`, `smart_gaps`) are still honoured below for back-compat.
+    // @doc S|gaps|number\|table|8|Pixels between tiles. A number sets both the inner gap and the screen-edge inset; a table `{ inner, outer, smart }` sets them separately (`smart` drops the outer gap when a workspace holds a single window).
+    _ = lua.getField(1, "gaps");
+    if (lua.isNumber(-1)) {
+        const g = lua.toNumber(-1) catch cfg.gaps;
+        cfg.gaps = g;
+        cfg.outer_gaps = g;
+    } else if (lua.isTable(-1)) {
+        const gi = lua.getTop();
+        _ = numberFieldAt(lua, gi, "inner", &cfg.gaps);
+        _ = numberFieldAt(lua, gi, "outer", &cfg.outer_gaps);
+        boolField(lua, gi, "smart", &cfg.smart_gaps);
+    }
+    lua.pop(1);
+    _ = numberField(lua, "outer_gaps", &cfg.outer_gaps); // back-compat flat key
+    // Window peek: "peek" is the name; "accordion_padding"/"accordion" are kept as
+    // back-compat aliases. Drives both the accordion fan and the strip edge peek.
+    if (!numberField(lua, "peek", &cfg.peek)) {
+        if (!numberField(lua, "accordion_padding", &cfg.peek)) {
+            _ = numberField(lua, "accordion", &cfg.peek);
+        }
+    }
     // hyper_key: { enabled = bool, keys = {modifier strings} }. The built-in
     // hyper key (ported from LazyKeys): `enabled` toggles the Caps Lock → F18
     // remap, `keys` is the modifier set the held key (and the `hyper` macro)
@@ -162,63 +200,59 @@ fn agateConfig(lua: *Lua) i32 {
         lua.pop(1);
     }
     lua.pop(1);
-    // UX toggles.
-    boolField(lua, 1, "animations", &cfg.animations);
-    wm_layout.animate = cfg.animations;
-    // animation_duration: milliseconds per frame animation — the speed knob.
-    // @doc S|animation_duration|number|150|Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`.
-    var anim_dur: f64 = wm_animate.duration_ms;
-    if (numberField(lua, "animation_duration", &anim_dur)) {
-        // The knob used to be seconds; a sub-5 value can only be the old unit
-        // (a 5 ms animation is invisible) — convert instead of silently
-        // disabling animations for configs written against the old docs.
-        if (anim_dur > 0 and anim_dur < 5) {
-            std.debug.print("[config] animation_duration is in milliseconds now; treating {d} as {d} ms\n", .{ anim_dur, anim_dur * 1000 });
-            anim_dur *= 1000;
-        }
-        wm_animate.duration_ms = @max(0, anim_dur);
+    // animations: `true`/`false`, or a number giving the per-frame duration in
+    // milliseconds (which also enables them). `animation_duration` is kept as a
+    // back-compat key for the duration alone.
+    // @doc S|animations|boolean\|number|false|Animate tiling frame changes instead of snapping (the size applies instantly, the position glides). `true`/`false` toggles it at the default speed; a number sets the per-frame duration in **milliseconds** and enables it (lower = snappier, `0` = off).
+    _ = lua.getField(1, "animations");
+    if (lua.isBoolean(-1)) {
+        cfg.animations = lua.toBoolean(-1);
+    } else if (lua.isNumber(-1)) {
+        const d = normalizeAnimMs(lua.toNumber(-1) catch 0);
+        cfg.animations = d > 0;
+        wm_animate.duration_ms = @max(0, d);
     }
+    lua.pop(1);
+    var anim_dur: f64 = wm_animate.duration_ms;
+    if (numberField(lua, "animation_duration", &anim_dur)) // back-compat key
+        wm_animate.duration_ms = @max(0, normalizeAnimMs(anim_dur));
+    wm_layout.animate = cfg.animations;
     boolField(lua, 1, "space_indicator", &cfg.space_indicator);
     boolField(lua, 1, "drag_preview", &cfg.drag_preview);
-    boolField(lua, 1, "smart_gaps", &cfg.smart_gaps);
+    boolField(lua, 1, "smart_gaps", &cfg.smart_gaps); // back-compat flat key
     wm_layout.smart_gaps = cfg.smart_gaps;
-    // Flow strip tuning. Clamped to sane ranges so a bad value can't wedge the
-    // layout (a 0 min width would make capacity infinite again).
-    if (numberField(lua, "default_column_width", &cfg.default_column_width))
-        cfg.default_column_width = std.math.clamp(cfg.default_column_width, 0.1, 1.0);
-    if (numberField(lua, "min_column_width", &cfg.min_column_width))
-        cfg.min_column_width = std.math.clamp(cfg.min_column_width, 0.05, 1.0);
-    _ = numberField(lua, "scroll_sliver", &cfg.scroll_sliver);
+    // columns: Flow strip tuning grouped as `{ default_width, min_width, presets }`.
+    // The pre-grouping flat keys (`default_column_width`, …) still work below.
+    // @doc S|columns|table|{ default_width = 0.5, min_width = 0.22, presets = { 0.333, 0.5, 0.667, 1.0 } }|Flow strip tuning. `default_width` (0–1): the viewport fraction a freshly opened column targets. `min_width` (0–1): the soft bound — while every column fits at this width the strip tiles the whole screen, past that it scrolls (so it sets on-screen capacity, ≈`floor(1/min_width)`). `presets`: the widths `agate.column_width` cycles and the `"1/3"`/`"1/2"`/`"2/3"`/`"full"` names snap to.
+    _ = lua.getField(1, "columns");
+    if (lua.isTable(-1)) {
+        const ci = lua.getTop();
+        _ = numberFieldAt(lua, ci, "default_width", &cfg.default_column_width);
+        _ = numberFieldAt(lua, ci, "min_width", &cfg.min_column_width);
+        parsePresetWidths(lua, ci, "presets", cfg);
+    }
+    lua.pop(1);
+    // Back-compat flat keys.
+    _ = numberField(lua, "default_column_width", &cfg.default_column_width);
+    _ = numberField(lua, "min_column_width", &cfg.min_column_width);
+    parsePresetWidths(lua, 1, "preset_column_widths", cfg);
+    // Clamp to sane ranges so a bad value can't wedge the layout (a 0 min width
+    // would make capacity infinite again).
+    cfg.default_column_width = std.math.clamp(cfg.default_column_width, 0.1, 1.0);
+    cfg.min_column_width = std.math.clamp(cfg.min_column_width, 0.05, 1.0);
     var swipe_fingers: f64 = @floatFromInt(cfg.swipe_scroll_fingers);
     if (numberField(lua, "swipe_scroll_fingers", &swipe_fingers))
         cfg.swipe_scroll_fingers = @intFromFloat(std.math.clamp(swipe_fingers, 0, 5));
-    parsePresetWidths(lua, cfg);
     wm_layout.default_column_width = cfg.default_column_width;
     wm_layout.min_column_width = cfg.min_column_width;
-    wm_layout.scroll_sliver = cfg.scroll_sliver;
+    // The strip's off-screen edge peek is the same "peek" as the accordion fan.
+    wm_layout.scroll_sliver = cfg.peek;
     // Arm the gesture pipeline's scroll-swallowing when live strip scrolling is
     // on, so a swipe drag doesn't also scroll the window underneath — even when
     // the user has bound no `agate.gesture` (which is the usual trigger).
     if (cfg.swipe_scroll_fingers != 0) gestures.g_enabled.store(true, .release);
-    // space_animation: how much of the Space-switch transition plays.
-    // TODO: Remove this option
-    // @doc S|space_animation|string|"instant"|How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation).
-    _ = lua.getField(1, "space_animation");
-    if (lua.isString(-1)) {
-        const s = std.mem.sliceTo(lua.toString(-1) catch "", 0);
-        if (std.mem.eql(u8, s, "fast")) {
-            macos.event_tap.switch_speed = .fast;
-        } else if (std.mem.eql(u8, s, "very_fast")) {
-            macos.event_tap.switch_speed = .very_fast;
-        } else if (std.mem.eql(u8, s, "instant")) {
-            macos.event_tap.switch_speed = .instant;
-        } else {
-            std.debug.print("[config] space_animation: unknown speed {s}\n", .{s});
-        }
-    }
-    lua.pop(1);
     // Apply gaps to every workspace in the tree
-    if (ctx.appstate) |app| if (app.tree) |root| actions.applyGapsToTree(root, cfg.gaps, cfg.outer_gaps, cfg.accordion_padding);
+    if (ctx.appstate) |app| if (app.tree) |root| actions.applyGapsToTree(root, cfg.gaps, cfg.outer_gaps, cfg.peek);
     return 0;
 }
 
@@ -413,27 +447,17 @@ fn agateExitMode(_: *Lua) i32 {
     return 0;
 }
 
-/// `agate.cycle("next"|"prev")` — focus the next/previous window among the
-/// focused window's siblings, wrapping at the edges. The accordion motion:
-/// on a small screen every window is one cycle step away.
-// @doc F|cycle|Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.
-// @doc FP|cycle|dir|"next"|"prev"|false|Cycle direction.
-fn agateCycle(lua: *Lua) i32 {
-    const app = ctx.appstate orelse return 0;
-    const dir_z = lua.toString(1) catch return 0;
-    const dir = std.mem.sliceTo(dir_z, 0);
-    const forward = !(std.mem.eql(u8, dir, "prev") or std.mem.eql(u8, dir, "previous") or
-        std.mem.eql(u8, dir, "back") or std.mem.eql(u8, dir, "backward"));
-    _ = focus.cycleFocus(app, forward);
-    return 0;
-}
-
-// @doc F|focus|Move focus to the nearest window in a direction, descending into and ascending out of nested containers (i3-style). Left/right traverse horizontal splits/stacks; up/down vertical ones.
-// @doc FP|focus|dir|agate.Direction|false|Direction to move focus.
+// @doc F|focus|Move keyboard focus. A direction (`left`/`right`/`up`/`down`) moves to the nearest window that way, descending into and ascending out of nested containers (i3-style; left/right traverse horizontal splits/stacks, up/down vertical ones). `"next"`/`"prev"` instead cycle through the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack.
+// @doc FP|focus|target|agate.Direction|string|false|A direction to move focus, or `"next"`/`"prev"` to cycle siblings.
 fn agateFocus(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
-    const dir_z = lua.toString(1) catch return 0;
-    const dir = parse.parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    const s = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+    if (std.mem.eql(u8, s, "next") or std.mem.eql(u8, s, "prev") or std.mem.eql(u8, s, "previous")) {
+        const forward = !(std.mem.eql(u8, s, "prev") or std.mem.eql(u8, s, "previous"));
+        _ = focus.cycleFocus(app, forward);
+        return 0;
+    }
+    const dir = parse.parseDir(s) orelse return 0;
     _ = focus.focusDirection(app, dir);
     return 0;
 }
@@ -472,33 +496,31 @@ fn agateJoin(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|zoom_fullscreen|Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
-fn agateZoomFullscreen(lua: *Lua) i32 {
-    _ = lua;
-    actions.toggleZoomFullscreen(ctx.appstate orelse return 0);
+// @doc F|toggle|Toggle a state on the focused window. `"fullscreen"` (yabai's zoom-fullscreen) makes it fill the whole space over the other tiles, with no Space transition; `"float"` lifts it out of the tiling to keep its own free position and size on top while the rest reflow. Toggle again to undo; the window stays on the same Space, tracked and focusable, either way.
+// @doc FP|toggle|what|string|false|`"fullscreen"` or `"float"`.
+fn agateToggle(lua: *Lua) i32 {
+    const app = ctx.appstate orelse return 0;
+    const s = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+    if (std.mem.eql(u8, s, "fullscreen") or std.mem.eql(u8, s, "zoom") or std.mem.eql(u8, s, "zoom_fullscreen")) {
+        actions.toggleZoomFullscreen(app);
+    } else if (std.mem.eql(u8, s, "float") or std.mem.eql(u8, s, "floating")) {
+        actions.toggleFloat(app);
+    } else {
+        std.debug.print("[config] toggle: unknown target '{s}' (want \"fullscreen\" or \"float\")\n", .{s});
+    }
     return 0;
 }
 
-// @doc F|toggle_float|Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
-fn agateToggleFloat(lua: *Lua) i32 {
-    _ = lua;
-    actions.toggleFloat(ctx.appstate orelse return 0);
-    return 0;
-}
-
-// @doc F|column_width|Flow strip: set or cycle the focused column's width. `"wider"`/`"narrower"` (aliases `"next"`/`"prev"`) step through `preset_column_widths`; `"full"`, `"half"`, or a fraction like `"1/3"`/`"2/3"` set it directly. Only the focused column changes — its neighbours keep their widths.
-// @doc FP|column_width|target|string|false|`"wider"`/`"narrower"`/`"next"`/`"prev"`, or a width: `"full"`, `"half"`, `"1/3"`, `"1/2"`, `"2/3"`, a fraction `"a/b"`, or a number (`0.4`, or `40` for 40%).
+// @doc F|column_width|Flow strip: set or cycle the focused column's width. `"wider"`/`"narrower"` (aliases `"next"`/`"prev"`) step through the column presets; `"full"`, `"half"`, or a fraction like `"1/3"`/`"2/3"` set it directly; `"fit"` re-equalizes *every* column so they tile the viewport evenly (balanced classic tiling, undoing manual widths). Only `"fit"` touches the neighbours — the rest change just the focused column.
+// @doc FP|column_width|target|string|false|`"wider"`/`"narrower"`/`"next"`/`"prev"`, `"fit"`, or a width: `"full"`, `"half"`, `"1/3"`, `"1/2"`, `"2/3"`, a fraction `"a/b"`, or a number (`0.4`, or `40` for 40%).
 fn agateColumnWidth(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
-    const t_z = lua.toString(1) catch return 0;
-    actions.cycleColumnWidth(app, std.mem.sliceTo(t_z, 0));
-    return 0;
-}
-
-// @doc F|fit|Flow strip: re-equalize every column on the workspace so they tile the viewport evenly (balanced classic tiling). Undoes manual `column_width` changes.
-fn agateFit(lua: *Lua) i32 {
-    _ = lua;
-    actions.fitColumns(ctx.appstate orelse return 0);
+    const t = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+    if (std.mem.eql(u8, t, "fit") or std.mem.eql(u8, t, "equal") or std.mem.eql(u8, t, "equalize")) {
+        actions.fitColumns(app);
+        return 0;
+    }
+    actions.cycleColumnWidth(app, t);
     return 0;
 }
 
@@ -540,29 +562,22 @@ fn agateExec(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|space|Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
-// @doc FP|space|n|integer|false|1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
+// @doc F|space|Switch Space on the focused display: a 1-based position jumps there directly, or `"next"`/`"prev"` step one Space over. Counts every Space in Mission Control order, including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
+// @doc FP|space|target|integer|string|false|A 1-based Space position (Mission Control order, fullscreen Spaces included), or `"next"`/`"prev"` to step.
 fn agateSpace(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
+    if (lua.isString(1)) {
+        const s = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+        if (std.mem.eql(u8, s, "next")) {
+            macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
+        } else if (std.mem.eql(u8, s, "prev") or std.mem.eql(u8, s, "previous")) {
+            macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
+        }
+        return 0;
+    }
     const n = lua.toInteger(1) catch return 0;
     if (n < 1) return 0;
     macos.spaces.switchToIndex(app.gpa, app.skylight_cid, @intCast(n)) catch {};
-    return 0;
-}
-
-// @doc F|space_next|Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
-fn agateSpaceNext(lua: *Lua) i32 {
-    _ = lua;
-    const app = ctx.appstate orelse return 0;
-    macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
-    return 0;
-}
-
-// @doc F|space_prev|Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
-fn agateSpacePrev(lua: *Lua) i32 {
-    _ = lua;
-    const app = ctx.appstate orelse return 0;
-    macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
     return 0;
 }
 
@@ -585,37 +600,35 @@ fn agateResize(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|move|Swap the focused window with its neighbour in a direction. Works across nested containers.
-// @doc FP|move|dir|agate.Direction|false|Direction to move the window.
+// @doc F|move|Move the focused window. A direction (`left`/`right`/`up`/`down`) swaps it with its neighbour that way (across nested containers). `move("space", n [, monitor])` sends it to Space `n` (optionally on a given 1-based monitor) without following focus. `move("monitor", dir)` moves it to an adjacent display's visible Space, tiles it there, and follows focus over.
+// @doc FP|move|target|agate.Direction|string|false|A direction to swap toward, or `"space"`/`"monitor"` to relocate the window (see the extra args).
+// @doc FP|move|arg|integer|agate.MonitorDir|true|With `"space"`: the 1-based Space position. With `"monitor"`: the display direction.
+// @doc FP|move|monitor|integer|true|With `"space"`: an optional 1-based monitor the position counts on (omit for the focused display).
 fn agateMove(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
-    const dir_z = lua.toString(1) catch return 0;
-    const dir = parse.parseDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
+    const s = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+    if (std.mem.eql(u8, s, "space")) {
+        const n = lua.toInteger(2) catch return 0;
+        if (n < 1) return 0;
+        if (lua.isNumber(3)) {
+            const mon = lua.toInteger(3) catch 0;
+            if (mon >= 1) {
+                actions.moveFocusedToSpaceOnMonitor(app, @intCast(mon), @intCast(n));
+                return 0;
+            }
+        }
+        actions.moveFocusedToSpace(app, @intCast(n));
+        return 0;
+    }
+    if (std.mem.eql(u8, s, "monitor") or std.mem.eql(u8, s, "display")) {
+        const dir = parse.parseMonitorDir(std.mem.sliceTo(lua.toString(2) catch return 0, 0)) orelse return 0;
+        actions.moveFocusedToMonitor(app, dir);
+        return 0;
+    }
+    const dir = parse.parseDir(s) orelse return 0;
     const leaf = focus.currentFocusedLeaf(app) orelse return 0;
     const forward = dir == .right or dir == .down;
     if (tree.swapLeaf(leaf, forward)) tree.flushActive(app);
-    return 0;
-}
-
-/// `agate.move_to_space(n [, monitor])`: send the focused window to user space
-/// `n`. With a second argument it targets space `n` on monitor `monitor`
-/// (1-based, in display order) — so a window can be assigned to a Space on
-/// another display; without it, the focused display.
-// @doc F|move_to_space|Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
-// @doc FP|move_to_space|n|integer|false|1-based Space position (Mission Control order, fullscreen included) to send the window to.
-// @doc FP|move_to_space|monitor|integer|true|1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
-fn agateMoveToSpace(lua: *Lua) i32 {
-    const app = ctx.appstate orelse return 0;
-    const n = lua.toInteger(1) catch return 0;
-    if (n < 1) return 0;
-    if (lua.isNumber(2)) {
-        const mon = lua.toInteger(2) catch 0;
-        if (mon >= 1) {
-            actions.moveFocusedToSpaceOnMonitor(app, @intCast(mon), @intCast(n));
-            return 0;
-        }
-    }
-    actions.moveFocusedToSpace(app, @intCast(n));
     return 0;
 }
 
@@ -628,18 +641,6 @@ fn agateFocusMonitor(lua: *Lua) i32 {
     const dir_z = lua.toString(1) catch return 0;
     const dir = parse.parseMonitorDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
     _ = focus.focusMonitor(app, dir);
-    return 0;
-}
-
-/// `agate.move_to_monitor(dir)`: move the focused window to the visible Space
-/// of an adjacent display and tile it there, following it over.
-// @doc F|move_to_monitor|Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.
-// @doc FP|move_to_monitor|dir|agate.MonitorDir|false|Which display to move the window to.
-fn agateMoveToMonitor(lua: *Lua) i32 {
-    const app = ctx.appstate orelse return 0;
-    const dir_z = lua.toString(1) catch return 0;
-    const dir = parse.parseMonitorDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
-    actions.moveFocusedToMonitor(app, dir);
     return 0;
 }
 
@@ -722,25 +723,18 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "mode",        .func = zlua.wrap(agateMode) },
     .{ .name = "enter_mode",  .func = zlua.wrap(agateEnterMode) },
     .{ .name = "exit_mode",   .func = zlua.wrap(agateExitMode) },
-    .{ .name = "cycle",       .func = zlua.wrap(agateCycle) },
     .{ .name = "focus",       .func = zlua.wrap(agateFocus) },
     .{ .name = "layout",      .func = zlua.wrap(agateLayout) },
     .{ .name = "space",       .func = zlua.wrap(agateSpace) },
-    .{ .name = "space_next",  .func = zlua.wrap(agateSpaceNext) },
-    .{ .name = "space_prev",  .func = zlua.wrap(agateSpacePrev) },
     .{ .name = "resize",      .func = zlua.wrap(agateResize) },
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
-    .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
     .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },
-    .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
     .{ .name = "column_width", .func = zlua.wrap(agateColumnWidth) },
-    .{ .name = "fit",         .func = zlua.wrap(agateFit) },
     .{ .name = "scroll",      .func = zlua.wrap(agateScroll) },
     .{ .name = "consume",     .func = zlua.wrap(agateConsume) },
     .{ .name = "expel",       .func = zlua.wrap(agateExpel) },
-    .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
-    .{ .name = "toggle_float", .func = zlua.wrap(agateToggleFloat) },
+    .{ .name = "toggle",      .func = zlua.wrap(agateToggle) },
     .{ .name = "exec",        .func = zlua.wrap(agateExec) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
 };

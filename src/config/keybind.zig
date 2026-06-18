@@ -98,28 +98,31 @@ pub fn handleKey(keycode: u16, raw_flags: u64) bool {
 }
 
 // String commands accepted as the second argument of `agate.bind`.
-// @doc C|move <dir>|Same as `agate.move(dir)`.
-// @doc C|focus <dir>|Same as `agate.focus(dir)`.
+// @doc C|move <dir>|Same as `agate.move(dir)` — swap with the neighbour that way.
+// @doc C|move space <n>|Same as `agate.move("space", n)` — send the window to Space `n`.
+// @doc C|move monitor <dir>|Same as `agate.move("monitor", dir)`.
+// @doc C|focus <dir\|next\|prev>|Same as `agate.focus(target)`.
 // @doc C|resize <smart\|dir> [amount]|Same as `agate.resize(target, amount)`. `resize smart 50` grows the focused window along its container axis (negative shrinks); `resize <dir> [amount]` grows toward an edge. Amount defaults to 50.
-// @doc C|cycle <next|prev>|Same as `agate.cycle(dir)`.
 // @doc C|layout <mode>|Same as `agate.layout(mode)`.
-// @doc C|space <n>|Same as `agate.space(n)`.
-// @doc C|move_to_space <n>|Same as `agate.move_to_space(n)`.
+// @doc C|space <n\|next\|prev>|Same as `agate.space(target)`.
 // @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
-// @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
 // @doc C|exec <cmd>|Run a shell command in the background through `$SHELL -c`. Same as `agate.exec(cmd)`.
-// @doc C|column_width <target>|Same as `agate.column_width(target)`.
-// @doc C|fit|Same as `agate.fit()`.
+// @doc C|column_width <target>|Same as `agate.column_width(target)` (including `fit`).
 // @doc C|scroll <target>|Same as `agate.scroll(target)`.
 // @doc C|consume <dir>|Same as `agate.consume(dir)`.
 // @doc C|expel <dir>|Same as `agate.expel(dir)`.
-// @doc C|zoom_fullscreen|Same as `agate.zoom_fullscreen()`.
-// @doc C|toggle_float|Same as `agate.toggle_float()`.
+// @doc C|toggle <fullscreen\|float>|Same as `agate.toggle(what)`.
 // @doc C|mode <name>|Same as `agate.enter_mode(name)`.
 // @doc C|exit_mode|Same as `agate.exit_mode()`.
 pub fn executeCommand(cmd: []const u8) void {
     const app = ctx.appstate orelse return;
-    if (std.mem.startsWith(u8, cmd, "move ")) {
+    if (std.mem.startsWith(u8, cmd, "move space ")) {
+        const n = std.fmt.parseInt(usize, cmd["move space ".len..], 10) catch return;
+        actions.moveFocusedToSpace(app, n);
+    } else if (std.mem.startsWith(u8, cmd, "move monitor ")) {
+        const dir = parse.parseMonitorDir(cmd["move monitor ".len..]) orelse return;
+        actions.moveFocusedToMonitor(app, dir);
+    } else if (std.mem.startsWith(u8, cmd, "move ")) {
         const dir = parse.parseDir(cmd[5..]) orelse return;
         const leaf = focus.currentFocusedLeaf(app) orelse {
             std.debug.print("[move] no focused leaf — nothing to swap\n", .{});
@@ -135,8 +138,12 @@ pub fn executeCommand(cmd: []const u8) void {
             std.debug.print("[move] #{d} has no neighbour for {s}\n", .{ leaf.id, cmd });
         }
     } else if (std.mem.startsWith(u8, cmd, "focus ")) {
-        const dir = parse.parseDir(cmd[6..]) orelse return;
-        _ = focus.focusDirection(app, dir);
+        const arg = cmd[6..];
+        if (std.mem.eql(u8, arg, "next") or std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous")) {
+            _ = focus.cycleFocus(app, !(std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous")));
+        } else if (parse.parseDir(arg)) |dir| {
+            _ = focus.focusDirection(app, dir);
+        }
     } else if (std.mem.startsWith(u8, cmd, "resize ")) {
         // "resize <smart|dir> [amount]" — amount defaults to 50, may be negative
         // for "smart" (shrink). Split on the first space; the rest is the amount.
@@ -151,33 +158,31 @@ pub fn executeCommand(cmd: []const u8) void {
             const grow = dir == .right or dir == .down;
             if (tree.resizeLeaf(leaf, grow, amount)) tree.flushActive(app);
         }
-    } else if (std.mem.startsWith(u8, cmd, "cycle ")) {
-        const arg = cmd[6..];
-        const forward = !(std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous") or
-            std.mem.eql(u8, arg, "back") or std.mem.eql(u8, arg, "backward"));
-        _ = focus.cycleFocus(app, forward);
     } else if (std.mem.startsWith(u8, cmd, "layout ")) {
         actions.setActiveLayout(app, cmd[7..]);
     } else if (std.mem.startsWith(u8, cmd, "space ")) {
-        const n = std.fmt.parseInt(usize, cmd[6..], 10) catch return;
-        macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
-    } else if (std.mem.startsWith(u8, cmd, "move_to_space ")) {
-        const n = std.fmt.parseInt(usize, cmd[14..], 10) catch return;
-        actions.moveFocusedToSpace(app, n);
+        const arg = cmd[6..];
+        if (std.mem.eql(u8, arg, "next")) {
+            macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
+        } else if (std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous")) {
+            macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
+        } else if (std.fmt.parseInt(usize, arg, 10) catch null) |n| {
+            macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
+        }
     } else if (std.mem.startsWith(u8, cmd, "focus_monitor ")) {
         const dir = parse.parseMonitorDir(cmd[14..]) orelse return;
         _ = focus.focusMonitor(app, dir);
-    } else if (std.mem.startsWith(u8, cmd, "move_to_monitor ")) {
-        const dir = parse.parseMonitorDir(cmd[16..]) orelse return;
-        actions.moveFocusedToMonitor(app, dir);
     } else if (std.mem.startsWith(u8, cmd, "mode ")) {
         if (ctx.config) |cfg| enterModeByName(cfg, cmd[5..]);
     } else if (std.mem.eql(u8, cmd, "exit_mode")) {
         if (ctx.config) |cfg| exitActiveMode(cfg);
     } else if (std.mem.startsWith(u8, cmd, "column_width ")) {
-        actions.cycleColumnWidth(app, cmd[13..]);
-    } else if (std.mem.eql(u8, cmd, "fit")) {
-        actions.fitColumns(app);
+        const t = cmd[13..];
+        if (std.mem.eql(u8, t, "fit") or std.mem.eql(u8, t, "equal") or std.mem.eql(u8, t, "equalize")) {
+            actions.fitColumns(app);
+        } else {
+            actions.cycleColumnWidth(app, t);
+        }
     } else if (std.mem.startsWith(u8, cmd, "scroll ")) {
         actions.scrollStrip(app, cmd[7..]);
     } else if (std.mem.startsWith(u8, cmd, "consume ")) {
@@ -186,10 +191,13 @@ pub fn executeCommand(cmd: []const u8) void {
     } else if (std.mem.startsWith(u8, cmd, "expel ")) {
         const dir = parse.parseDir(cmd[6..]) orelse return;
         actions.expel(app, dir);
-    } else if (std.mem.eql(u8, cmd, "zoom_fullscreen")) {
-        actions.toggleZoomFullscreen(app);
-    } else if (std.mem.eql(u8, cmd, "toggle_float")) {
-        actions.toggleFloat(app);
+    } else if (std.mem.startsWith(u8, cmd, "toggle ")) {
+        const what = cmd[7..];
+        if (std.mem.eql(u8, what, "fullscreen") or std.mem.eql(u8, what, "zoom")) {
+            actions.toggleZoomFullscreen(app);
+        } else if (std.mem.eql(u8, what, "float") or std.mem.eql(u8, what, "floating")) {
+            actions.toggleFloat(app);
+        }
     } else if (std.mem.startsWith(u8, cmd, "exec ")) {
         exec.spawnShell(app.gpa, cmd[5..]);
     }

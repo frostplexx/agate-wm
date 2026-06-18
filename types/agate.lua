@@ -26,21 +26,14 @@
 ---| '"down"'
 
 ---@class agate.Config
----@field animation_duration? number Length of the frame animation in **milliseconds** (lower = faster; `0` disables). Only meaningful with `animations = true`. (default `150`)
----@field space_animation? string How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation). (default `"instant"`)
----@field gaps? number Pixels between adjacent tiles. (default `8`)
----@field outer_gaps? number Pixels inset from the screen edge. (default `8`)
----@field accordion_padding? number Stacked-window "peek": how far each window in a stack/accordion fans past the one in front. Alias: `accordion`. (default `40`)
+---@field gaps? number|table Pixels between tiles. A number sets both the inner gap and the screen-edge inset; a table `{ inner, outer, smart }` sets them separately (`smart` drops the outer gap when a workspace holds a single window). (default `8`)
+---@field animations? boolean|number Animate tiling frame changes instead of snapping (the size applies instantly, the position glides). `true`/`false` toggles it at the default speed; a number sets the per-frame duration in **milliseconds** and enables it (lower = snappier, `0` = off). (default `false`)
+---@field columns? table Flow strip tuning. `default_width` (0–1): the viewport fraction a freshly opened column targets. `min_width` (0–1): the soft bound — while every column fits at this width the strip tiles the whole screen, past that it scrolls (so it sets on-screen capacity, ≈`floor(1/min_width)`). `presets`: the widths `agate.column_width` cycles and the `"1/3"`/`"1/2"`/`"2/3"`/`"full"` names snap to. (default `{ default_width = 0.5, min_width = 0.22, presets = { 0.333, 0.5, 0.667, 1.0 } }`)
+---@field peek? number How much of a hidden window stays visible (px): the accordion/stack fan (how far each stacked window peeks past the one in front) **and** the Flow strip's off-screen edge peek (an off-screen column kept clickable at the screen edge). Aliases: `accordion_padding`, `accordion`. (default `48`)
 ---@field hyper_key? agate.HyperKey Built-in hyper key (see agate.HyperKey), ported from LazyKeys. When enabled, agate remaps Caps Lock to F18 at the HID level (via `hidutil`) and treats a held Caps Lock as the modifier set in `keys` — for both agate keybindings and the focused app. The `hyper` macro in key specs expands to `keys`. (default `{ enabled = true, keys = {"ctrl","alt","cmd","shift"} }`)
 ---@field small_screen? agate.SmallScreen Small Screen Mode (see agate.SmallScreen): workspaces on a small main display trade the split layout for an accordion, and back when a big display takes over. (default `{ enabled = true, layout = "h_accordion", max_width = 0 }`)
----@field animations? boolean Animate tiling frame changes instead of snapping: the final size applies instantly, the position glides over (60 Hz, ease-out, capped at 8 windows per flush with an automatic snap when an app is too busy to keep up). Speed via `animation_duration`. (default `false`)
 ---@field space_indicator? boolean Show the active space's number as a menu-bar status item. (default `true`)
 ---@field drag_preview? boolean While dragging a window, highlight the tile it will swap into on drop with a translucent overlay. (default `true`)
----@field smart_gaps? boolean When a workspace holds a single window, drop the outer gap so it fills the display edge-to-edge (Hyprland's `no_gaps_when_only`). (default `false`)
----@field default_column_width? number Flow strip: the width a freshly opened column targets, as a fraction of the viewport (0–1). Acts as a proportional weight while the strip fits the screen, or the column's width once the strip scrolls. (default `0.5`)
----@field min_column_width? number Flow strip soft bound (fraction of the viewport): while all columns fit at this width the strip fills the screen like a classic tiler; only with more columns than fit at this width does it scroll. Controls the strip's on-screen capacity. (default `0.22`)
----@field preset_column_widths? number[] Flow strip: the column widths (fractions of the viewport) `agate.column_width` cycles through with `"next"`/`"prev"`, and that the `"1/3"`/`"1/2"`/`"2/3"`/`"full"` names snap to. (default `{ 0.333, 0.5, 0.667, 1.0 }`)
----@field scroll_sliver? number Flow strip: width (px) of the sliver of an off-screen column kept peeking at the screen edge while the strip is scrolled, so nothing is ever fully hidden. (default `24`)
 ---@field swipe_scroll_fingers? integer Flow strip: number of fingers for the trackpad swipe that scrolls the strip live (drag the columns under your fingers, snapping to a column on release). Set 0 to disable. (default `3`)
 
 ---@class agate.SmallScreen
@@ -58,7 +51,7 @@
 ---@field space? integer 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
 ---@field monitor? integer 1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.
 ---@field follow? boolean Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
----@field floating? boolean Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
+---@field floating? boolean Float matched windows when they appear (like `agate.toggle("float")` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
 
 ---@class Agate
 agate = {}
@@ -94,13 +87,9 @@ function agate.enter_mode(name) end
 ---Leave the active mode and return to the normal keymap. Bind this to `escape` inside a mode so there's always a way out.
 function agate.exit_mode() end
 
----Focus the next/previous window among the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack (Small Screen Mode), bindable to a swipe or a key.
----@param dir "next"|"prev" Cycle direction.
-function agate.cycle(dir) end
-
----Move focus to the nearest window in a direction, descending into and ascending out of nested containers (i3-style). Left/right traverse horizontal splits/stacks; up/down vertical ones.
----@param dir agate.Direction Direction to move focus.
-function agate.focus(dir) end
+---Move keyboard focus. A direction (`left`/`right`/`up`/`down`) moves to the nearest window that way, descending into and ascending out of nested containers (i3-style; left/right traverse horizontal splits/stacks, up/down vertical ones). `"next"`/`"prev"` instead cycle through the focused window's siblings, wrapping at the edges — the natural motion through an accordion/stack.
+---@param target agate.Direction|string A direction to move focus, or `"next"`/`"prev"` to cycle siblings.
+function agate.focus(target) end
 
 ---Set the focused container's layout (the focused window's parent), falling back to the workspace for top-level windows.
 ---@param mode agate.Layout Layout mode to apply.
@@ -111,18 +100,13 @@ function agate.layout(mode) end
 ---@param mode? agate.Layout Layout of the new container. Default `v_stack`.
 function agate.join(dir, mode) end
 
----Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
-function agate.zoom_fullscreen() end
+---Toggle a state on the focused window. `"fullscreen"` (yabai's zoom-fullscreen) makes it fill the whole space over the other tiles, with no Space transition; `"float"` lifts it out of the tiling to keep its own free position and size on top while the rest reflow. Toggle again to undo; the window stays on the same Space, tracked and focusable, either way.
+---@param what string `"fullscreen"` or `"float"`.
+function agate.toggle(what) end
 
----Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
-function agate.toggle_float() end
-
----Flow strip: set or cycle the focused column's width. `"wider"`/`"narrower"` (aliases `"next"`/`"prev"`) step through `preset_column_widths`; `"full"`, `"half"`, or a fraction like `"1/3"`/`"2/3"` set it directly. Only the focused column changes — its neighbours keep their widths.
----@param target string `"wider"`/`"narrower"`/`"next"`/`"prev"`, or a width: `"full"`, `"half"`, `"1/3"`, `"1/2"`, `"2/3"`, a fraction `"a/b"`, or a number (`0.4`, or `40` for 40%).
+---Flow strip: set or cycle the focused column's width. `"wider"`/`"narrower"` (aliases `"next"`/`"prev"`) step through the column presets; `"full"`, `"half"`, or a fraction like `"1/3"`/`"2/3"` set it directly; `"fit"` re-equalizes *every* column so they tile the viewport evenly (balanced classic tiling, undoing manual widths). Only `"fit"` touches the neighbours — the rest change just the focused column.
+---@param target string `"wider"`/`"narrower"`/`"next"`/`"prev"`, `"fit"`, or a width: `"full"`, `"half"`, `"1/3"`, `"1/2"`, `"2/3"`, a fraction `"a/b"`, or a number (`0.4`, or `40` for 40%).
 function agate.column_width(target) end
-
----Flow strip: re-equalize every column on the workspace so they tile the viewport evenly (balanced classic tiling). Undoes manual `column_width` changes.
-function agate.fit() end
 
 ---Flow strip: scroll or jump along the strip. `"left"`/`"right"` step focus to the adjacent column (auto-scrolling it into view), `"start"`/`"end"` focus the first/last column, `"center"` centers the focused column.
 ---@param target "left"|"right"|"start"|"end"|"center" Where to scroll.
@@ -140,37 +124,24 @@ function agate.expel(dir) end
 ---@param cmd string The shell command line to run.
 function agate.exec(cmd) end
 
----Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
----@param n integer 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
-function agate.space(n) end
-
----Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
-function agate.space_next() end
-
----Switch to the previous Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
-function agate.space_prev() end
+---Switch Space on the focused display: a 1-based position jumps there directly, or `"next"`/`"prev"` step one Space over. Counts every Space in Mission Control order, including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
+---@param target integer|string A 1-based Space position (Mission Control order, fullscreen Spaces included), or `"next"`/`"prev"` to step.
+function agate.space(target) end
 
 ---Resize the focused tile, transferring the delta to its neighbour. Pass `"smart"` (recommended) to resize along the focused window's container axis without picking an edge: a positive `amount` grows it, a negative one shrinks it, taking from whichever neighbour exists — so the same binding always enlarges/shrinks the focused window wherever it sits. A direction (`left`/`right`/`up`/`down`) instead grows the window toward that edge, by stealing from the neighbour there.
 ---@param target agate.Direction|string `"smart"` to resize along the container axis, or an edge (`left`/`right`/`up`/`down`) to grow toward.
 ---@param amount? number Pixels to resize by. Default 50. With `"smart"`, a negative value shrinks.
 function agate.resize(target, amount) end
 
----Swap the focused window with its neighbour in a direction. Works across nested containers.
----@param dir agate.Direction Direction to move the window.
-function agate.move(dir) end
-
----Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
----@param n integer 1-based Space position (Mission Control order, fullscreen included) to send the window to.
----@param monitor? integer 1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
-function agate.move_to_space(n, monitor) end
+---Move the focused window. A direction (`left`/`right`/`up`/`down`) swaps it with its neighbour that way (across nested containers). `move("space", n [, monitor])` sends it to Space `n` (optionally on a given 1-based monitor) without following focus. `move("monitor", dir)` moves it to an adjacent display's visible Space, tiles it there, and follows focus over.
+---@param target agate.Direction|string A direction to swap toward, or `"space"`/`"monitor"` to relocate the window (see the extra args).
+---@param arg? integer|agate.MonitorDir With `"space"`: the 1-based Space position. With `"monitor"`: the display direction.
+---@param monitor? integer With `"space"`: an optional 1-based monitor the position counts on (omit for the focused display).
+function agate.move(target, arg, monitor) end
 
 ---Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.
 ---@param dir agate.MonitorDir Which display to focus.
 function agate.focus_monitor(dir) end
-
----Move the focused window to an adjacent display's visible space, tile it there, and follow focus to it.
----@param dir agate.MonitorDir Which display to move the window to.
-function agate.move_to_monitor(dir) end
 
 ---Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) and/or floated when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, `floating = true`, or a combination — a rule must have at least one effect. When several rules match a window, the last registered one wins.
 ---@param rule agate.Rule Rule table (see agate.Rule).

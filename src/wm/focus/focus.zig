@@ -46,6 +46,14 @@ pub fn focusLeaf(leaf: *data.Con) bool {
     return true;
 }
 
+/// Record `leaf` as the focused window *without* touching the OS — the window is
+/// already focused (e.g. the user clicked it), we just need the tree to remember
+/// which column to keep in view. Calling `focusLeaf` here would re-assert AX focus
+/// and risk a focus-change feedback loop; this only updates the breadcrumb path.
+pub fn markFocused(leaf: *data.Con) void {
+    recordFocusPath(leaf);
+}
+
 /// Walk up from `leaf`, marking each ancestor's `last_focused_child` to the child
 /// on the path, so re-entering a container later restores this window.
 fn recordFocusPath(leaf: *data.Con) void {

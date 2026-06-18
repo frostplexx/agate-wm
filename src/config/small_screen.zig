@@ -36,8 +36,8 @@ pub fn applySmallScreenMode(app: *state.AppState) bool {
     const cfg = ctx.config orelse return false;
     if (!cfg.small_screen_enabled) return false;
     const root = app.tree orelse return false;
-    const peek: u32 = if (cfg.small_screen_tabs) 0 else @intFromFloat(@max(0, cfg.accordion_padding));
-    const normal_peek: u32 = @intFromFloat(@max(0, cfg.accordion_padding));
+    const peek: u32 = if (cfg.small_screen_tabs) 0 else @intFromFloat(@max(0, cfg.peek));
+    const normal_peek: u32 = @intFromFloat(@max(0, cfg.peek));
     return applySmallLayoutToTree(root, isSmallScreen(cfg), cfg.small_screen_layout, peek, normal_peek);
 }
 
