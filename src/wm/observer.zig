@@ -1420,14 +1420,18 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     // `fromElement` already cached the AX element, so this just returns it.
     if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
     applyAssignmentRules(app, leaf, el);
-    tree.flushActive(app);
 
-    // In a stack/accordion the tiles overlap almost entirely; make sure the
-    // new window is the one in front, not a sliver peeking out behind the
-    // previous tile. (Skip if a rule just re-homed the leaf to another Space.)
-    if (leaf.parent == ws and (ws.layout == .H_STACK or ws.layout == .V_STACK)) {
-        _ = focus.focusLeaf(leaf);
-    }
+    // Focus the new window *before* the flush so the layout reacts to it:
+    //  - On a Flow strip, the new column is scrolled into view (otherwise it can
+    //    open off-screen to the right with focus stranded on the old window).
+    //  - In a stack/accordion, it's raised to the front instead of peeking behind
+    //    the previous tile.
+    // (Skip if a rule just re-homed the leaf to another Space — then `leaf.parent`
+    // is no longer this workspace and the rule path owns the relayout.)
+    const focus_new = leaf.parent == ws and
+        (ws.layout == .SCROLL or ws.layout == .H_STACK or ws.layout == .V_STACK);
+    if (focus_new) _ = focus.focusLeaf(leaf);
+    tree.flushActive(app);
     lua_config.emitWindowCreated(leaf.id);
 }
 

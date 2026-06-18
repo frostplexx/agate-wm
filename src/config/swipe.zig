@@ -104,6 +104,7 @@ pub fn gestureBegin(fingers: u8, axis: gestures.Axis) void {
         g_scroll_last = 0;
         g_scroll_w = tree.areaForWorkspace(app, ws).size.width;
         wm_layout.scrolling = true; // the finger owns the offset; skip ensure-into-view
+        wm_layout.snap_now = true; // track the finger in lockstep (no per-frame ease)
     }
 }
 
@@ -157,10 +158,11 @@ pub fn gestureEnd(fingers: u8, dir: ?gestures.Swipe) void {
     // and never fires a discrete gesture binding.
     if (g_scroll_drag) {
         g_scroll_drag = false;
+        wm_layout.snap_now = false; // let the settle glide into place
         if (ctx.appstate) |app| {
             if (activeScrollWs(app)) |ws| {
                 wm_layout.snapStrip(ws, tree.areaForWorkspace(app, ws));
-                tree.flushActive(app); // honored while `scrolling` is still true
+                tree.flushActive(app); // `scrolling` still true → honors the snap, animates it
             }
         }
         wm_layout.scrolling = false;

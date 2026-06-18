@@ -42,6 +42,12 @@ pub var scroll_sliver: f64 = 24;
 /// `config/swipe.zig`. Mirrors `animate`.
 pub var scrolling: bool = false;
 
+/// Force this flush to snap (apply frames directly) even when `animate` is on.
+/// Set during a live scroll-drag so columns track the finger in lockstep instead
+/// of each lagging behind its own ease (paneru snaps during a swipe too — see
+/// `position_layout_windows`). Cleared for the release settle, which *does* glide.
+pub var snap_now: bool = false;
+
 /// Most columns one strip lays out. Past this the extra columns are dropped from
 /// the pass (they'd be off-screen regardless) — a workspace with this many
 /// columns is already well past any sane capacity.
@@ -75,7 +81,9 @@ fn isFloating(con: *data.Con) bool {
 pub fn flushWorkspace(ws: *data.Con, area: Rect) void {
     var eui = EuiGuard{};
     eui.disableUnder(ws);
-    if (animate and animation.enabled()) {
+    // `snap_now` (a live scroll-drag) forces the direct path so the columns track
+    // the finger exactly instead of easing behind it.
+    if (animate and animation.enabled() and !snap_now) {
         animation.begin();
         assignFrames(ws, area, animateSink);
         animation.commit(eui); // guard ownership moves to the animator
@@ -93,6 +101,14 @@ fn animateSink(leaf: *data.Con, area: Rect) void {
     const win = &leaf.window.?;
     const from = win.bounds;
     if (!animation.shouldAnimate(from, area)) return applyFrame(win, area);
+    // Snap a large jump instead of easing it (paneru's `offscreen_move` rule): a
+    // re-tile nudges a window by less than its own width, but shoving a column to
+    // its off-screen edge-peek moves it ~a viewport — animating that would fling
+    // it across the screen. Snap so on-screen columns glide and edge columns just
+    // appear at the edge.
+    const dx = @abs(area.origin.x - from.origin.x);
+    const dy = @abs(area.origin.y - from.origin.y);
+    if (dx > 1.5 * area.size.width or dy > 1.5 * area.size.height) return applyFrame(win, area);
     const el = window.resolveElement(win) orelse return applyFrame(win, area);
     if (!animation.add(el, from, area)) return applyFrame(win, area);
     _ = el.setSize(area.size); // final size at the old position; ticks glide it over

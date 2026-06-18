@@ -2,52 +2,84 @@
 -- Loaded on startup from $WM_CONFIG, $XDG_CONFIG_HOME/agate/init.lua,
 -- ~/.config/agate/init.lua, or ./init.lua (this file, for development).
 
--- Gaps and hyper-key definition.
+-- Gaps, hyper key, and Flow strip tuning.
+--
+-- Every workspace is a Flow strip: a horizontally scrollable row of columns.
+-- While the columns fit at `min_column_width` the strip fills the screen like a
+-- classic tiler; only past that capacity does it scroll, keeping off-screen
+-- columns peeking at the edges. A column can itself be a vertical split/stack
+-- (see consume/expel below), so traditional tiling lives inside the strip.
 agate.config({
     gaps = 4,                           -- space between tiles
     outer_gaps = 4,                     -- inset from the screen edge
     accordion_padding = 20,             -- stacked-window "peek": how far each window fans out
     hyper_key = { enabled = true, keys = { "ctrl", "alt", "cmd" }, },
     smart_gaps = true,                  -- disable gaps when only one tile is visible
+
+    -- Animate frame changes: the strip glides when you scroll / focus / resize a
+    -- column instead of snapping. (A live trackpad scroll-drag still tracks your
+    -- finger 1:1 and only eases on release.)
+    animations = true,
+    animation_duration = 130,           -- milliseconds (lower = snappier)
+
+    -- Flow strip. On-screen capacity before it scrolls is ~floor(1/min_column_width):
+    -- 0.4 → 2 columns fit, so a 3rd window starts scrolling; 0.33 → 3 fit; 0.25 → 4 fit.
+    default_column_width = 0.5,         -- a new column targets half the viewport
+    min_column_width = 0.4,             -- shrink to here before the strip scrolls (≈2 columns fit)
+    preset_column_widths = { 1/3, 1/2, 2/3, 1.0 }, -- cycled by column_width wider/narrower
+    swipe_scroll_fingers = 3,           -- 3-finger horizontal swipe scrolls the strip live
 })
 
 
 
--- Gestures
-agate.gesture("3:left", function() agate.focus("right") end)
+-- Gestures. A 3-finger *horizontal* swipe scrolls the strip live (set above), so
+-- only the vertical 3-finger swipes are free for discrete actions here.
 agate.gesture("3:down", function() agate.focus("down") end)
 agate.gesture("3:up", function() agate.focus("up") end)
-agate.gesture("3:right", function() agate.focus("left") end)
 
 
--- Focus movement (i3-style hjkl).
+-- Focus movement (i3-style hjkl). On the strip, left/right step between columns
+-- (auto-scrolling the focused one into view); up/down move within a column.
 agate.bind("hyper+h", function() agate.focus("left") end)
 agate.bind("hyper+j", function() agate.focus("down") end)
 agate.bind("hyper+k", function() agate.focus("up") end)
 agate.bind("hyper+l", function() agate.focus("right") end)
 
+-- Jump to the strip's ends / center the focused column.
+agate.bind("hyper+shift+h", function() agate.scroll("start") end)              -- leftmost column
+agate.bind("hyper+shift+l", function() agate.scroll("end") end)               -- rightmost column
+agate.bind("hyper+0", function() agate.scroll("center") end)                  -- center focused column
+
 agate.bind("hyper+space", function() agate.zoom_fullscreen() end)
 
--- Move the focused window to an adjacent slot.
-agate.bind("hyper+shift+h", "move left")
+-- Move the focused window to an adjacent slot / column.
 agate.bind("hyper+shift+j", "move down")
 agate.bind("hyper+shift+k", "move up")
-agate.bind("hyper+shift+l", "move right")
+agate.bind("hyper+shift+comma", "move left")                                   -- swap with the left column
+agate.bind("hyper+shift+period", "move right")                                 -- swap with the right column
 
--- Layout control.
-agate.bind("hyper+b", function() agate.layout("h_tiles") end)                   -- horizontal split
-agate.bind("hyper+v", function() agate.layout("v_tiles") end)                   -- vertical split
+-- Column width (Flow strip): cycle the focused column through the presets, or
+-- snap it to a specific fraction. `fit` re-equalizes every column (classic tiling).
+agate.bind("hyper+plus", function() agate.column_width("wider") end)
+agate.bind("hyper+minus", function() agate.column_width("narrower") end)
+agate.bind("hyper+f", function() agate.fit() end)                              -- tile columns evenly
+agate.bind("hyper+m", function() agate.column_width("full") end)              -- maximize the column
+
+-- Consume / expel: merge the focused column with a neighbour into a vertical
+-- split (traditional tiling inside a column), or eject a window back to its own
+-- column on the strip.
+agate.bind("hyper+comma", function() agate.consume("left") end)               -- pull the left column in
+agate.bind("hyper+period", function() agate.expel("right") end)               -- eject to its own column
+
+-- Layout of the *focused column's* internal tiling (only applies once a column
+-- holds more than one window, e.g. after `consume`). The workspace itself is
+-- always the Flow strip and can't be switched away from it.
+agate.bind("hyper+v", function() agate.layout("v_split") end)                   -- split the column vertically
+agate.bind("hyper+b", function() agate.layout("h_split") end)                   -- split the column horizontally
 agate.bind("hyper+e", function() agate.layout("toggle") end)                    -- swap split orientation
-agate.bind("hyper+s", function() agate.layout("accordion") end)                 -- vertical stack (bottom peeks)
-agate.bind("hyper+shift+s", function() agate.layout("h_stack") end)             -- horizontal stack
+agate.bind("hyper+s", function() agate.layout("accordion") end)                 -- stack the column (peek)
 
--- Combine the focused window with a neighbour into a nested container, for mixed
--- layouts (e.g. left/right tiled with the left slot holding two stacked windows).
--- Second arg is the new container's layout (default "v_stack").
-agate.bind("hyper+g", function() agate.join("right") end)                              -- stack with right neighbour
-agate.bind("hyper+shift+g", function() agate.join("right", "v_split") end)             -- split with right neighbour
-
--- Resize the focused tile.
+-- Resize the focused tile within its column (column width uses hyper+r above).
 agate.bind("hyper+minus", function() agate.resize("smart", -50) end)
 agate.bind("hyper+equal", function() agate.resize("smart", 50) end)
 -- Instant space switching — uses SLSManagedDisplaySetCurrentSpace directly,

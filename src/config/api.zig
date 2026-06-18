@@ -196,6 +196,10 @@ fn agateConfig(lua: *Lua) i32 {
     wm_layout.default_column_width = cfg.default_column_width;
     wm_layout.min_column_width = cfg.min_column_width;
     wm_layout.scroll_sliver = cfg.scroll_sliver;
+    // Arm the gesture pipeline's scroll-swallowing when live strip scrolling is
+    // on, so a swipe drag doesn't also scroll the window underneath — even when
+    // the user has bound no `agate.gesture` (which is the usual trigger).
+    if (cfg.swipe_scroll_fingers != 0) gestures.g_enabled.store(true, .release);
     // space_animation: how much of the Space-switch transition plays.
     // TODO: Remove this option
     // @doc S|space_animation|string|"instant"|How much of the Space-switch transition plays: `"fast"`, `"very_fast"`, or `"instant"` (no perceptible animation).
