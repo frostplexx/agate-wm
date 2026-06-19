@@ -595,12 +595,14 @@ fn onSpaceChanged(
     // Pick up Spaces created since startup (a new desktop, or the Space macOS
     // opens for a native-fullscreen window) before tiling — otherwise switching
     // to one finds no workspace and the flush/focus below would bail.
-    _ = tree.reconcileSpaces(mgr.appState);
+    const spaces = macos.spaces.allSpaces(mgr.appState.gpa, mgr.appState.skylight_cid) catch null;
+    defer if (spaces) |s| mgr.appState.gpa.free(s);
+    _ = tree.reconcileSpaces(mgr.appState, spaces);
     // Follow windows that changed Space without a create/destroy event — chiefly
     // a window entering/leaving native fullscreen, which relocates it to/from a
     // fullscreen Space. Re-homes the leaf so we stop tiling a now-fullscreen
     // window (and resume when it returns).
-    _ = tree.reconcileWindowSpaces(mgr.appState);
+    _ = tree.reconcileWindowSpaces(mgr.appState, spaces);
     // Finish a move that was waiting on a window leaving native fullscreen (the
     // leaf is now back on a user Space, re-homed just above).
     lua_config.runPendingMove(mgr.appState);
@@ -678,7 +680,7 @@ fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) v
     // geometry, so undocking lands straight in the accordion.
     _ = lua_config.applySmallScreenMode(mgr.appState);
     // A display change can add/remove Spaces too — reconcile before tiling.
-    _ = tree.reconcileSpaces(mgr.appState);
+    _ = tree.reconcileSpaces(mgr.appState, null);
     // Geometry changed for potentially every display — re-tile them all.
     tree.flushAllVisible(mgr.appState);
     std.debug.print("[observer] display reconfigured → retiled\n", .{});
@@ -1366,7 +1368,7 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     // The window may have opened on a Space created since startup (a new desktop)
     // — reconcile so its workspace exists, then look it up.
     const ws = tree.findWorkspace(app.tree.?, sid) orelse blk: {
-        _ = tree.reconcileSpaces(app);
+        _ = tree.reconcileSpaces(app, null);
         break :blk tree.findWorkspace(app.tree.?, sid) orelse return;
     };
 

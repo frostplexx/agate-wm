@@ -146,39 +146,45 @@ fn acquireWorkspace(appState: *state.AppState, mon: *data.Con, sid: u64, space_t
 /// opened on them tile via the normal create path. A fullscreen Space is tracked
 /// (so a window parked there is found) but never tiled (see `flushWorkspace`).
 /// Returns true if the tree changed.
-pub fn reconcileSpaces(appState: *state.AppState) bool {
+pub fn reconcileSpaces(appState: *state.AppState, opt_spaces: ?[]const macos.spaces.Space) bool {
     const root = appState.tree orelse return false;
-    const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
-    defer appState.gpa.free(all);
+    const spaces = if (opt_spaces) |s| s else blk: {
+        const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
+        break :blk all;
+    };
+    defer if (opt_spaces == null) appState.gpa.free(spaces);
 
     var changed = false;
-    for (all) |sp| {
+    for (spaces) |sp| {
         if (findWorkspace(root, sp.id) != null) continue;
         const mon = ensureMonitor(appState.arena, root, sp.display_index) catch continue;
         _ = acquireWorkspace(appState, mon, sp.id, sp.type) orelse continue;
         std.debug.print("[tree] +space {d} (display {d}, type {d})\n", .{ sp.id, sp.display_index, sp.type });
         changed = true;
     }
-    if (pruneVanishedWorkspaces(appState, all)) changed = true;
+    if (pruneVanishedWorkspaces(appState, spaces)) changed = true;
     return changed;
 }
 
 /// Move every tracked window's leaf to the Workspace matching the Space it is
 /// actually on now, using the window server's per-Space window lists (the
 /// authoritative source). This is how agate follows a window that changed Space
-/// without a create/destroy event — most importantly a window entering or
-/// leaving native fullscreen, which silently relocates it to/from a fullscreen
-/// Space. A window parked on a fullscreen Space's (non-tiled) Workspace is thus
-/// left at full size; when it returns to a user Space its leaf comes back and
-/// tiling resumes. Call after `reconcileSpaces` (so destination Workspaces
-/// exist). Returns true if any leaf moved.
-pub fn reconcileWindowSpaces(appState: *state.AppState) bool {
+/// without a create/destroy event — chiefly a window entering or leaving native
+/// fullscreen, which silently relocates it to/from a fullscreen Space. A window
+/// parked on a fullscreen Space's (non-tiled) Workspace is thus left at full size;
+/// when it returns to a user Space its leaf comes back and tiling resumes. Call
+/// after `reconcileSpaces` (so destination Workspaces exist). Returns true if
+/// any leaf moved.
+pub fn reconcileWindowSpaces(appState: *state.AppState, opt_spaces: ?[]const macos.spaces.Space) bool {
     const root = appState.tree orelse return false;
-    const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
-    defer appState.gpa.free(all);
+    const spaces = if (opt_spaces) |s| s else blk: {
+        const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
+        break :blk all;
+    };
+    defer if (opt_spaces == null) appState.gpa.free(spaces);
 
     var changed = false;
-    for (all) |sp| {
+    for (spaces) |sp| {
         const wids = macos.spaces.windowsOnSpace(appState.gpa, appState.skylight_cid, sp.id, true) catch continue;
         defer appState.gpa.free(wids);
         for (wids) |wid| {

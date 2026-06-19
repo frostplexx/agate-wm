@@ -241,66 +241,88 @@ fn layoutStack(con: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) v
 /// capacity it scrolls, keeping off-screen columns as edge peeks (scroll mode).
 /// Each column is itself `place`d, so a column that is a nested container tiles
 /// its own windows with the classic layouts — traditional tiling inside a column.
-fn layoutScroll(ws: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
-    var cols: [max_columns]*data.Con = undefined;
-    var out: [max_columns]f64 = undefined;
-    const fl = flowWidths(ws, area, &cols, &out);
-    if (fl.n == 0) return; // every column floats — nothing to tile
+/// Consolidated geometry details of a Flow strip (`SCROLL` workspace) to avoid
+/// redundant, repeated loops and width calculations during flushes and scrolls.
+const ScrollGeometry = struct {
+    cols: [max_columns]*data.Con,
+    widths: [max_columns]f64,
+    positions: [max_columns]f64,
+    n: usize,
+    gap: f64,
+    fit: bool,
+    total_width: f64,
+    focused_idx: ?usize,
 
-    if (fl.fit) {
+    fn compute(ws: *data.Con, area: Rect) ScrollGeometry {
+        var self: ScrollGeometry = undefined;
+        var weights: [max_columns]f64 = undefined;
+        self.n = 0;
+        var total_t: f64 = 0;
+        const focused = validFocusedColumn(ws);
+
+        for (ws.children.items) |child| {
+            if (isFloating(child)) continue;
+            if (self.n == max_columns) break;
+            const t = if (child.width_frac > 0) child.width_frac else default_column_width;
+            self.cols[self.n] = child;
+            weights[self.n] = t;
+            total_t += t;
+            self.n += 1;
+        }
+
+        if (self.n == 0) {
+            self.fit = true;
+            self.gap = 0;
+            self.total_width = 0;
+            self.focused_idx = null;
+            return self;
+        }
+        if (total_t <= 0) total_t = 1;
+
+        const W = area.size.width;
+        self.gap = @floatFromInt(ws.gaps.inner);
+        const nf: f64 = @floatFromInt(self.n);
+        const avail = W - self.gap * (nf - 1);
+        const min_w = min_column_width * W;
+
+        self.fit = (nf * min_w <= avail);
+
+        if (self.fit) {
+            fitWidths(weights[0..self.n], self.widths[0..self.n], avail, min_w);
+        } else {
+            for (0..self.n) |i| self.widths[i] = @max(min_w, weights[i] * W);
+        }
+
+        var x: f64 = 0;
+        self.focused_idx = null;
+        for (0..self.n) |i| {
+            self.positions[i] = x;
+            if (self.cols[i] == focused) {
+                self.focused_idx = i;
+            }
+            x += self.widths[i] + self.gap;
+        }
+        self.total_width = if (x > 0) x - self.gap else 0;
+
+        return self;
+    }
+};
+
+fn layoutScroll(ws: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) void) void {
+    const geom = ScrollGeometry.compute(ws, area);
+    if (geom.n == 0) return; // every column floats — nothing to tile
+
+    if (geom.fit) {
         // Fit mode: the columns fill the viewport like a classic tiler, so there
         // is nothing to scroll.
         ws.scroll_offset = 0;
-        placeColumns(cols[0..fl.n], out[0..fl.n], area, 0, fl.gap, sink, false);
+        placeColumns(geom.cols[0..geom.n], geom.widths[0..geom.n], area, 0, geom.gap, sink, false);
     } else {
         // Scroll mode: the strip slides so the focused column stays in view, and
-        // off-screen columns peek at the edges. A settled flush reserves a peek
-        // strip at each edge that hides a column (so the sliver shows in free
-        // space, not behind its neighbour); a live swipe owns the offset and uses
-        // the transient overlap peek instead.
-        if (!scrolling) ensureColumnVisible(ws, cols[0..fl.n], out[0..fl.n], area, fl.gap);
-        placeColumns(cols[0..fl.n], out[0..fl.n], area, ws.scroll_offset, fl.gap, sink, true);
+        // off-screen columns peek at the edges.
+        if (!scrolling) ensureColumnVisibleGeom(ws, &geom, area);
+        placeColumns(geom.cols[0..geom.n], geom.widths[0..geom.n], area, ws.scroll_offset, geom.gap, sink, true);
     }
-}
-
-/// Result of `flowWidths`: how many columns were collected, whether the strip
-/// fits the viewport (fit mode) or overflows (scroll mode), and the inner gap.
-const FlowLayout = struct { n: usize, fit: bool, gap: f64 };
-
-/// Collect `ws`'s tiled columns into `cols` and compute their pixel widths into
-/// `out`, applying the fit-vs-scroll rule. Shared by `layoutScroll` (which then
-/// places them) and `centerFocusedColumn` (which only needs the geometry). A
-/// floating leaf is lifted out of the strip, as in `layoutChildren`.
-fn flowWidths(ws: *data.Con, area: Rect, cols: []*data.Con, out: []f64) FlowLayout {
-    var weights: [max_columns]f64 = undefined;
-    var n: usize = 0;
-    var total_t: f64 = 0;
-    for (ws.children.items) |child| {
-        if (isFloating(child)) continue;
-        if (n == max_columns) break;
-        const t = if (child.width_frac > 0) child.width_frac else default_column_width;
-        cols[n] = child;
-        weights[n] = t;
-        total_t += t;
-        n += 1;
-    }
-    if (n == 0) return .{ .n = 0, .fit = true, .gap = 0 };
-    if (total_t <= 0) total_t = 1;
-
-    const W = area.size.width;
-    const gap: f64 = @floatFromInt(ws.gaps.inner);
-    const nf: f64 = @floatFromInt(n);
-    const avail = W - gap * (nf - 1);
-    const min_w = min_column_width * W;
-
-    if (nf * min_w <= avail) {
-        // Fit mode: proportional to weights, floored at min, summing to avail.
-        fitWidths(weights[0..n], out[0..n], avail, min_w);
-        return .{ .n = n, .fit = true, .gap = gap };
-    }
-    // Scroll mode: absolute target widths, floored at min.
-    for (0..n) |i| out[i] = @max(min_w, weights[i] * W);
-    return .{ .n = n, .fit = false, .gap = gap };
 }
 
 /// Set `ws.scroll_offset` so the focused column is centered in the viewport
@@ -308,53 +330,28 @@ fn flowWidths(ws: *data.Con, area: Rect, cols: []*data.Con, out: []f64) FlowLayo
 /// so the offset is reset to 0. Called outside the flush; the next flush keeps
 /// the centered offset because the column is then fully visible.
 pub fn centerFocusedColumn(ws: *data.Con, area: Rect) void {
-    var cols: [max_columns]*data.Con = undefined;
-    var out: [max_columns]f64 = undefined;
-    const fl = flowWidths(ws, area, &cols, &out);
-    if (fl.n == 0 or fl.fit) {
+    const geom = ScrollGeometry.compute(ws, area);
+    if (geom.n == 0 or geom.fit) {
         ws.scroll_offset = 0;
         return;
     }
-    const focused = validFocusedColumn(ws) orelse return;
-    var x: f64 = 0;
-    var fx: f64 = 0;
-    var fw: f64 = 0;
-    var found = false;
-    for (cols[0..fl.n], out[0..fl.n]) |c, w| {
-        if (c == focused) {
-            fx = x;
-            fw = w;
-            found = true;
-        }
-        x += w + fl.gap;
-    }
-    if (!found) return;
+    const fi = geom.focused_idx orelse return;
+    const fx = geom.positions[fi];
+    const fw = geom.widths[fi];
     // On-screen left = area.x + fx - offset; center it: fx - off + fw/2 == W/2.
     ws.scroll_offset = fx + fw / 2 - area.size.width / 2;
-}
-
-/// Total width (points) of `ws`'s columns laid end to end (widths + inner gaps),
-/// or 0 in fit mode (the strip never overflows then). Used to bound scrolling.
-fn contentWidth(ws: *data.Con, area: Rect) f64 {
-    var cols: [max_columns]*data.Con = undefined;
-    var out: [max_columns]f64 = undefined;
-    const fl = flowWidths(ws, area, &cols, &out);
-    if (fl.n == 0 or fl.fit) return 0;
-    var total: f64 = 0;
-    for (out[0..fl.n]) |w| total += w + fl.gap;
-    return total - fl.gap; // no trailing gap after the last column
 }
 
 /// Clamp `ws.scroll_offset` to the legal range `[0, content − viewport]` so a
 /// live swipe can't fling the strip past its ends into empty space. Used by the
 /// continuous trackpad scroll (`config/swipe.zig`).
 pub fn clampScroll(ws: *data.Con, area: Rect) void {
-    const total = contentWidth(ws, area);
-    if (total <= 0) {
+    const geom = ScrollGeometry.compute(ws, area);
+    if (geom.n == 0 or geom.fit) {
         ws.scroll_offset = 0;
         return;
     }
-    const max_off = @max(0, total - area.size.width);
+    const max_off = @max(0, geom.total_width - area.size.width);
     ws.scroll_offset = std.math.clamp(ws.scroll_offset, 0, max_off);
 }
 
@@ -362,26 +359,21 @@ pub fn clampScroll(ws: *data.Con, area: Rect) void {
 /// with a column aligned to the viewport edge instead of mid-column. No-op in fit
 /// mode. Called on swipe release (`config/swipe.zig`).
 pub fn snapStrip(ws: *data.Con, area: Rect) void {
-    var cols: [max_columns]*data.Con = undefined;
-    var out: [max_columns]f64 = undefined;
-    const fl = flowWidths(ws, area, &cols, &out);
-    if (fl.n == 0 or fl.fit) {
+    const geom = ScrollGeometry.compute(ws, area);
+    if (geom.n == 0 or geom.fit) {
         ws.scroll_offset = 0;
         return;
     }
-    var x: f64 = 0;
     var best: f64 = 0;
     var best_dist: f64 = std.math.floatMax(f64);
-    for (out[0..fl.n]) |w| {
+    for (geom.positions[0..geom.n]) |x| {
         const d = @abs(x - ws.scroll_offset);
         if (d < best_dist) {
             best_dist = d;
             best = x;
         }
-        x += w + fl.gap;
     }
-    const total = x - fl.gap;
-    const max_off = @max(0, total - area.size.width);
+    const max_off = @max(0, geom.total_width - area.size.width);
     ws.scroll_offset = std.math.clamp(best, 0, max_off);
 }
 
@@ -393,7 +385,7 @@ pub fn snapStrip(ws: *data.Con, area: Rect) void {
 fn fitWidths(weights: []const f64, out: []f64, avail: f64, min_w: f64) void {
     const n = weights.len;
     var pinned: [max_columns]bool = undefined;
-    for (0..n) |i| pinned[i] = false;
+    @memset(&pinned, false);
 
     while (true) {
         var rem_avail = avail;
@@ -470,31 +462,17 @@ fn peekClamp(rect: Rect, area: Rect) Rect {
 /// (`ws.last_focused_child`, validated against the current children) fully into
 /// the viewport. If it already fits, the offset is untouched. Mirrors paneru's
 /// `ensure_visible_in_strip` (src/ecs/layout.rs).
-fn ensureColumnVisible(ws: *data.Con, cols: []const *data.Con, widths: []const f64, area: Rect, gap: f64) void {
-    const focused = validFocusedColumn(ws) orelse return;
-    var x: f64 = 0; // left edge of each column in strip coords (offset 0)
-    var fx: f64 = 0;
-    var fw: f64 = 0;
-    var fi: usize = 0;
-    var found = false;
-    for (cols, widths, 0..) |c, w, i| {
-        if (c == focused) {
-            fx = x;
-            fw = w;
-            fi = i;
-            found = true;
-        }
-        x += w + gap;
-    }
-    if (!found) return;
-    const content = x - gap; // total strip width (no trailing gap)
+fn ensureColumnVisibleGeom(ws: *data.Con, geom: *const ScrollGeometry, area: Rect) void {
+    const fi = geom.focused_idx orelse return;
+    const fx = geom.positions[fi];
+    const fw = geom.widths[fi];
 
     const W = area.size.width;
     // Keep a peek-wide margin on each side that has a neighbour column, so the
     // focused column never sits flush against the edge and hides that neighbour's
     // edge peek. The focused column is anchored within this inner region.
     const lead: f64 = if (fi > 0) scroll_sliver else 0;
-    const trail: f64 = if (fi + 1 < cols.len) scroll_sliver else 0;
+    const trail: f64 = if (fi + 1 < geom.n) scroll_sliver else 0;
 
     var off = ws.scroll_offset;
     const left_rel = fx - off; // focused column's left edge relative to the viewport
@@ -505,7 +483,7 @@ fn ensureColumnVisible(ws: *data.Con, cols: []const *data.Con, widths: []const f
         off += right_rel - (W - trail); // scroll right until the trail margin is clear
     } // else already inside the reserved inner region — don't move (no jiggle)
 
-    ws.scroll_offset = std.math.clamp(off, 0, @max(0, content - W));
+    ws.scroll_offset = std.math.clamp(off, 0, @max(0, geom.total_width - W));
 }
 
 /// The focused column of a `SCROLL` workspace: its `last_focused_child` when that
