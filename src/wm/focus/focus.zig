@@ -63,6 +63,17 @@ fn recordFocusPath(leaf: *data.Con) void {
     }
 }
 
+/// Check if the given `leaf` is already recorded as the focused leaf in the tree
+/// by walking up and verifying that every ancestor's `last_focused_child` points
+/// to the child along the path to `leaf`.
+pub fn isFocusedInTree(leaf: *data.Con) bool {
+    var node = leaf;
+    while (node.parent) |parent| : (node = parent) {
+        if (parent.last_focused_child != node) return false;
+    }
+    return true;
+}
+
 /// A window owned by `closed_pid` was just removed from workspace `ws`, where it
 /// had occupied slot `closed_index`. If that app has no windows left on `ws`,
 /// move focus to the tile on its left (the previous slot), falling back to the

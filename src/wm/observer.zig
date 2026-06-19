@@ -439,6 +439,7 @@ fn onFrontWindowChanged(mgr: *Manager, observer: ax.AXObserverRef, element: ax.A
         // re-tile to slide the column on-screen). Other layouts: nothing to do.
         if (tree.findLeaf(root, wid)) |leaf| {
             if (tree.workspaceOf(leaf)) |ws| if (ws.layout == .SCROLL) {
+                if (focus.isFocusedInTree(leaf)) return;
                 focus.markFocused(leaf);
                 tree.flushWorkspace(app, ws);
             };

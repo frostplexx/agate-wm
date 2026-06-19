@@ -1166,3 +1166,29 @@ test "findTabSibling matches same-pid windows at an identical frame" {
     try testing.expect(findTabSibling(ws, 11, testRect(50, 50, 800, 600)) == null); // other app
     try testing.expect(findTabSibling(ws, 10, testRect(60, 50, 800, 600)) == null); // frame differs
 }
+
+test "isFocusedInTree matches the focused path" {
+    const focus = @import("focus/focus.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    const a = try addLeaf(alloc, ws, testWindow(1, 10, testRect(0, 0, 100, 100)));
+    const b = try addLeaf(alloc, ws, testWindow(2, 10, testRect(0, 0, 100, 100)));
+
+    // Initially neither is marked as focused (last_focused_child is null)
+    try testing.expect(!focus.isFocusedInTree(a));
+    try testing.expect(!focus.isFocusedInTree(b));
+
+    // Mark 'a' focused
+    focus.markFocused(a);
+    try testing.expect(focus.isFocusedInTree(a));
+    try testing.expect(!focus.isFocusedInTree(b));
+
+    // Mark 'b' focused
+    focus.markFocused(b);
+    try testing.expect(!focus.isFocusedInTree(a));
+    try testing.expect(focus.isFocusedInTree(b));
+}
+

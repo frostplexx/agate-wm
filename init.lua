@@ -9,7 +9,7 @@
 -- (see consume/expel below), so traditional tiling lives inside the strip.
 agate.config({
     gaps = { inner = 4, outer = 4, smart = true }, -- inner/edge gaps; smart drops the edge gap for a lone window
-    peek = 48,                          -- how far a hidden window peeks: accordion fan AND the strip's off-screen edge
+    peek = 10,                          -- how far a hidden window peeks: accordion fan AND the strip's off-screen edge
     hyper_key = { enabled = true, keys = { "ctrl", "alt", "cmd" } },
 
     -- Animate frame changes: the strip glides when you scroll / focus / resize a
