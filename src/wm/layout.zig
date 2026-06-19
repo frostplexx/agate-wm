@@ -105,14 +105,15 @@ fn animateSink(leaf: *data.Con, area: Rect) void {
     const win = &leaf.window.?;
     const from = win.bounds;
     if (!animation.shouldAnimate(from, area)) return applyFrame(win, area);
-    // Snap a large jump instead of easing it (paneru's `offscreen_move` rule): a
-    // re-tile nudges a window by less than its own width, but shoving a column to
-    // its off-screen edge-peek moves it ~a viewport — animating that would fling
-    // it across the screen. Snap so on-screen columns glide and edge columns just
-    // appear at the edge.
+    // Snap only a *teleport* — a move farther than the whole viewport, e.g. a
+    // column hopping between opposite edge peeks — which would otherwise fling a
+    // window clear across the screen. A normal strip slide (focus change, scroll,
+    // re-tile) moves a window less than a viewport, so it glides. Measuring
+    // against the viewport (not the window's own width) keeps slides animating
+    // even when a column is trimmed narrow for an edge-peek reserve.
     const dx = @abs(area.origin.x - from.origin.x);
     const dy = @abs(area.origin.y - from.origin.y);
-    if (dx > 1.5 * area.size.width or dy > 1.5 * area.size.height) return applyFrame(win, area);
+    if (dx > zoom_area.size.width or dy > zoom_area.size.height) return applyFrame(win, area);
     const el = window.resolveElement(win) orelse return applyFrame(win, area);
     if (!animation.add(el, from, area)) return applyFrame(win, area);
     _ = el.setSize(area.size); // final size at the old position; ticks glide it over
@@ -250,13 +251,15 @@ fn layoutScroll(ws: *data.Con, area: Rect, comptime sink: fn (*data.Con, Rect) v
         // Fit mode: the columns fill the viewport like a classic tiler, so there
         // is nothing to scroll.
         ws.scroll_offset = 0;
-        placeColumns(cols[0..fl.n], out[0..fl.n], area, area.origin.x, fl.gap, sink, false);
+        placeColumns(cols[0..fl.n], out[0..fl.n], area, 0, fl.gap, sink, false);
     } else {
         // Scroll mode: the strip slides so the focused column stays in view, and
-        // off-screen columns peek at the edges (unless a live swipe owns the
-        // offset).
+        // off-screen columns peek at the edges. A settled flush reserves a peek
+        // strip at each edge that hides a column (so the sliver shows in free
+        // space, not behind its neighbour); a live swipe owns the offset and uses
+        // the transient overlap peek instead.
         if (!scrolling) ensureColumnVisible(ws, cols[0..fl.n], out[0..fl.n], area, fl.gap);
-        placeColumns(cols[0..fl.n], out[0..fl.n], area, area.origin.x - ws.scroll_offset, fl.gap, sink, true);
+        placeColumns(cols[0..fl.n], out[0..fl.n], area, ws.scroll_offset, fl.gap, sink, true);
     }
 }
 
@@ -420,29 +423,31 @@ fn fitWidths(weights: []const f64, out: []f64, avail: f64, min_w: f64) void {
     }
 }
 
-/// Place each column left→right starting at `base` (the strip's left edge in
-/// screen coords), advancing by width + inner gap. In scroll mode a column that
-/// would sit fully off-screen is clamped to a `scroll_sliver`-wide edge peek (the
-/// columns inside slide with it). Mirrors paneru's edge math in
-/// `position_layout_windows` (src/ecs/layout.rs).
+/// Place each column left→right, the strip translated by `off` (the horizontal
+/// scroll). Columns keep their full width always — the strip *moves* them, it
+/// never resizes them: a column running past an edge is shown partially (the rest
+/// sits off-screen), exactly as a scrollable strip should. In `scroll_mode` a
+/// column that would land *entirely* off-screen is repositioned (not resized) to
+/// keep a `scroll_sliver`-wide edge sliver visible (macOS relocates a window
+/// pushed fully off-screen — `peekClamp`). Mirrors paneru's `position_layout_windows`.
 fn placeColumns(
     cols: []const *data.Con,
     widths: []const f64,
     area: Rect,
-    base: f64,
+    off: f64,
     gap: f64,
     comptime sink: fn (*data.Con, Rect) void,
     scroll_mode: bool,
 ) void {
-    var cursor = base;
+    var cursor = area.origin.x - off;
     for (cols, widths) |col, w| {
         var rect: Rect = .{
             .origin = .{ .x = cursor, .y = area.origin.y },
             .size = .{ .width = w, .height = area.size.height },
         };
-        if (scroll_mode) rect = peekClamp(rect, area);
-        place(col, rect, sink);
         cursor += w + gap;
+        if (scroll_mode) rect = peekClamp(rect, area); // keep a fully-off column as an edge sliver (width kept)
+        place(col, rect, sink);
     }
 }
 
@@ -470,27 +475,37 @@ fn ensureColumnVisible(ws: *data.Con, cols: []const *data.Con, widths: []const f
     var x: f64 = 0; // left edge of each column in strip coords (offset 0)
     var fx: f64 = 0;
     var fw: f64 = 0;
+    var fi: usize = 0;
     var found = false;
-    for (cols, widths) |c, w| {
+    for (cols, widths, 0..) |c, w, i| {
         if (c == focused) {
             fx = x;
             fw = w;
+            fi = i;
             found = true;
         }
         x += w + gap;
     }
     if (!found) return;
+    const content = x - gap; // total strip width (no trailing gap)
 
     const W = area.size.width;
+    // Keep a peek-wide margin on each side that has a neighbour column, so the
+    // focused column never sits flush against the edge and hides that neighbour's
+    // edge peek. The focused column is anchored within this inner region.
+    const lead: f64 = if (fi > 0) scroll_sliver else 0;
+    const trail: f64 = if (fi + 1 < cols.len) scroll_sliver else 0;
+
     var off = ws.scroll_offset;
-    const left_rel = fx - off; // column's left edge relative to the viewport
+    const left_rel = fx - off; // focused column's left edge relative to the viewport
     const right_rel = left_rel + fw;
-    if (left_rel < 0) {
-        off += left_rel; // scroll to reveal the left edge
-    } else if (right_rel > W) {
-        off += right_rel - W; // scroll to reveal the right edge
-    }
-    ws.scroll_offset = off;
+    if (left_rel < lead) {
+        off += left_rel - lead; // scroll left until the lead margin is clear
+    } else if (right_rel > W - trail) {
+        off += right_rel - (W - trail); // scroll right until the trail margin is clear
+    } // else already inside the reserved inner region — don't move (no jiggle)
+
+    ws.scroll_offset = std.math.clamp(off, 0, @max(0, content - W));
 }
 
 /// The focused column of a `SCROLL` workspace: its `last_focused_child` when that
@@ -531,17 +546,61 @@ fn applyFrame(win: *data.Window, area: Rect) void {
 /// extra apps keep their setting (their windows may animate — harmless).
 const max_eui_apps = 32;
 
-/// Per-flush batching of yabai's `AX_ENHANCED_UI_WORKAROUND` (src/misc/helpers.h):
-/// `AXEnhancedUserInterface` — which macOS turns on for any app an assistive
-/// client attaches to — makes AppKit *animate* AX-driven frame changes. The
-/// attribute lives on the *application* element, so disabling it once per app
-/// for the whole flush (instead of around every window, as before) saves an
-/// app-element create plus a get/set/set AX round-trip per extra window of the
-/// same app.
+/// Global per-application `AXEnhancedUserInterface` ref-count (paneru's
+/// `ENHANCED_UI_REFCOUNT`, single-threaded so no lock needed). EUI — which macOS
+/// turns on for any app an assistive client attaches to — makes AppKit *animate*
+/// AX frame changes and fight our own per-tick position sweep, so we disable it
+/// while driving a window. But flushes overlap: a focus change starts a new
+/// flush (and EUI guard) while the previous animation sweep still holds its
+/// guard. A plain disable/restore pair then re-enables EUI mid-sweep — the new
+/// guard sees it already off, records nothing, and the old guard's restore turns
+/// it back on under the running animation, which is why the slide only animated
+/// "half the time". Ref-counting per pid keeps EUI off until the *last*
+/// concurrent holder releases: disable only on 0→1, restore only on 1→0.
+const EuiEntry = struct { pid: i32, count: u32, app: ?*macos.Element };
+var g_eui: [max_eui_apps]EuiEntry = undefined;
+var g_eui_n: usize = 0;
+
+fn euiDisable(pid: i32) void {
+    for (g_eui[0..g_eui_n]) |*e| if (e.pid == pid) {
+        e.count += 1;
+        return;
+    };
+    if (g_eui_n == max_eui_apps) return;
+    const app = macos.Element.createApplication(pid) orelse return;
+    var saved: ?*macos.Element = null;
+    if (app.enhancedUserInterface()) {
+        app.setEnhancedUserInterface(false);
+        saved = app; // retained, released when the count returns to 0
+    } else {
+        app.release();
+    }
+    g_eui[g_eui_n] = .{ .pid = pid, .count = 1, .app = saved };
+    g_eui_n += 1;
+}
+
+fn euiEnable(pid: i32) void {
+    for (g_eui[0..g_eui_n], 0..) |*e, i| if (e.pid == pid) {
+        if (e.count > 0) e.count -= 1;
+        if (e.count == 0) {
+            if (e.app) |app| {
+                app.setEnhancedUserInterface(true);
+                app.release();
+            }
+            g_eui[i] = g_eui[g_eui_n - 1]; // compact: swap the last entry in
+            g_eui_n -= 1;
+        }
+        return;
+    };
+}
+
+/// Disables `AXEnhancedUserInterface` for the apps under a workspace for the
+/// duration of a flush (and, for the animated path, the whole position sweep).
+/// Backed by the global ref-count above so overlapping flushes don't re-enable
+/// it out from under an in-flight animation. The attribute lives on the *app*
+/// element, so it's toggled once per distinct app, not per window.
 pub const EuiGuard = struct {
     pids: [max_eui_apps]i32 = undefined,
-    /// Retained app elements that had EUI on (to restore); null = was off.
-    apps: [max_eui_apps]?*macos.Element = undefined,
     count: usize = 0,
 
     /// Disable EUI for every distinct app owning a window under `con`.
@@ -551,26 +610,15 @@ pub const EuiGuard = struct {
     }
 
     fn disablePid(self: *EuiGuard, pid: i32) void {
-        for (self.pids[0..self.count]) |p| if (p == pid) return; // already handled
+        for (self.pids[0..self.count]) |p| if (p == pid) return; // already counted by this guard
         if (self.count == max_eui_apps) return;
-        const app = macos.Element.createApplication(pid) orelse return;
-        if (app.enhancedUserInterface()) {
-            app.setEnhancedUserInterface(false);
-            self.apps[self.count] = app; // keep retained for restore()
-        } else {
-            app.release();
-            self.apps[self.count] = null;
-        }
+        euiDisable(pid);
         self.pids[self.count] = pid;
         self.count += 1;
     }
 
     pub fn restore(self: *EuiGuard) void {
-        for (self.apps[0..self.count]) |maybe_app| {
-            const app = maybe_app orelse continue;
-            app.setEnhancedUserInterface(true);
-            app.release();
-        }
+        for (self.pids[0..self.count]) |pid| euiEnable(pid);
         self.count = 0;
     }
 };
@@ -783,6 +831,7 @@ fn resetFlowDefaults() void {
     min_column_width = 0.22;
     scroll_sliver = 24;
     scrolling = false;
+    snap_now = false;
 }
 
 test "SCROLL fit mode: equal-weight columns fill the viewport like H_SPLIT" {
@@ -863,15 +912,78 @@ test "SCROLL scroll mode: past capacity columns keep target width and scroll" {
     const d = try testLeaf(alloc, ws, 4, 1.0);
     for ([_]*data.Con{ a, b, c, d }) |col| col.width_frac = 0.5;
 
-    // Focus the third column; the strip scrolls just enough to reveal it.
+    // Focus the third column; the strip scrolls to reveal it, reserving a
+    // sliver (24) on each side for the neighbours' edge peeks.
     ws.last_focused_child = c;
     assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
 
-    // c's strip-left is 1000; to fit its right edge (1500) in the 1000 viewport
-    // the offset becomes 500, so c lands at x=500 and fills to the right edge.
-    try testing.expectEqual(@as(f64, 500), ws.scroll_offset);
-    try expectRect(testRect(500, 0, 500, 600), c.window.?.bounds);
+    // c's strip-left is 1000; revealing it with a 24px trail margin (right edge at
+    // 976) puts the offset at 524, so c lands at x=476 at its full 500px width.
+    try testing.expectEqual(@as(f64, 524), ws.scroll_offset);
+    try expectRect(testRect(476, 0, 500, 600), c.window.?.bounds);
     try testing.expectEqual(@as(f64, 500), d.window.?.bounds.size.width);
+}
+
+test "SCROLL scroll mode: columns keep full width and slide, never shrink" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Four 500px columns in a 1000px viewport (scroll mode); focus the third.
+    min_column_width = 0.3;
+    scroll_sliver = 20;
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    const c = try testLeaf(alloc, ws, 3, 1.0);
+    const d = try testLeaf(alloc, ws, 4, 1.0);
+    for ([_]*data.Con{ a, b, c, d }) |col| col.width_frac = 0.5;
+
+    ws.last_focused_child = c;
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+
+    // Offset 520 anchors c (focused) fully on-screen. Crucially every column keeps
+    // its full 500px width — the strip only *moves* them: a/d slide off-screen,
+    // kept as a 20px edge sliver; b straddles the left edge.
+    try testing.expectEqual(@as(f64, 520), ws.scroll_offset);
+    try expectRect(testRect(-480, 0, 500, 600), a.window.?.bounds); // slid off left, 20px peek
+    try expectRect(testRect(-20, 0, 500, 600), b.window.?.bounds); // straddles the left edge
+    try expectRect(testRect(480, 0, 500, 600), c.window.?.bounds); // focused, fully visible
+    try expectRect(testRect(980, 0, 500, 600), d.window.?.bounds); // slid off right, 20px peek
+    // No column was resized.
+    for ([_]*data.Con{ a, b, c, d }) |col|
+        try testing.expectEqual(@as(f64, 500), col.window.?.bounds.size.width);
+}
+
+test "SCROLL scroll mode: focusing an already-visible column doesn't move the strip" {
+    resetFlowDefaults();
+    defer resetFlowDefaults();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Three 350px columns in 1000px (scroll mode). The first two sit fully within
+    // the reserved inner region, so moving focus between them must not scroll.
+    min_column_width = 0.35;
+    scroll_sliver = 20;
+    const ws = try testContainer(alloc, .Workspace, .SCROLL);
+    const a = try testLeaf(alloc, ws, 1, 1.0);
+    const b = try testLeaf(alloc, ws, 2, 1.0);
+    _ = try testLeaf(alloc, ws, 3, 1.0);
+    for (ws.children.items) |col| col.width_frac = 0.35;
+
+    ws.last_focused_child = b;
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+    try testing.expectEqual(@as(f64, 0), ws.scroll_offset);
+    const a_before = a.window.?.bounds;
+
+    // Move focus to the first column: it's already on screen, so nothing moves.
+    ws.last_focused_child = a;
+    assignFrames(ws, testRect(0, 0, 1000, 600), recordSink);
+    try testing.expectEqual(@as(f64, 0), ws.scroll_offset);
+    try expectRect(a_before, a.window.?.bounds);
 }
 
 test "SCROLL scroll mode: an off-screen column is clamped to an edge peek" {

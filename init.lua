@@ -22,7 +22,7 @@ agate.config({
     columns = {
         default_width = 0.5,            -- a new column targets half the viewport
         min_width = 0.4,                -- shrink to here before the strip scrolls (≈2 columns fit)
-        presets = { 1/3, 1/2, 2/3, 1.0 }, -- cycled by column_width wider/narrower
+        presets = { 1/3, 1/2, 2/3}, -- cycled by column_width wider/narrower
     },
     swipe_scroll_fingers = 3,           -- 3-finger horizontal swipe scrolls the strip live
 })
@@ -51,8 +51,8 @@ agate.bind("hyper+space", function() agate.toggle("fullscreen") end)
 -- Move the focused window to an adjacent slot / column.
 agate.bind("hyper+shift+j", "move down")
 agate.bind("hyper+shift+k", "move up")
-agate.bind("hyper+shift+l", "move left")                                      -- swap with the left column
-agate.bind("hyper+shift+h", "move right")                                     -- swap with the right column
+agate.bind("hyper+shift+h", "move left")                                      -- swap with the left column
+agate.bind("hyper+shift+l", "move right")                                     -- swap with the right column
 
 -- Column width (Flow strip): cycle the focused column through the presets, snap
 -- it to a width, or `"fit"` to re-equalize every column (classic tiling).
@@ -101,4 +101,4 @@ agate.rule({ app = "^Things$", space = 3 })
 agate.rule({ app = "^Spotify$", space = 5 })
 agate.rule({ app = "^Vesktop$", space = 4 })
 
-print("agate: config loaded")
+print("agate: config loaded 21390")

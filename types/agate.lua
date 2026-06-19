@@ -124,9 +124,15 @@ function agate.expel(dir) end
 ---@param cmd string The shell command line to run.
 function agate.exec(cmd) end
 
----Switch Space on the focused display: a 1-based position jumps there directly, or `"next"`/`"prev"` step one Space over. Counts every Space in Mission Control order, including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
----@param target integer|string A 1-based Space position (Mission Control order, fullscreen Spaces included), or `"next"`/`"prev"` to step.
-function agate.space(target) end
+---Switch to the Nth Space on the focused display, via the same synthetic Dock-swipe gesture macOS itself uses (the only switch mechanism — no SkyLight fallback). Counts every Space the swipe passes through, in Mission Control order, including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
+---@param n integer 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
+function agate.space(n) end
+
+---Switch to the next Space on the focused display via the synthetic Dock-swipe gesture (one step in Mission Control order, fullscreen Spaces included).
+function agate.space_next() end
+
+---Switch to the previous Space on the focused display via the synthetic Dock-swipe gesture (one step in Mission Control order, fullscreen Spaces included).
+function agate.space_prev() end
 
 ---Resize the focused tile, transferring the delta to its neighbour. Pass `"smart"` (recommended) to resize along the focused window's container axis without picking an edge: a positive `amount` grows it, a negative one shrinks it, taking from whichever neighbour exists — so the same binding always enlarges/shrinks the focused window wherever it sits. A direction (`left`/`right`/`up`/`down`) instead grows the window toward that edge, by stealing from the neighbour there.
 ---@param target agate.Direction|string `"smart"` to resize along the container axis, or an edge (`left`/`right`/`up`/`down`) to grow toward.

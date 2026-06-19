@@ -92,6 +92,14 @@ pub fn gestureBegin(fingers: u8, axis: gestures.Axis) void {
     g_gesture_axis = axis;
     g_arrow_dir = null;
 
+    // Defensively clear the live-drag flush flags. They are only ever held for the
+    // duration of a single drag flush (see `gestureUpdate`/`gestureEnd`), so they
+    // should already be false — but a previous gesture whose end phase the
+    // trackpad never delivered (no zero-contact frame on lift) could otherwise
+    // leave them stuck, silently snapping every later flush (no animation).
+    wm_layout.scrolling = false;
+    wm_layout.snap_now = false;
+
     // Engage strip scrolling for a horizontal swipe with the configured finger
     // count, when a Flow strip is showing. While engaged the swipe drives the
     // scroll offset directly and never fires a discrete gesture binding.
@@ -103,8 +111,6 @@ pub fn gestureBegin(fingers: u8, axis: gestures.Axis) void {
         g_scroll_drag = true;
         g_scroll_last = 0;
         g_scroll_w = tree.areaForWorkspace(app, ws).size.width;
-        wm_layout.scrolling = true; // the finger owns the offset; skip ensure-into-view
-        wm_layout.snap_now = true; // track the finger in lockstep (no per-frame ease)
     }
 }
 
@@ -122,7 +128,15 @@ pub fn gestureUpdate(fingers: u8, progress: f32) void {
         g_scroll_last = progress;
         ws.scroll_offset -= delta * 0.4 * g_scroll_w;
         wm_layout.clampScroll(ws, tree.areaForWorkspace(app, ws));
+        // Hold the flags only across this one flush: the finger owns the offset
+        // (skip ensure-into-view) and the columns track it in lockstep (no per-
+        // frame ease). Clearing them right after means a dropped end phase can't
+        // leave animation disabled.
+        wm_layout.scrolling = true;
+        wm_layout.snap_now = true;
         tree.flushActive(app);
+        wm_layout.scrolling = false;
+        wm_layout.snap_now = false;
         return; // no edge-arrow HUD during a scroll drag
     }
 
@@ -158,14 +172,18 @@ pub fn gestureEnd(fingers: u8, dir: ?gestures.Swipe) void {
     // and never fires a discrete gesture binding.
     if (g_scroll_drag) {
         g_scroll_drag = false;
-        wm_layout.snap_now = false; // let the settle glide into place
         if (ctx.appstate) |app| {
             if (activeScrollWs(app)) |ws| {
                 wm_layout.snapStrip(ws, tree.areaForWorkspace(app, ws));
-                tree.flushActive(app); // `scrolling` still true → honors the snap, animates it
+                // Settle flush: keep `scrolling` for this one flush so the snapped
+                // offset isn't re-derived, but leave `snap_now` false so the glide
+                // animates. Both are cleared immediately after.
+                wm_layout.scrolling = true;
+                wm_layout.snap_now = false;
+                tree.flushActive(app);
+                wm_layout.scrolling = false;
             }
         }
-        wm_layout.scrolling = false;
         return;
     }
 
