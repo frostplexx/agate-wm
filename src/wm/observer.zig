@@ -1419,15 +1419,21 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     // focused column (niri/paneru), so it appears next to where you are working
     // instead of at the far end of the strip. When focus is elsewhere (or the
     // destination isn't a strip), it appends at the trailing edge.
-    const after: ?*data.Con = if (ws.layout == .SCROLL) blk: {
+    // The focused column, if focus is on this strip — both the ins-after anchor
+    // and (when the user armed it with `agate.layout`) the column the new window
+    // tiles *into* instead of starting its own.
+    const focused_col: ?*data.Con = if (ws.layout == .SCROLL) blk: {
         const cur = focus.currentFocusedLeaf(app) orelse break :blk null;
         if (tree.workspaceOf(cur) != ws) break :blk null;
         break :blk tree.columnOf(ws, cur);
     } else null;
-    const leaf = if (ws.layout == .SCROLL)
-        tree.insertColumnAfter(app.arena, ws, win, after) catch return
-    else
-        tree.addLeaf(app.arena, ws, win) catch return;
+    const leaf = if (ws.layout == .SCROLL) leaf: {
+        if (focused_col) |col| if (col.split_armed) {
+            // i3-style "split": open into the focused column with its layout.
+            break :leaf tree.addWindowToColumn(app.arena, col, win) catch return;
+        };
+        break :leaf tree.insertColumnAfter(app.arena, ws, win, focused_col) catch return;
+    } else tree.addLeaf(app.arena, ws, win) catch return;
 
     // `fromElement` already cached the AX element, so this just returns it.
     if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);

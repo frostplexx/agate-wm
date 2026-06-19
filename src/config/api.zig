@@ -462,8 +462,8 @@ fn agateFocus(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|layout|Set the focused container's layout (the focused window's parent), falling back to the workspace for top-level windows.
-// @doc FP|layout|mode|agate.Layout|false|Layout mode to apply.
+// @doc F|layout|Set the focused Flow-strip column's internal tiling layout. On a multi-window column it re-tiles immediately; on a single-window column there's nothing to restyle yet, so it *arms* the column (i3-style "split") — the next window you open tiles into this column with the chosen layout instead of starting its own column on the strip. The column keeps collecting opened windows while focused; `agate.expel` ejects one back to its own column.
+// @doc FP|layout|mode|agate.Layout|false|Layout mode to apply (`v_split`/`h_split`/`accordion`/`toggle`/…).
 fn agateLayout(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
     const name_z = lua.toString(1) catch return 0;
@@ -562,22 +562,29 @@ fn agateExec(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|space|Switch Space on the focused display: a 1-based position jumps there directly, or `"next"`/`"prev"` step one Space over. Counts every Space in Mission Control order, including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
-// @doc FP|space|target|integer|string|false|A 1-based Space position (Mission Control order, fullscreen Spaces included), or `"next"`/`"prev"` to step.
+// @doc F|space|Switch to the Nth Space on the focused display, via the same synthetic Dock-swipe gesture macOS itself uses (the only switch mechanism — no SkyLight fallback). Counts every Space the swipe passes through, in Mission Control order, including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
+// @doc FP|space|n|integer|false|1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
 fn agateSpace(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
-    if (lua.isString(1)) {
-        const s = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
-        if (std.mem.eql(u8, s, "next")) {
-            macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
-        } else if (std.mem.eql(u8, s, "prev") or std.mem.eql(u8, s, "previous")) {
-            macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
-        }
-        return 0;
-    }
     const n = lua.toInteger(1) catch return 0;
     if (n < 1) return 0;
     macos.spaces.switchToIndex(app.gpa, app.skylight_cid, @intCast(n)) catch {};
+    return 0;
+}
+
+// @doc F|space_next|Switch to the next Space on the focused display via the synthetic Dock-swipe gesture (one step in Mission Control order, fullscreen Spaces included).
+fn agateSpaceNext(lua: *Lua) i32 {
+    _ = lua;
+    const app = ctx.appstate orelse return 0;
+    macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
+    return 0;
+}
+
+// @doc F|space_prev|Switch to the previous Space on the focused display via the synthetic Dock-swipe gesture (one step in Mission Control order, fullscreen Spaces included).
+fn agateSpacePrev(lua: *Lua) i32 {
+    _ = lua;
+    const app = ctx.appstate orelse return 0;
+    macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
     return 0;
 }
 
@@ -726,6 +733,8 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "focus",       .func = zlua.wrap(agateFocus) },
     .{ .name = "layout",      .func = zlua.wrap(agateLayout) },
     .{ .name = "space",       .func = zlua.wrap(agateSpace) },
+    .{ .name = "space_next",  .func = zlua.wrap(agateSpaceNext) },
+    .{ .name = "space_prev",  .func = zlua.wrap(agateSpacePrev) },
     .{ .name = "resize",      .func = zlua.wrap(agateResize) },
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
     .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },

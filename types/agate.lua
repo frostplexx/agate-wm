@@ -91,8 +91,8 @@ function agate.exit_mode() end
 ---@param target agate.Direction|string A direction to move focus, or `"next"`/`"prev"` to cycle siblings.
 function agate.focus(target) end
 
----Set the focused container's layout (the focused window's parent), falling back to the workspace for top-level windows.
----@param mode agate.Layout Layout mode to apply.
+---Set the focused Flow-strip column's internal tiling layout. On a multi-window column it re-tiles immediately; on a single-window column there's nothing to restyle yet, so it *arms* the column (i3-style "split") — the next window you open tiles into this column with the chosen layout instead of starting its own column on the strip. The column keeps collecting opened windows while focused; `agate.expel` ejects one back to its own column.
+---@param mode agate.Layout Layout mode to apply (`v_split`/`h_split`/`accordion`/`toggle`/…).
 function agate.layout(mode) end
 
 ---Combine the focused window with its neighbour into a nested container, for mixed layouts (e.g. a row whose one slot is a stack of two windows).

@@ -104,7 +104,9 @@ pub fn handleKey(keycode: u16, raw_flags: u64) bool {
 // @doc C|focus <dir\|next\|prev>|Same as `agate.focus(target)`.
 // @doc C|resize <smart\|dir> [amount]|Same as `agate.resize(target, amount)`. `resize smart 50` grows the focused window along its container axis (negative shrinks); `resize <dir> [amount]` grows toward an edge. Amount defaults to 50.
 // @doc C|layout <mode>|Same as `agate.layout(mode)`.
-// @doc C|space <n\|next\|prev>|Same as `agate.space(target)`.
+// @doc C|space <n>|Same as `agate.space(n)`.
+// @doc C|space_next|Same as `agate.space_next()`.
+// @doc C|space_prev|Same as `agate.space_prev()`.
 // @doc C|focus_monitor <dir>|Same as `agate.focus_monitor(dir)`.
 // @doc C|exec <cmd>|Run a shell command in the background through `$SHELL -c`. Same as `agate.exec(cmd)`.
 // @doc C|column_width <target>|Same as `agate.column_width(target)` (including `fit`).
@@ -160,15 +162,13 @@ pub fn executeCommand(cmd: []const u8) void {
         }
     } else if (std.mem.startsWith(u8, cmd, "layout ")) {
         actions.setActiveLayout(app, cmd[7..]);
+    } else if (std.mem.eql(u8, cmd, "space_next")) {
+        macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
+    } else if (std.mem.eql(u8, cmd, "space_prev")) {
+        macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
     } else if (std.mem.startsWith(u8, cmd, "space ")) {
-        const arg = cmd[6..];
-        if (std.mem.eql(u8, arg, "next")) {
-            macos.spaces.switchNext(app.gpa, app.skylight_cid) catch {};
-        } else if (std.mem.eql(u8, arg, "prev") or std.mem.eql(u8, arg, "previous")) {
-            macos.spaces.switchPrev(app.gpa, app.skylight_cid) catch {};
-        } else if (std.fmt.parseInt(usize, arg, 10) catch null) |n| {
-            macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
-        }
+        const n = std.fmt.parseInt(usize, cmd[6..], 10) catch return;
+        macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
     } else if (std.mem.startsWith(u8, cmd, "focus_monitor ")) {
         const dir = parse.parseMonitorDir(cmd[14..]) orelse return;
         _ = focus.focusMonitor(app, dir);

@@ -38,39 +38,12 @@ pub extern fn CGSMainConnectionID() ConnectionID;
 pub extern fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnectionID) c.CFStringRef;
 /// Current space id for the display with the given UUID.
 pub extern fn SLSManagedDisplayGetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef) u64;
-/// Switch the active Space on the given display to `space_id`. On its own this
-/// leaves the menu bar stale (overlapping menus) — Dock pairs it with the four
-/// calls below. Disassembly of all five on macOS 26/27 (Tahoe) shows each gates
-/// on `SLSWindowManagementClientOperationsEnabled`: a normal process (agate)
-/// takes the legacy "SLSWindowServerClient…" message path, which the window
-/// server honors (this call already works for us). So calling the whole Dock
-/// sequence — `SLSWillSwitchSpaces` → set current space → `SLSShowSpaces` →
-/// `SLSSpaceResetMenuBar` — switches *and* refreshes the menu bar without a
-/// gesture (broken on Tahoe) or a keystroke. `display` is the menu-bar display
-/// UUID from `SLSCopyActiveMenuBarDisplayIdentifier`.
-pub extern fn SLSManagedDisplaySetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef, space_id: u64) void;
-/// Announce an impending Space switch. `spaces` is a CFArray<CFNumber> of the
-/// space ids involved. Dock calls this before changing the current space.
-pub extern fn SLSWillSwitchSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
-/// Make the given Spaces (CFArray<CFNumber> of ids) the shown/visible ones.
-pub extern fn SLSShowSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
-/// Rebuild the menu bar for `space`. This is the step missing from a bare
-/// `SLSManagedDisplaySetCurrentSpace` that leaves the menu bar stale.
-pub extern fn SLSSpaceResetMenuBar(cid: ConnectionID, space: u64) void;
-
-// --- Atomic space-switch transaction (the Tahoe path) ----------------------
-// macOS 26/27 applies a Space switch as a single transaction (create → add
-// operations → commit), which is how Dock keeps the menu bar coherent. The
-// per-call legacy functions above don't compose, leaving the menu bar half
-// updated. Signatures here are inferred (ipsw can't disassemble these on the
-// beta cache) by analogy to their non-transaction counterparts, with the
-// `txn` handle replacing the connection id. `SLSTransactionCreate` is confirmed
-// exported/linkable; the rest are confirmed present in the cache.
-pub const TransactionRef = ?*anyopaque;
-pub extern fn SLSTransactionCreate(cid: ConnectionID) TransactionRef;
-pub extern fn SLSTransactionSetManagedDisplayCurrentSpace(txn: TransactionRef, display: c.CFStringRef, space: u64) void;
-pub extern fn SLSTransactionSpaceRebuildMenuBar(txn: TransactionRef, space: u64) void;
-pub extern fn SLSTransactionCommit(txn: TransactionRef, options: c_int) CGError;
+// NOTE: agate switches Spaces *only* by synthesizing the native Dock-swipe
+// gesture (see `macos/event_tap.zig` + `macos/spaces.zig`). The SkyLight
+// "set current space" SPIs (`SLSManagedDisplaySetCurrentSpace` and the atomic
+// `SLSTransaction*` "Tahoe path") were explored as a non-gesture fallback but
+// never shipped — they leave the menu bar stale on macOS 26/27 — and have been
+// removed so there is one switch path and no fallback to drift out of sync.
 
 // --- Window transforms (visual-only move/scale) — DEAD END for foreign windows
 //

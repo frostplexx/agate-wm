@@ -35,23 +35,28 @@ pub fn applyGapsToTree(con: *data.Con, gaps: f64, outer_gaps: f64, accordion: f6
 pub fn setActiveLayout(app: *state.AppState, name: []const u8) void {
     const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
     const ws = tree.findWorkspace(app.tree orelse return, sid) orelse return;
-    const target = if (focus.currentFocusedLeaf(app)) |leaf| (leaf.parent orelse ws) else ws;
     // Every workspace is a Flow strip (SCROLL); the classic layouts apply to a
-    // *column*, not the strip itself. When the focused column is still a bare
-    // single-window leaf there's no container to restyle yet — `agate.consume`
-    // makes one — so changing layout here would be a no-op at best and would
-    // break the strip at worst. Leave the workspace alone.
-    if (target.con_type == .Workspace) return;
+    // *column*, not the strip itself. Resolve the focused window to its column —
+    // the multi-window container holding it, or (for a lone window) the leaf
+    // itself, which has no container to restyle yet.
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    const col = tree.columnOf(ws, leaf) orelse return;
+    if (col.con_type == .Workspace) return; // shouldn't happen, but never touch the strip
+
     if (std.mem.eql(u8, name, "toggle")) {
-        target.layout = switch (target.layout) {
+        col.layout = switch (col.layout) {
             .H_SPLIT => .V_SPLIT,
             .V_SPLIT => .H_SPLIT,
             else => .H_SPLIT, // from a stack/float, toggle returns to horizontal tiling
         };
     } else {
-        target.layout = parse.layoutFromName(name) orelse return;
+        col.layout = parse.layoutFromName(name) orelse return;
     }
-    target.auto_small = false; // an explicit choice — Small Screen Mode keeps off it
+    col.auto_small = false; // an explicit choice — Small Screen Mode keeps off it
+    // Arm the column so a newly opened window tiles into it with this layout. For
+    // a lone-window column this is the *only* visible effect (one window already
+    // fills the column); on a multi-window container it also re-tiles now.
+    col.split_armed = true;
     tree.flushActive(app);
 }
 
@@ -322,6 +327,7 @@ pub fn expel(app: *state.AppState, dir: focus.Direction) void {
     const leaf = focus.currentFocusedLeaf(app) orelse return;
     const forward = dir != .left;
     if (tree.expelLeaf(app.arena, leaf, forward)) {
+        leaf.split_armed = false; // a standalone column again — stop collecting opens
         tree.flushActive(app);
         _ = focus.focusLeaf(leaf);
     }

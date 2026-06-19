@@ -105,6 +105,14 @@ pub const Con = struct {
     /// display reconfiguration may revert it). A manual `agate.layout(...)`
     /// clears it — user choices survive mode flips.
     auto_small: bool = false,
+    /// For a Flow-strip column: the user picked this column's internal `layout`
+    /// with `agate.layout(...)`, so a newly opened window should tile *into* this
+    /// column (with that layout) instead of starting its own column on the strip
+    /// (i3's "split" semantics). Lets `agate.layout` work on a single-window
+    /// column — there's no container to restyle yet, so it arms the next open.
+    /// Stays set on the resulting container so the column keeps collecting windows
+    /// while focused; cleared by `agate.expel`.
+    split_armed: bool = false,
     /// The gaps for this Con. Only relevant if it has children.
     gaps: Gaps = .{ .inner = 0, .outer = 0, .top = 0, .bottom = 0, .left = 0, .right = 0 },
     /// parent of this Con. Null for the root Con.

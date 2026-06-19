@@ -252,6 +252,40 @@ pub fn insertColumnAfter(alloc: Allocator, ws: *data.Con, win: data.Window, afte
     return leaf;
 }
 
+/// Add a new window *into* the Flow-strip column `col` (a direct child of `ws`)
+/// rather than as a fresh column, using the column's `layout` — the open side of
+/// `agate.layout`'s "arm" (see `Con.split_armed`). When `col` is still a
+/// lone-window leaf it's first wrapped in a split container (carrying the leaf's
+/// armed layout, width, and slot), then the new window joins it; an existing
+/// container column just gets the new leaf appended. Returns the new leaf.
+pub fn addWindowToColumn(alloc: Allocator, col: *data.Con, win: data.Window) !*data.Con {
+    // A lone-window column is a leaf: promote it to a split container in place.
+    var container = col;
+    if (col.window != null) {
+        const ws = col.parent orelse return error.NoParent;
+        const idx = childIndexOf(ws, col) orelse return error.NotAChild;
+        container = try makeCon(alloc, .Container, ws, col.depth, 0);
+        container.layout = col.layout; // the armed orientation (H_SPLIT by default)
+        container.ratio = col.ratio;
+        container.width_frac = col.width_frac; // keep the column's strip width
+        container.gaps = ws.gaps; // inner gap / accordion peek
+        container.split_armed = col.split_armed;
+        // Reparent the existing window under the container as its first child.
+        col.parent = container;
+        col.depth = container.depth + 1;
+        col.ratio = 1.0;
+        col.width_frac = 0;
+        col.split_armed = false;
+        try container.children.append(alloc, col);
+        ws.children.items[idx] = container; // container takes the column's slot
+    }
+    const leaf = try makeCon(alloc, .Container, container, container.depth + 1, win.id);
+    leaf.window = win;
+    leaf.ratio = 1.0;
+    try container.children.append(alloc, leaf);
+    return leaf;
+}
+
 /// The column (a direct child of workspace `ws`) that contains `leaf`, or null if
 /// `leaf` isn't under `ws`. A column is either the leaf itself (a single-window
 /// column) or the nested container holding it.
@@ -794,6 +828,39 @@ test "insertColumnAfter places a new column right of the focused one" {
     try testing.expectEqual(c, ws.children.items[1]);
     try testing.expectEqual(b, ws.children.items[2]);
     try testing.expectEqual(@as(f64, 0), c.width_frac); // uses the default width
+}
+
+test "addWindowToColumn wraps a lone column then appends into the container" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const ws = try makeCon(alloc, .Workspace, null, 0, 1);
+    ws.layout = .SCROLL;
+    // A lone-window column the user armed with agate.layout(v_split).
+    const a = try insertColumnAfter(alloc, ws, testWindow(1, 100, testRect(0, 0, 100, 100)), null);
+    a.layout = .V_SPLIT;
+    a.split_armed = true;
+    a.width_frac = 0.5;
+
+    // First open: the leaf is promoted to a split container holding both windows.
+    const b = try addWindowToColumn(alloc, a, testWindow(2, 100, testRect(0, 0, 100, 100)));
+    try testing.expectEqual(@as(usize, 1), ws.children.items.len); // still one column
+    const cont = ws.children.items[0];
+    try testing.expect(cont != a); // a fresh container took the slot
+    try testing.expectEqual(data.Layout.V_SPLIT, cont.layout); // carries the armed layout
+    try testing.expectEqual(@as(f64, 0.5), cont.width_frac); // and the column width
+    try testing.expect(cont.split_armed); // stays armed to keep collecting
+    try testing.expectEqual(@as(usize, 2), cont.children.items.len);
+    try testing.expectEqual(a, cont.children.items[0]);
+    try testing.expectEqual(b, cont.children.items[1]);
+    try testing.expectEqual(cont, a.parent.?);
+
+    // Second open: appended into the existing container, no new wrapping.
+    const c = try addWindowToColumn(alloc, cont, testWindow(3, 100, testRect(0, 0, 100, 100)));
+    try testing.expectEqual(@as(usize, 1), ws.children.items.len);
+    try testing.expectEqual(@as(usize, 3), cont.children.items.len);
+    try testing.expectEqual(c, cont.children.items[2]);
 }
 
 test "columnOf resolves the workspace-level column for a nested leaf" {

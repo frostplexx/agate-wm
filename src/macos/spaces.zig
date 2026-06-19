@@ -126,11 +126,11 @@ pub fn spaceForWindow(cid: sl.ConnectionID, wid: u32, mask: u64) ?u64 {
     return @intCast(sid);
 }
 
-/// Switch the focused display to the Space with id `sid` using the Dock-swipe
-/// gesture — instant, and (unlike the SkyLight `SLSManagedDisplaySetCurrentSpace`
-/// path, which is broken on current macOS) it keeps the menu bar correct. Steps
-/// through Mission Control order from the active Space to `sid`. No-op if `sid`
-/// isn't on the focused display or is already active.
+/// Switch the focused display to the Space with id `sid` using the synthetic
+/// Dock-swipe gesture — the one and only switch mechanism (no SkyLight
+/// fallback): instant, and it keeps the menu bar correct. Steps through Mission
+/// Control order from the active Space to `sid`. No-op if `sid` isn't on the
+/// focused display or is already active.
 pub fn switchToSpaceId(alloc: Allocator, cid: sl.ConnectionID, sid: u64) !void {
     const order = (try focusedDisplayOrder(alloc, cid)) orelse return;
     defer alloc.free(order.spaces);

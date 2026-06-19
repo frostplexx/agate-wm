@@ -67,9 +67,11 @@ agate.bind("hyper+m", function() agate.column_width("full") end)              --
 agate.bind("hyper+comma", function() agate.consume("left") end)              -- pull the left column in
 agate.bind("hyper+period", function() agate.expel("right") end)             -- eject to its own column
 
--- Layout of the *focused column's* internal tiling (only applies once a column
--- holds more than one window, e.g. after `consume`). The workspace itself is
--- always the Flow strip and can't be switched away from it.
+-- Layout of the *focused column's* internal tiling. On a single-window column
+-- this arms the split (i3-style): the next window you open tiles into this column
+-- with the chosen layout instead of starting its own column on the strip. On a
+-- multi-window column it re-tiles right away. The workspace itself is always the
+-- Flow strip and can't be switched away from it.
 agate.bind("hyper+v", function() agate.layout("v_split") end)                 -- split the column vertically
 agate.bind("hyper+b", function() agate.layout("h_split") end)                 -- split the column horizontally
 agate.bind("hyper+e", function() agate.layout("toggle") end)                  -- swap split orientation
