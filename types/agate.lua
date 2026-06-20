@@ -109,6 +109,9 @@ function agate.join(dir, mode) end
 ---Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
 function agate.zoom_fullscreen() end
 
+---Toggle native macOS fullscreen for the focused window — the green-button fullscreen that moves it to its own Space with the standard transition (toggle again to leave). Unlike `zoom_fullscreen`, this is real fullscreen, so you can drop Raycast (or other tools') fullscreen keybind.
+function agate.native_fullscreen() end
+
 ---Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
 function agate.toggle_float() end
 
