@@ -27,6 +27,12 @@ pub const Event = enum {
     window_created,
     /// A tracked window closed. Payload: `{ window = <id> }`.
     window_destroyed,
+    /// The set of connected displays changed (a monitor plugged/unplugged,
+    /// clamshell open/close, an arrangement or resolution change). Fired after
+    /// the layout has settled. Payload: `{ count = <connected display count> }`.
+    /// Use it for conditional configs — e.g. re-pin apps or switch layouts when
+    /// docking. Pair with `agate.monitors()` to inspect what's now connected.
+    monitors_changed,
 
     /// Resolve a Lua event name to its enum, or null if unknown.
     pub fn fromName(name: []const u8) ?Event {
@@ -110,6 +116,11 @@ pub fn emitWindowDestroyed(window_id: u64) void {
     emit(.window_destroyed, .{ .window = window_id });
 }
 
+/// Fire `monitors_changed` with the number of currently connected displays.
+pub fn emitMonitorsChanged(count: usize) void {
+    emit(.monitors_changed, .{ .count = count });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -119,6 +130,7 @@ test "Event.fromName maps the public event names" {
     try std.testing.expectEqual(Event.mode_changed, Event.fromName("mode_changed").?);
     try std.testing.expectEqual(Event.window_created, Event.fromName("window_created").?);
     try std.testing.expectEqual(Event.window_destroyed, Event.fromName("window_destroyed").?);
+    try std.testing.expectEqual(Event.monitors_changed, Event.fromName("monitors_changed").?);
     try std.testing.expect(Event.fromName("nope") == null);
 }
 

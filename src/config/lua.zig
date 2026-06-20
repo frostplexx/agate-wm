@@ -59,6 +59,7 @@ pub const hasFourFingerGesture = swipe.hasFourFingerGesture;
 
 pub const runPendingMove = actions.runPendingMove;
 pub const applyRulesToLeaf = rules.applyRulesToLeaf;
+pub const applyRulesToTree = rules.applyRulesToTree;
 pub const applySmallScreenMode = small_screen.applySmallScreenMode;
 
 // Event callbacks (`agate.on`) — emit helpers the WM event sites call.
@@ -66,6 +67,7 @@ pub const emitSpaceChanged = events.emitSpaceChanged;
 pub const emitModeChanged = events.emitModeChanged;
 pub const emitWindowCreated = events.emitWindowCreated;
 pub const emitWindowDestroyed = events.emitWindowDestroyed;
+pub const emitMonitorsChanged = events.emitMonitorsChanged;
 
 // ---------------------------------------------------------------------------
 // Lifecycle

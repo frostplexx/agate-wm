@@ -51,7 +51,7 @@
 ---@field app? string POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.
 ---@field title? string POSIX extended regex matched against the window title.
 ---@field space? integer 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
----@field monitor? integer 1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.
+---@field monitor? integer 1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the `space` position counts on; pins the app to that display. Omit for the focused display.
 ---@field follow? boolean Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
 ---@field floating? boolean Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
 
@@ -72,8 +72,8 @@ function agate.bind(spec, action) end
 ---@param action fun()|string A Lua callback, or a string command (see Commands below).
 function agate.gesture(spec, action) end
 
----Run a Lua callback whenever agate performs an action. The callback receives a single table describing the event. Register more than one for the same event and they all run, in order. Events: `space_changed` (`{ space = N }` — the new 1-based Space position), `mode_changed` (`{ mode = "name" }` on enter, `{ mode = nil }` on exit), `window_created` / `window_destroyed` (`{ window = id }`). Use it to e.g. run a shell command on every Space switch via `agate.exec`.
----@param event string Event name: `"space_changed"`, `"mode_changed"`, `"window_created"`, or `"window_destroyed"`.
+---Run a Lua callback whenever agate performs an action. The callback receives a single table describing the event. Register more than one for the same event and they all run, in order. Events: `space_changed` (`{ space = N }` — the new 1-based Space position), `mode_changed` (`{ mode = "name" }` on enter, `{ mode = nil }` on exit), `window_created` / `window_destroyed` (`{ window = id }`), `monitors_changed` (`{ count = N }` — a display was plugged/unplugged; inspect `agate.monitors()` to adapt the config). Use it to e.g. run a shell command on every Space switch via `agate.exec`, or re-pin apps when docking.
+---@param event string Event name: `"space_changed"`, `"mode_changed"`, `"window_created"`, `"window_destroyed"`, or `"monitors_changed"`.
 ---@param callback fun(event:table) A Lua function called with a table of event data (fields depend on the event).
 function agate.on(event, callback) end
 
@@ -137,7 +137,7 @@ function agate.move(dir) end
 
 ---Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
 ---@param n integer 1-based Space position (Mission Control order, fullscreen included) to send the window to.
----@param monitor? integer 1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
+---@param monitor? integer 1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
 function agate.move_to_space(n, monitor) end
 
 ---Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.
@@ -148,8 +148,24 @@ function agate.focus_monitor(dir) end
 ---@param dir agate.MonitorDir Which display to move the window to.
 function agate.move_to_monitor(dir) end
 
+---Return an array of tables describing the connected displays, in spatial order (left→right). Each entry has `id` (1-based arrangement number — the value `agate.rule{monitor=...}` / `agate.move_to_space(n, monitor)` expect), `name`, `x`, `y`, `width`, `height`, `main` (the primary display), and `focused` (the display with keyboard focus). Combine with `agate.on("monitors_changed", ...)` for configs that adapt to docking.
+function agate.monitors() end
+
+---Return the number of connected displays. Handy for branching config, e.g. `if agate.monitor_count() == 1 then ... end`.
+function agate.monitor_count() end
+
+---Return the 1-based arrangement number of the display that currently has keyboard focus (0 if unknown) — the same numbering `agate.monitors()` reports and rules address.
+function agate.focused_monitor() end
+
+---Focus a running app by name, wherever its window lives: switches the display that holds the window to its Space (across monitors too, regardless of the macOS "switch to a Space with open windows" setting) and raises it. Matches the app name as a substring (so `"Zen"` matches `"Zen Browser (Beta)"`). Returns `true` if a tracked window was found and focused, `false` otherwise — fall back to `agate.exec("open -a Name")` to launch it. Expandable: bind one per app.
+---@param name string App name (or a substring of it) to focus.
+function agate.focus_app(name) end
+
 ---Register a window assignment rule, like yabai's `rule --add`: windows whose app name/title match the given regexes are sent to a space (and optionally a specific monitor) and/or floated when they appear. At least one of `app`/`title` is required; both must match when both are given. Give `space`, `monitor`, `floating = true`, or a combination — a rule must have at least one effect. When several rules match a window, the last registered one wins.
 ---@param rule agate.Rule Rule table (see agate.Rule).
 function agate.rule(rule) end
+
+---Remove all window assignment rules previously added with `agate.rule`. Use it before re-registering rules in a `monitors_changed` handler so conditional rule sets don't pile up across dock/undock cycles.
+function agate.clear_rules() end
 
 return agate

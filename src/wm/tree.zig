@@ -43,14 +43,16 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
 
     const root = try makeCon(alloc, .Root, null, 0, 0);
 
-    // One Monitor Con per physical display, keyed by display index.
-    var monitors = std.AutoHashMap(usize, *data.Con).init(alloc);
+    // One Monitor Con per physical display, keyed by the display's *stable* UUID
+    // hash (`monitor_key`) — never the window-server enumeration index, which is
+    // reshuffled when a display is plugged/unplugged.
+    var monitors = std.AutoHashMap(u64, *data.Con).init(alloc);
     defer monitors.deinit();
 
     for (try macos.spaces.allSpaces(alloc, cid)) |sp| {
-        const gop = try monitors.getOrPut(sp.display_index);
+        const gop = try monitors.getOrPut(sp.monitor_key);
         if (!gop.found_existing) {
-            const mon = try makeCon(alloc, .Monitor, root, 1, @intCast(sp.display_index));
+            const mon = try makeCon(alloc, .Monitor, root, 1, sp.monitor_key);
             try root.children.append(alloc, mon);
             gop.value_ptr.* = mon;
         }
@@ -78,18 +80,19 @@ pub fn build_tree(alloc: Allocator, cid: u32) !*data.Con {
     return root;
 }
 
-/// The Monitor Con for display index `idx`, or null.
-pub fn findMonitor(root: *data.Con, idx: usize) ?*data.Con {
+/// The Monitor Con for the display whose stable key is `key`, or null.
+pub fn findMonitor(root: *data.Con, key: u64) ?*data.Con {
     for (root.children.items) |c| {
-        if (c.con_type == .Monitor and c.id == @as(u64, idx)) return c;
+        if (c.con_type == .Monitor and c.id == key) return c;
     }
     return null;
 }
 
-/// Find or create the Monitor Con for display index `idx` (its `id`).
-pub fn ensureMonitor(alloc: Allocator, root: *data.Con, idx: usize) !*data.Con {
-    if (findMonitor(root, idx)) |m| return m;
-    const mon = try makeCon(alloc, .Monitor, root, 1, @intCast(idx));
+/// Find or create the Monitor Con for the display with stable key `key` (its
+/// `id` — a `monitor.keyForUUID` hash, not the window-server index).
+pub fn ensureMonitor(alloc: Allocator, root: *data.Con, key: u64) !*data.Con {
+    if (findMonitor(root, key)) |m| return m;
+    const mon = try makeCon(alloc, .Monitor, root, 1, key);
     try root.children.append(alloc, mon);
     return mon;
 }
@@ -151,7 +154,7 @@ pub fn reconcileSpaces(appState: *state.AppState) bool {
     var changed = false;
     for (all) |sp| {
         if (findWorkspace(root, sp.id) != null) continue;
-        const mon = ensureMonitor(appState.arena, root, sp.display_index) catch continue;
+        const mon = ensureMonitor(appState.arena, root, sp.monitor_key) catch continue;
         _ = acquireWorkspace(appState, mon, sp.id, sp.type) orelse continue;
         std.debug.print("[tree] +space {d} (display {d}, type {d})\n", .{ sp.id, sp.display_index, sp.type });
         changed = true;
@@ -323,6 +326,19 @@ pub fn findWorkspace(con: *data.Con, sid: u64) ?*data.Con {
     return null;
 }
 
+/// The first leaf anywhere under `con` whose window owner contains `name`
+/// (case-sensitive substring, so "Zen" matches "Zen Browser (Beta)"). Used to
+/// focus an app by name. Null if no tracked window matches.
+pub fn findLeafByOwner(con: *data.Con, name: []const u8) ?*data.Con {
+    if (con.window) |w| {
+        if (std.mem.indexOf(u8, w.owner, name) != null) return con;
+    }
+    for (con.children.items) |child| {
+        if (findLeafByOwner(child, name)) |leaf| return leaf;
+    }
+    return null;
+}
+
 /// The Monitor ancestor of `con` (or `con` itself if it is one), else null.
 pub fn monitorOf(con: *data.Con) ?*data.Con {
     var node: ?*data.Con = con;
@@ -342,10 +358,10 @@ pub fn workspaceOf(con: *data.Con) ?*data.Con {
 }
 
 /// The usable (visible) frame of the display that owns `ws`, in AX coordinates.
-/// Each Monitor Con's `id` is its `display_index`; we map that to the display's
-/// UUID via `managedDisplays`, then to its geometry via `displayFrames`. Falls
-/// back to the main display when the mapping can't be resolved (single-display
-/// machines, or a display added after the tree was built).
+/// Each Monitor Con's `id` is its display's *stable* UUID-hash key; we resolve
+/// that to the live display's geometry via `monitor.enumerate`. Falls back to
+/// the main display when the key can't be resolved (single-display machines, or
+/// the display this workspace lived on is no longer connected).
 pub fn areaForWorkspace(appState: *state.AppState, ws: *data.Con) macos.window_list.Rect {
     if (resolveMonitorFrame(appState, monitorOf(ws))) |area| return area;
     return macos.display.mainVisibleFrame() orelse zero_rect;
@@ -353,16 +369,12 @@ pub fn areaForWorkspace(appState: *state.AppState, ws: *data.Con) macos.window_l
 
 const zero_rect: macos.window_list.Rect = .{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = 0, .height = 0 } };
 
-/// Resolve the visible frame of Monitor Con `mon` from the live display layout.
+/// Resolve the visible frame of Monitor Con `mon` from the live display layout,
+/// matching its stable key against the connected displays.
 fn resolveMonitorFrame(appState: *state.AppState, mon: ?*data.Con) ?macos.window_list.Rect {
     const monitor = mon orelse return null;
-    const idx: usize = @intCast(monitor.id); // Monitor.id == display_index
-    var md_buf: [max_displays]macos.spaces.ManagedDisplay = undefined;
-    const mds = macos.spaces.managedDisplays(&md_buf, appState.skylight_cid);
-    if (idx >= mds.len) return null;
-    var frame_buf: [max_displays]macos.display.DisplayFrame = undefined;
-    const frames = macos.display.displayFrames(&frame_buf);
-    return macos.display.frameForUUID(frames, mds[idx].uuidSlice());
+    const m = macos.monitor.byKey(appState.skylight_cid, monitor.id) orelse return null;
+    return m.frame;
 }
 
 /// Lay out the focused display's currently active Space onto its real windows,
@@ -386,19 +398,15 @@ fn isTileable(ws: *data.Con) bool {
 /// switch, a display reconfiguration, a window moved across monitors).
 pub fn flushAllVisible(appState: *state.AppState) void {
     const root = appState.tree orelse return;
-    var md_buf: [max_displays]macos.spaces.ManagedDisplay = undefined;
-    const mds = macos.spaces.managedDisplays(&md_buf, appState.skylight_cid);
-    if (mds.len == 0) return flushActive(appState); // couldn't enumerate displays
-    var frame_buf: [max_displays]macos.display.DisplayFrame = undefined;
-    const frames = macos.display.displayFrames(&frame_buf);
+    var mon_buf: [max_displays]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&mon_buf, appState.skylight_cid);
+    if (mons.len == 0) return flushActive(appState); // couldn't enumerate displays
 
-    for (mds) |md| {
-        if (md.current_space == 0) continue;
-        const ws = findWorkspace(root, md.current_space) orelse continue;
+    for (mons) |m| {
+        if (m.current_space == 0) continue;
+        const ws = findWorkspace(root, m.current_space) orelse continue;
         if (!isTileable(ws)) continue; // a fullscreen/system Space is showing — leave it
-        const area = macos.display.frameForUUID(frames, md.uuidSlice()) orelse
-            macos.display.mainVisibleFrame() orelse continue;
-        layout.flushWorkspace(ws, area);
+        layout.flushWorkspace(ws, m.frame);
     }
 }
 
@@ -417,33 +425,27 @@ pub const MonitorInfo = struct {
     con: *data.Con,
     frame: macos.window_list.Rect,
     current_space: u64,
+    /// 1-based spatial order, for user-facing reporting / addressing.
+    arrangement: usize,
 };
 
-/// Fill `out` with one entry per Monitor Con that resolves to a live display,
-/// in display order. Returns the count written (capped at `out.len`). Lets the
-/// focus engine pick an adjacent monitor without each caller re-querying the OS.
+/// Fill `out` with one entry per Monitor Con that resolves to a live, connected
+/// display, sorted by spatial arrangement (left→right). Returns the count
+/// written (capped at `out.len`). Lets the focus engine pick an adjacent monitor
+/// without each caller re-querying the OS. A Monitor Con whose display is no
+/// longer connected (its key matches nothing) is skipped.
 pub fn collectMonitors(appState: *state.AppState, out: []MonitorInfo) usize {
     const root = appState.tree orelse return 0;
-    var md_buf: [max_displays]macos.spaces.ManagedDisplay = undefined;
-    const mds = macos.spaces.managedDisplays(&md_buf, appState.skylight_cid);
-    var frame_buf: [max_displays]macos.display.DisplayFrame = undefined;
-    const frames = macos.display.displayFrames(&frame_buf);
+    var mon_buf: [max_displays]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&mon_buf, appState.skylight_cid);
 
     var count: usize = 0;
-    for (root.children.items) |mon| {
+    // Walk the live displays in arrangement order so `out` is ordered too; pair
+    // each with its Monitor Con by stable key.
+    for (mons) |m| {
         if (count >= out.len) break;
-        if (mon.con_type != .Monitor) continue;
-        const idx: usize = @intCast(mon.id);
-        if (idx >= mds.len) {
-            std.debug.print("[monitor] con {d} has no managed display ({d} known)\n", .{ idx, mds.len });
-            continue;
-        }
-        const area = macos.display.frameForUUID(frames, mds[idx].uuidSlice()) orelse {
-            std.debug.print("[monitor] con {d}: no NSScreen frame for managed uuid={s}\n", .{ idx, mds[idx].uuidSlice() });
-            for (frames) |f| std.debug.print("[monitor]   available screen uuid={s}\n", .{f.uuidSlice()});
-            continue;
-        };
-        out[count] = .{ .con = mon, .frame = area, .current_space = mds[idx].current_space };
+        const con = findMonitor(root, m.key) orelse continue; // no Con yet (reconcile pending)
+        out[count] = .{ .con = con, .frame = m.frame, .current_space = m.current_space, .arrangement = m.arrangement };
         count += 1;
     }
     return count;

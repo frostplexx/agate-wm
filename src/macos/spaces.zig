@@ -25,8 +25,21 @@ pub const Space = struct {
     id: u64,
     /// Space type: 0 = user, 2 = fullscreen, 4 = system (per observation).
     type: i64,
-    /// Index into the managed-display list this space belongs to.
+    /// Index into the managed-display list this space belongs to. NOT stable
+    /// across display reconfiguration — only meaningful within the query it came
+    /// from. The display's stable identity is `monitor_key`.
     display_index: usize,
+    /// Stable identity (UUID hash, `monitor.keyForUUID`) of the display this
+    /// Space lives on — what a Monitor Con is keyed by. 0 if the display's UUID
+    /// couldn't be resolved.
+    monitor_key: u64 = 0,
+    /// The display UUID this Space lives on. NUL-free; `uuid_len` is its length.
+    uuid: [64]u8 = undefined,
+    uuid_len: usize = 0,
+
+    pub fn uuidSlice(self: *const Space) []const u8 {
+        return self.uuid[0..self.uuid_len];
+    }
 };
 
 /// A physical display as the window server sees it: its UUID (matching
@@ -89,6 +102,18 @@ pub fn managedDisplays(buf: []ManagedDisplay, cid: sl.ConnectionID) []ManagedDis
         n += 1;
     }
     return buf[0..n];
+}
+
+/// Switch the display identified by `uuid` to the Space `sid` directly, via
+/// SkyLight (no gesture). Unlike `switchToSpaceId` this can target a display that
+/// ISN'T the focused one — the gesture path only ever drives the active display.
+/// On the *focused* display this is known to leave the menu bar stale, so prefer
+/// `switchToSpaceId` there; for a secondary display (whose menu bar isn't shown)
+/// it's the right tool. `uuid` is the display's "Display Identifier".
+pub fn setDisplaySpace(cid: sl.ConnectionID, uuid: []const u8, sid: u64) void {
+    const s = String.createUtf8(uuid) catch return;
+    defer s.release();
+    sl.SLSManagedDisplaySetCurrentSpace(cid, s.ref(), sid);
 }
 
 /// The currently active Space id on the focused display (the one owning the
@@ -285,6 +310,8 @@ pub fn allSpaces(alloc: Allocator, cid: sl.ConnectionID) ![]Space {
     defer key_id.release();
     const key_type = try String.createUtf8("type");
     defer key_type.release();
+    const key_disp = try String.createUtf8("Display Identifier");
+    defer key_disp.release();
 
     var list: std.ArrayList(Space) = .empty;
     errdefer list.deinit(alloc);
@@ -293,17 +320,36 @@ pub fn allSpaces(alloc: Allocator, cid: sl.ConnectionID) ![]Space {
     var di: usize = 0;
     while (di < ndisp) : (di += 1) {
         const ddict: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(displays, @intCast(di)));
+
+        // Resolve this display's stable UUID once for every Space on it, applying
+        // the same "Main" → canonical-UUID substitution as `managedDisplays`.
+        var disp_uuid: [64]u8 = undefined;
+        var disp_uuid_len: usize = 0;
+        if (c.CFDictionaryGetValue(ddict, key_disp.ref())) |v| {
+            if (String.fromRef(@ptrCast(v))) |s| {
+                if (s.cstring(&disp_uuid)) |slice| disp_uuid_len = slice.len;
+            }
+        }
+        if (!looksLikeUUID(disp_uuid[0..disp_uuid_len])) {
+            disp_uuid_len = if (display.mainDisplayUUID(&disp_uuid)) |slice| slice.len else 0;
+        }
+        const disp_key = display.keyForUUID(disp_uuid[0..disp_uuid_len]);
+
         const spaces_arr: c.CFArrayRef = @ptrCast(c.CFDictionaryGetValue(ddict, key_spaces.ref()) orelse continue);
         const nsp: usize = @intCast(c.CFArrayGetCount(spaces_arr));
         var si: usize = 0;
         while (si < nsp) : (si += 1) {
             const sdict: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(spaces_arr, @intCast(si)));
             const sid = foundation.dictI64(sdict, key_id.ref()) orelse continue;
-            try list.append(alloc, .{
+            var sp = Space{
                 .id = @intCast(sid),
                 .type = foundation.dictI64(sdict, key_type.ref()) orelse 0,
                 .display_index = di,
-            });
+                .monitor_key = disp_key,
+                .uuid_len = disp_uuid_len,
+            };
+            @memcpy(sp.uuid[0..disp_uuid_len], disp_uuid[0..disp_uuid_len]);
+            try list.append(alloc, sp);
         }
     }
     return list.toOwnedSlice(alloc);

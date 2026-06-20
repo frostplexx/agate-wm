@@ -255,8 +255,8 @@ fn agateGesture(lua: *Lua) i32 {
 /// list in the doc comment). Unlike `agate.bind`, the trigger is a WM event, not
 /// a key chord — so init.lua can react to things agate does on its own. Several
 /// callbacks may be registered for the same event; all run, in registration order.
-// @doc F|on|Run a Lua callback whenever agate performs an action. The callback receives a single table describing the event. Register more than one for the same event and they all run, in order. Events: `space_changed` (`{ space = N }` — the new 1-based Space position), `mode_changed` (`{ mode = "name" }` on enter, `{ mode = nil }` on exit), `window_created` / `window_destroyed` (`{ window = id }`). Use it to e.g. run a shell command on every Space switch via `agate.exec`.
-// @doc FP|on|event|string|false|Event name: `"space_changed"`, `"mode_changed"`, `"window_created"`, or `"window_destroyed"`.
+// @doc F|on|Run a Lua callback whenever agate performs an action. The callback receives a single table describing the event. Register more than one for the same event and they all run, in order. Events: `space_changed` (`{ space = N }` — the new 1-based Space position), `mode_changed` (`{ mode = "name" }` on enter, `{ mode = nil }` on exit), `window_created` / `window_destroyed` (`{ window = id }`), `monitors_changed` (`{ count = N }` — a display was plugged/unplugged; inspect `agate.monitors()` to adapt the config). Use it to e.g. run a shell command on every Space switch via `agate.exec`, or re-pin apps when docking.
+// @doc FP|on|event|string|false|Event name: `"space_changed"`, `"mode_changed"`, `"window_created"`, `"window_destroyed"`, or `"monitors_changed"`.
 // @doc FP|on|callback|fun(event:table)|false|A Lua function called with a table of event data (fields depend on the event).
 fn agateOn(lua: *Lua) i32 {
     const cfg = ctx.config orelse return 0;
@@ -508,7 +508,7 @@ fn agateMove(lua: *Lua) i32 {
 /// another display; without it, the focused display.
 // @doc F|move_to_space|Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
 // @doc FP|move_to_space|n|integer|false|1-based Space position (Mission Control order, fullscreen included) to send the window to.
-// @doc FP|move_to_space|monitor|integer|true|1-based monitor (display order) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
+// @doc FP|move_to_space|monitor|integer|true|1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
 fn agateMoveToSpace(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
     const n = lua.toInteger(1) catch return 0;
@@ -546,6 +546,105 @@ fn agateMoveToMonitor(lua: *Lua) i32 {
     const dir = parse.parseMonitorDir(std.mem.sliceTo(dir_z, 0)) orelse return 0;
     actions.moveFocusedToMonitor(app, dir);
     return 0;
+}
+
+/// The stable key of the display the focus currently lives on, or 0.
+fn focusedMonitorKey(app: *@import("../state.zig").AppState) u64 {
+    const mon = focus.currentMonitor(app) orelse return 0;
+    return mon.id; // Monitor.id == monitor.keyForUUID
+}
+
+/// `agate.monitors()`: an array of tables describing every connected display, in
+/// spatial order (left→right). Each entry: `{ id, name, x, y, width, height,
+/// main, focused }`, where `id` is the 1-based arrangement number used to
+/// address the monitor in rules and `move_to_space`. For conditional configs.
+// @doc F|monitors|Return an array of tables describing the connected displays, in spatial order (left→right). Each entry has `id` (1-based arrangement number — the value `agate.rule{monitor=...}` / `agate.move_to_space(n, monitor)` expect), `name`, `x`, `y`, `width`, `height`, `main` (the primary display), and `focused` (the display with keyboard focus). Combine with `agate.on("monitors_changed", ...)` for configs that adapt to docking.
+fn agateMonitors(lua: *Lua) i32 {
+    const app = ctx.appstate orelse {
+        lua.newTable();
+        return 1;
+    };
+    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&buf, app.skylight_cid);
+    const focused_key = focusedMonitorKey(app);
+
+    lua.createTable(@intCast(mons.len), 0);
+    for (mons, 1..) |m, i| {
+        lua.createTable(0, 8);
+        lua.pushInteger(@intCast(m.arrangement));
+        lua.setField(-2, "id");
+        _ = lua.pushString(m.nameSlice());
+        lua.setField(-2, "name");
+        lua.pushNumber(m.frame.origin.x);
+        lua.setField(-2, "x");
+        lua.pushNumber(m.frame.origin.y);
+        lua.setField(-2, "y");
+        lua.pushNumber(m.frame.size.width);
+        lua.setField(-2, "width");
+        lua.pushNumber(m.frame.size.height);
+        lua.setField(-2, "height");
+        lua.pushBoolean(m.is_main);
+        lua.setField(-2, "main");
+        lua.pushBoolean(m.key == focused_key);
+        lua.setField(-2, "focused");
+        lua.setIndex(-2, @intCast(i));
+    }
+    return 1;
+}
+
+/// `agate.monitor_count()`: the number of connected displays.
+// @doc F|monitor_count|Return the number of connected displays. Handy for branching config, e.g. `if agate.monitor_count() == 1 then ... end`.
+fn agateMonitorCount(lua: *Lua) i32 {
+    const app = ctx.appstate orelse {
+        lua.pushInteger(0);
+        return 1;
+    };
+    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&buf, app.skylight_cid);
+    lua.pushInteger(@intCast(mons.len));
+    return 1;
+}
+
+/// `agate.focused_monitor()`: the 1-based arrangement number of the display that
+/// currently has keyboard focus (0 if it can't be resolved).
+// @doc F|focused_monitor|Return the 1-based arrangement number of the display that currently has keyboard focus (0 if unknown) — the same numbering `agate.monitors()` reports and rules address.
+fn agateFocusedMonitor(lua: *Lua) i32 {
+    const app = ctx.appstate orelse {
+        lua.pushInteger(0);
+        return 1;
+    };
+    const key = focusedMonitorKey(app);
+    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&buf, app.skylight_cid);
+    var arrangement: usize = 0;
+    for (mons) |m| if (m.key == key) {
+        arrangement = m.arrangement;
+        break;
+    };
+    lua.pushInteger(@intCast(arrangement));
+    return 1;
+}
+
+/// `agate.focus_app(name)`: focus a running app by (partial) name, wherever it
+/// lives — switches the display holding its window to that window's Space and
+/// raises it, even across monitors and even with macOS's "switch space on app
+/// switch" setting off. Returns true if a tracked window matched. Pair with
+/// `agate.exec("open -a …")` as a fallback to launch the app when it isn't open.
+// @doc F|focus_app|Focus a running app by name, wherever its window lives: switches the display that holds the window to its Space (across monitors too, regardless of the macOS "switch to a Space with open windows" setting) and raises it. Matches the app name as a substring (so `"Zen"` matches `"Zen Browser (Beta)"`). Returns `true` if a tracked window was found and focused, `false` otherwise — fall back to `agate.exec("open -a Name")` to launch it. Expandable: bind one per app.
+// @doc FP|focus_app|name|string|false|App name (or a substring of it) to focus.
+// @doc FR|focus_app|boolean|`true` if a matching window was focused, else `false`.
+fn agateFocusApp(lua: *Lua) i32 {
+    const app = ctx.appstate orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const name_z = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const ok = actions.focusApp(app, std.mem.sliceTo(name_z, 0));
+    lua.pushBoolean(ok);
+    return 1;
 }
 
 /// `agate.rule{ app = "...", title = "...", space = N, follow = bool }`
@@ -613,6 +712,19 @@ fn agateRule(lua: *Lua) i32 {
     return 0;
 }
 
+/// `agate.clear_rules()`: drop every registered window-assignment rule (freeing
+/// their compiled regexes). The companion to `agate.on("monitors_changed", ...)`:
+/// a conditional config rebuilds its rule set from scratch each time the display
+/// layout changes, without the rules accumulating across docks.
+// @doc F|clear_rules|Remove all window assignment rules previously added with `agate.rule`. Use it before re-registering rules in a `monitors_changed` handler so conditional rule sets don't pile up across dock/undock cycles.
+fn agateClearRules(lua: *Lua) i32 {
+    _ = lua;
+    const cfg = ctx.config orelse return 0;
+    for (cfg.rules.items) |r| rules.freeRule(r);
+    cfg.rules.clearRetainingCapacity();
+    return 0;
+}
+
 // How `// @doc` annotations work: tools/gen_docs.zig scans the config sources for
 // lines beginning `// @doc ` and renders types/agate.lua plus the wiki's
 // Configuration reference from them (run `zig build docs`). Each annotation lives
@@ -638,11 +750,16 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
     .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },
     .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
+    .{ .name = "monitors",    .func = zlua.wrap(agateMonitors) },
+    .{ .name = "monitor_count", .func = zlua.wrap(agateMonitorCount) },
+    .{ .name = "focused_monitor", .func = zlua.wrap(agateFocusedMonitor) },
+    .{ .name = "focus_app",   .func = zlua.wrap(agateFocusApp) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
     .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
     .{ .name = "toggle_float", .func = zlua.wrap(agateToggleFloat) },
     .{ .name = "exec",        .func = zlua.wrap(agateExec) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
+    .{ .name = "clear_rules", .func = zlua.wrap(agateClearRules) },
 };
 
 /// Install the `agate` global table into `lua` (called once from `lua.init`).

@@ -205,7 +205,7 @@ pub fn parseDir(s: []const u8) ?focus.Direction {
     return null;
 }
 
-// @doc A|agate.MonitorDir|A monitor selector: `next`/`prev` cycle displays in window-server order; `left`/`right`/`up`/`down` step to the physically adjacent display.
+// @doc A|agate.MonitorDir|A monitor selector: `next`/`prev` cycle displays in spatial arrangement order (left→right); `left`/`right`/`up`/`down` step to the physically adjacent display.
 // @doc AV|agate.MonitorDir|next
 // @doc AV|agate.MonitorDir|prev
 // @doc AV|agate.MonitorDir|left

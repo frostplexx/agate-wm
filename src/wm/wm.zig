@@ -1,4 +1,5 @@
 const std = @import("std");
+const macos = @import("macos");
 const state = @import("../state.zig");
 const data = @import("data.zig");
 const tree = @import("tree.zig");
@@ -11,10 +12,22 @@ pub fn init_wm(appState: *AppState) !void {
     appState.tree = try tree.build_tree(appState.arena, appState.skylight_cid);
     print_tree(appState.tree.?, 1);
 
+    // Seed the connected-display set hash so the first reconfiguration only
+    // fires `monitors_changed` on a genuine connect/disconnect, not on the
+    // startup-time settling. init.lua can inspect `agate.monitors()` directly
+    // for first-run conditional config.
+    appState.monitor_set_hash = currentMonitorSetHash(appState);
+
     // Load init.lua; registers keybindings via agate.bind() calls. Must run
     // before the observer (which sets up the keyboard tap that dispatches them).
     const cfg = try lua_config.init(appState.gpa, appState);
     _ = cfg; // config lifetime managed by lua_config module globals
+
+    // Re-home already-open windows to their assigned Spaces/monitors (rules
+    // normally fire only when a window is *created*, so an app that was already
+    // running when agate started — or when the daemon was restarted — would
+    // otherwise keep whatever Space it was on). Follow is suppressed inside.
+    lua_config.applyRulesToTree(appState);
 
     // Tile each display's visible Space after config is fully applied (so
     // smart_gaps, gap sizes, and small-screen layout are all in effect on the
@@ -23,6 +36,17 @@ pub fn init_wm(appState: *AppState) !void {
 
     // Observe window create/destroy and keep tiling. Blocks on the run loop.
     try observer.run(appState);
+}
+
+/// The order-independent summary of the currently connected display set (XOR of
+/// stable keys) — matched against `AppState.monitor_set_hash` to detect genuine
+/// connect/disconnect. Mirrors `observer.notifyMonitorsChanged`.
+fn currentMonitorSetHash(appState: *AppState) u64 {
+    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&buf, appState.skylight_cid);
+    var hash: u64 = 0;
+    for (mons) |m| hash ^= m.key;
+    return hash;
 }
 
 /// Debug-print the container tree, indented by depth. `index` is the node's

@@ -646,6 +646,24 @@ fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) v
     // Geometry changed for potentially every display — re-tile them all.
     tree.flushAllVisible(mgr.appState);
     std.debug.print("[observer] display reconfigured → retiled\n", .{});
+
+    // Notify init.lua when the *set* of connected displays actually changed (a
+    // monitor plugged/unplugged), so conditional configs can react — distinct
+    // from a mere resolution/arrangement nudge, which leaves the set hash equal.
+    notifyMonitorsChanged(mgr.appState);
+}
+
+/// Fire `monitors_changed` if the connected-display set differs from the last
+/// settled reconfiguration. The set is summarized by XOR-ing the displays'
+/// stable keys (order-independent, and any add/remove flips it).
+fn notifyMonitorsChanged(app: *state.AppState) void {
+    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
+    const mons = macos.monitor.enumerate(&buf, app.skylight_cid);
+    var hash: u64 = 0;
+    for (mons) |m| hash ^= m.key;
+    if (hash == app.monitor_set_hash) return; // same displays — geometry-only change
+    app.monitor_set_hash = hash;
+    lua_config.emitMonitorsChanged(mons.len);
 }
 
 /// Make an app on the currently active space frontmost (see `onSpaceChanged`).
@@ -885,7 +903,7 @@ fn moveDraggedAcrossMonitors(
         if (src_ws) |sw| tree.flushWorkspace(app, sw); // re-tile the source we shrank
         tree.flushWorkspace(app, dst_ws); // tile the destination
         _ = focus.focusLeaf(leaf);
-        std.debug.print("[observer] window #{d} dragged to monitor {d}\n", .{ win.id, m.con.id });
+        std.debug.print("[observer] window #{d} dragged to monitor {d}\n", .{ win.id, m.arrangement });
         return true;
     }
     return false;
@@ -999,6 +1017,10 @@ fn isFullscreenButtonExempt(app: []const u8) bool {
     const exempt = [_][]const u8{
         "Alacritty", "kitty", "WezTerm", "iTerm2", "Terminal",
         "Emacs",     "Code",  "Steam",   "qutebrowser",
+        // Spotify (and similar CEF/Chromium apps) draw their own window chrome and
+        // don't expose a standard AXFullScreenButton, so the dialog heuristic would
+        // otherwise float them — yet they're normal, tileable top-level windows.
+        "Spotify",
     };
     for (exempt) |name| if (std.mem.eql(u8, app, name)) return true;
     return false;
@@ -1175,11 +1197,22 @@ fn observeRetryFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) voi
 /// APPLICATION_LAUNCHED). Once observed, `AXWindowCreated` handles every later
 /// window, so this only needs to run until the first successful observe.
 fn observeAndAddWindows(mgr: *Manager, pid: i32, attempt: u32) void {
-    if (observeApp(mgr, pid)) |entry| {
+    const observed = observeApp(mgr, pid);
+    if (observed) |entry| {
         addApplicationWindows(mgr, pid, entry.observer);
-        return;
     }
     if (attempt + 1 >= max_observe_attempts) return;
+
+    // Retry until the app is observed AND it actually has a tracked window. An app
+    // can become observable *before* its first window exists — notably
+    // Chromium/CEF apps (Spotify) whose window appears a beat after launch and
+    // whose `AXWindowCreated` is unreliable — so a single enumeration finds
+    // nothing and the window is never picked up. Retrying the enumeration (not
+    // just the observe) closes that gap. A genuinely window-less background app
+    // just exhausts the attempts harmlessly.
+    if (observed != null) {
+        if (mgr.appState.tree) |root| if (focus.pidHasWindowUnder(root, pid)) return;
+    }
 
     const ctx = mgr.appState.gpa.create(ObserveRetry) catch return;
     ctx.* = .{ .mgr = mgr, .pid = pid, .attempt = attempt + 1 };

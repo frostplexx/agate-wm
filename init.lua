@@ -63,8 +63,15 @@ agate.bind("hyper+equal", function() agate.resize("smart",50) end)
 agate.bind("hyper+1", function() agate.space(1) end)
 agate.bind("hyper+2", function() agate.space(2) end)
 agate.bind("hyper+3", function() agate.space(3) end)
-agate.bind("hyper+4", function() agate.space(4) end)
-agate.bind("hyper+5", function() agate.space(5) end)
+-- Focus an app wherever it lives (any space, any monitor). `agate.focus_app`
+-- switches the display holding the app to its space and raises it — works even
+-- with the macOS "switch to a Space with open windows" setting off. Falls back
+-- to launching the app when it isn't open yet. Expandable: add a line per app.
+local function focus_app(name)
+    if not agate.focus_app(name) then agate.exec("open -a " .. name) end
+end
+agate.bind("hyper+4", function() focus_app("Vesktop") end)
+agate.bind("hyper+5", function() focus_app("Spotify") end)
 agate.bind("hyper+6", function() agate.space(6) end)
 agate.bind("hyper+7", function() agate.space(7) end)
 agate.bind("hyper+8", function() agate.space(8) end)
@@ -108,16 +115,61 @@ agate.bind("hyper+shift+9", function()
     agate.space(9)
 end)
 
--- Window assignment rules (yabai-style): when a matching window appears, it is
--- sent to the given space and the view follows it there (`follow = false` to
--- route it in the background instead). `app`/`title` are POSIX extended regexes
--- (at least one required). The last matching rule wins.
-agate.rule({ app = "^Ghostty$", space = 2, monitor = 1 })
-agate.rule({ app = "^Zen$", space = 1, monitor = 1 })
-agate.rule({ app = "^Obsidian$", space = 3 })
-agate.rule({ app = "^Things$", space = 1, monitor = 2 })
-agate.rule({ app = "^Spotify$", space = 3, monitor = 2 })
-agate.rule({ app = "^Vesktop$", space = 2, monitor = 2 })
-agate.rule({ app = "^Mail$", space = 2, monitor = 2 })
+-- Identify displays by NAME rather than by number, because `agate.monitors()`
+-- numbers displays by spatial position (left→right), which can differ from how
+-- you think of them and flips when you rearrange screens. The built-in panel
+-- reports as "Built-in ..."; anything else is an external. Returns the monitor
+-- `id` (the number rules/`move_to_space` take) for the internal and the external,
+-- plus how many externals are attached.
+local function survey_displays()
+    local internal_id, external_id, external_count = nil, nil, 0
+    for _, m in ipairs(agate.monitors()) do
+        if m.name:find("Built-in", 1, true) then
+            internal_id = m.id
+        else
+            external_count = external_count + 1
+            external_id = external_id or m.id
+        end
+    end
+    return internal_id, external_id, external_count
+end
+
+-- (Re)build the window assignment rules for the current display layout. Rules
+-- (yabai-style) send a matching window to a space when it appears; `app`/`title`
+-- are POSIX extended regexes (at least one required), last match wins. Cleared
+-- first so re-running on a display change doesn't pile duplicates up.
+local function apply_rules()
+    agate.clear_rules()
+
+    local internal_id, external_id, external_count = survey_displays()
+    -- The "big" screen is the external when docked, else the laptop; the "small"
+    -- screen is always the built-in panel (falls back to the only display).
+    local big = external_id or internal_id
+    local small = internal_id or external_id
+
+    agate.rule({ app = "^Ghostty$", monitor = big, space = 2 })
+    agate.rule({ app = "^Zen$", monitor = big, space = 1 })
+    agate.rule({ app = "^Obsidian$", space = 3 })
+    agate.rule({ app = "^Things$", monitor = small, space = 1 })
+    agate.rule({ app = "^Mail$", monitor = small, space = 2 })
+
+    -- Vesktop / Spotify: when an external is attached they live on the internal
+    -- display (spaces 2 and 3); on the laptop alone they move to spaces 4 and 5.
+    if internal_id and external_count > 0 then
+        agate.rule({ app = "^Vesktop$", monitor = internal_id, space = 2 })
+        agate.rule({ app = "^Spotify$", monitor = internal_id, space = 3 })
+    else
+        agate.rule({ app = "^Vesktop$", space = 4 })
+        agate.rule({ app = "^Spotify$", space = 5 })
+    end
+end
+
+-- Apply now, and re-apply whenever a display is plugged in or unplugged so the
+-- placement tracks docking/undocking.
+apply_rules()
+agate.on("monitors_changed", function(e)
+    print(string.format("agate: monitors changed -> %d connected; reapplying rules", e.count))
+    apply_rules()
+end)
 
 print("agate: config loaded")

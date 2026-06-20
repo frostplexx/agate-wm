@@ -78,17 +78,61 @@ pub fn toggleFloat(app: *state.AppState) void {
     if (win.floating) _ = focus.focusLeaf(leaf); // keep it raised above the tiles
 }
 
+/// Focus the app whose window owner contains `name`, wherever it lives: switch
+/// the display that holds its window to that window's Space, then raise it. The
+/// space-switch path depends on which display the window is on — the gesture
+/// (correct menu bar) for the focused display, a direct SkyLight set for a
+/// secondary one (the gesture can't drive a non-focused display). Returns false
+/// if no tracked window matches `name` (the caller can then launch the app).
+pub fn focusApp(app: *state.AppState, name: []const u8) bool {
+    const root = app.tree orelse return false;
+    const leaf = tree.findLeafByOwner(root, name) orelse return false;
+    const win = if (leaf.window) |w| w else return false;
+    const ws = tree.workspaceOf(leaf) orelse return false;
+    const sid = ws.id;
+
+    // Already on screen → just raise it.
+    if (macos.spaces.activeSpace(app.skylight_cid)) |active| {
+        if (active == sid) return focus.focusLeaf(leaf);
+    }
+
+    const focused_mon = focus.currentMonitor(app);
+    const leaf_mon = tree.monitorOf(leaf);
+    const same_display = focused_mon != null and leaf_mon != null and focused_mon.? == leaf_mon.?;
+
+    if (same_display) {
+        // The window's Space is on the focused display — gesture-switch to it
+        // (keeps the menu bar correct) and let the space-change handler raise it.
+        macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, sid) catch {};
+        app.pending_focus = .{ .wid = win.id, .sid = sid };
+    } else if (leaf_mon) |m| {
+        // The window is on a secondary display — switch THAT display to its Space
+        // directly (the gesture only drives the focused display), then raise the
+        // window, which pulls focus and the menu bar over to that display.
+        if (macos.monitor.byKey(app.skylight_cid, m.id)) |mi| {
+            macos.spaces.setDisplaySpace(app.skylight_cid, mi.uuidSlice(), sid);
+        }
+        _ = focus.focusLeaf(leaf);
+    } else {
+        _ = focus.focusLeaf(leaf);
+    }
+    return true;
+}
+
 /// Move the focused window to the Nth user space on the focused display.
 pub fn moveFocusedToSpace(app: *state.AppState, n: usize) void {
     const target_sid = (macos.spaces.userSpaceIdAt(app.gpa, app.skylight_cid, n) catch return) orelse return;
     moveFocusedToSpaceId(app, target_sid);
 }
 
-/// Move the focused window to user space `n` on the display at `monitor`
-/// (1-based, display order). Lets the window land on another monitor's Space.
+/// Move the focused window to user space `n` on monitor `monitor` (1-based
+/// spatial arrangement, left→right — the same number `agate.monitors()` reports).
+/// Lets the window land on another monitor's Space.
 pub fn moveFocusedToSpaceOnMonitor(app: *state.AppState, monitor: usize, n: usize) void {
     if (monitor < 1) return;
-    const target_sid = (macos.spaces.userSpaceIdOnDisplay(app.gpa, app.skylight_cid, monitor - 1, n) catch return) orelse return;
+    // Arrangement (user-facing) → window-server display_index (Space queries).
+    const di = macos.monitor.displayIndexForArrangement(app.skylight_cid, monitor) orelse return;
+    const target_sid = (macos.spaces.userSpaceIdOnDisplay(app.gpa, app.skylight_cid, di, n) catch return) orelse return;
     moveFocusedToSpaceId(app, target_sid);
 }
 

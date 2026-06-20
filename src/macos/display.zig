@@ -49,11 +49,23 @@ pub const DisplayFrame = struct {
     /// "Display Identifier"). NUL-free; `uuid_len` is the valid length.
     uuid: [64]u8 = undefined,
     uuid_len: usize = 0,
+    /// The CGDirectDisplayID (NSScreenNumber) this frame belongs to. 0 if it
+    /// couldn't be resolved.
+    display_id: u32 = 0,
+    /// The display's localized name (e.g. "Built-in Retina Display"), for the
+    /// monitor API. NUL-free; `name_len` is the valid length. Empty if AppKit
+    /// didn't expose `localizedName`.
+    name: [128]u8 = undefined,
+    name_len: usize = 0,
     /// Visible frame (menu bar / Dock excluded) in top-left AX coordinates.
     frame: Rect,
 
     pub fn uuidSlice(self: *const DisplayFrame) []const u8 {
         return self.uuid[0..self.uuid_len];
+    }
+
+    pub fn nameSlice(self: *const DisplayFrame) []const u8 {
+        return self.name[0..self.name_len];
     }
 };
 
@@ -95,6 +107,7 @@ pub fn displayFrames(buf: []DisplayFrame) []DisplayFrame {
             const num = dd.msgSend(objc.Object, "objectForKey:", .{key.ref()});
             if (num.value != null) {
                 const display_id = num.msgSend(u32, "unsignedIntValue", .{});
+                df.display_id = display_id;
                 if (CGDisplayCreateUUIDFromDisplayID(display_id)) |uuid| {
                     defer foundation.CFRelease(uuid);
                     if (foundation.String.fromRef(CFUUIDCreateString(null, uuid))) |s| {
@@ -104,20 +117,27 @@ pub fn displayFrames(buf: []DisplayFrame) []DisplayFrame {
                 }
             }
         }
+
+        // Localized display name (borrowed/autoreleased — do NOT release it).
+        const name_obj = screen.msgSend(objc.Object, "localizedName", .{});
+        if (name_obj.value != null) {
+            if (foundation.String.fromRef(@ptrCast(name_obj.value))) |s| {
+                if (s.cstring(&df.name)) |slice| df.name_len = slice.len;
+            }
+        }
         buf[n] = df;
         n += 1;
     }
     return buf[0..n];
 }
 
-/// The visible frame of the display whose UUID is `uuid`, searched in `frames`
-/// (from `displayFrames`). Null if no display matches.
-pub fn frameForUUID(frames: []const DisplayFrame, uuid: []const u8) ?Rect {
-    if (uuid.len == 0) return null;
-    for (frames) |f| {
-        if (std.mem.eql(u8, f.uuidSlice(), uuid)) return f.frame;
-    }
-    return null;
+/// The stable Monitor-Con key for a display UUID — a plain hash. Two displays
+/// never share a UUID, and the value only needs to be reproducible within a run.
+/// Lives here (not `monitor.zig`) so `spaces.zig` can tag Spaces with it without
+/// a circular import. 0 for an empty UUID (an unresolved display).
+pub fn keyForUUID(uuid: []const u8) u64 {
+    if (uuid.len == 0) return 0;
+    return std.hash.Wyhash.hash(0x4D4F4E, uuid); // seed "MON"
 }
 
 /// The main display's canonical UUID string, copied into `buf`. SkyLight's

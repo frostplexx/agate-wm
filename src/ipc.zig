@@ -225,7 +225,7 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) !void {
 const WinCtx = struct {
     w: *std.Io.Writer,
     focused: ?*data.Con,
-    mon_no: u64,
+    mon_no: usize,
     ws_no: usize,
     json: bool,
     first: *bool,
@@ -237,13 +237,16 @@ fn writeWindows(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
         return;
     };
     const focused = focus.currentFocusedLeaf(app);
+    var mbuf: [focus.max_monitors]tree.MonitorInfo = undefined;
+    const mons = mbuf[0..tree.collectMonitors(app, &mbuf)];
     var first = true;
     if (json) try w.writeAll("[");
     for (root.children.items) |mon| {
         if (mon.con_type != .Monitor) continue;
+        const mon_no = monitorNumberOf(mons, mon);
         for (mon.children.items, 1..) |ws, wi| {
             if (ws.con_type != .Workspace) continue;
-            var ctx = WinCtx{ .w = w, .focused = focused, .mon_no = mon.id + 1, .ws_no = wi, .json = json, .first = &first };
+            var ctx = WinCtx{ .w = w, .focused = focused, .mon_no = mon_no, .ws_no = wi, .json = json, .first = &first };
             try walkLeaves(&ctx, ws);
         }
     }
@@ -335,6 +338,15 @@ fn currentSpaceOf(mons: []const tree.MonitorInfo, mon: *data.Con) u64 {
     return 0;
 }
 
+/// The user-facing 1-based monitor number (spatial arrangement) for Con `mon`,
+/// resolved from a `collectMonitors` snapshot. A Monitor Con's `id` is a stable
+/// UUID hash, not a display index, so it can't be turned into a number directly.
+/// 0 if the display isn't currently connected.
+fn monitorNumberOf(mons: []const tree.MonitorInfo, mon: *data.Con) usize {
+    for (mons) |m| if (m.con == mon) return m.arrangement;
+    return 0;
+}
+
 fn writeWorkspaces(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
     const root = app.tree orelse {
         if (json) try w.writeAll("[]\n");
@@ -348,6 +360,7 @@ fn writeWorkspaces(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
     for (root.children.items) |mon| {
         if (mon.con_type != .Monitor) continue;
         const cur = currentSpaceOf(mons, mon);
+        const mon_no = monitorNumberOf(mons, mon);
         for (mon.children.items, 1..) |ws, wi| {
             if (ws.con_type != .Workspace) continue;
             const visible = ws.id == cur and cur != 0;
@@ -356,11 +369,11 @@ fn writeWorkspaces(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
                 if (!first) try w.writeAll(",");
                 first = false;
                 try w.print("{{\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"type\":\"{s}\",\"visible\":{},\"windows\":{d}}}", .{
-                    wi, mon.id + 1, layoutName(ws.layout), spaceTypeName(ws.space_type), visible, wins,
+                    wi, mon_no, layoutName(ws.layout), spaceTypeName(ws.space_type), visible, wins,
                 });
             } else {
                 try w.print("ws {d}\tmon {d}\t{s}\t{s}\t{d} window{s}", .{
-                    wi, mon.id + 1, layoutName(ws.layout), spaceTypeName(ws.space_type), wins, if (wins == 1) "" else "s",
+                    wi, mon_no, layoutName(ws.layout), spaceTypeName(ws.space_type), wins, if (wins == 1) "" else "s",
                 });
                 if (visible) try w.writeAll("\t(visible)");
                 try w.writeByte('\n');
@@ -381,7 +394,7 @@ fn writeMonitors(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
 
     if (json) try w.writeAll("[");
     for (mons, 0..) |m, i| {
-        const no = m.con.id + 1;
+        const no = m.arrangement;
         const f = m.frame;
         const cur_ws = wsNumberForSid(m.con, m.current_space);
         if (json) {

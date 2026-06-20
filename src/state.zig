@@ -43,4 +43,9 @@ pub const AppState = struct {
     pending_move: ?PendingMove = null,
     /// See `RuleMoved`. Null when no rule move is pending suppression.
     rule_moved: ?RuleMoved = null,
+    /// XOR of the stable keys of the displays connected at the last settled
+    /// display reconfiguration, so the handler can tell a genuine connect/
+    /// disconnect (fire `monitors_changed`) from a mere resolution/arrangement
+    /// nudge. 0 until the first reconfiguration is processed.
+    monitor_set_hash: u64 = 0,
 };

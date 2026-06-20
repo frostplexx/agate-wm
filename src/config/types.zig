@@ -67,11 +67,12 @@ pub const Rule = struct {
     /// 1-based user-space index to send matched windows to (0 = unset/invalid).
     // @doc SR|space|integer|true|1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
     space: usize = 0,
-    /// 1-based monitor (display order) the `space` index counts on. 0 = the
-    /// focused display (the original behaviour). Set it to pin an app to a
-    /// specific display; combined with `space` to pick which Space on it
+    /// 1-based monitor (spatial arrangement, left→right) the `space` index counts
+    /// on. 0 = the focused display (the original behaviour). Set it to pin an app
+    /// to a specific display; combined with `space` to pick which Space on it
     /// (defaults to the monitor's first user Space when only `monitor` is given).
-    // @doc SR|monitor|integer|true|1-based monitor (display order) the `space` position counts on; pins the app to that display. Omit for the focused display.
+    /// The number matches `agate.monitors()` `id`.
+    // @doc SR|monitor|integer|true|1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the `space` position counts on; pins the app to that display. Omit for the focused display.
     monitor: usize = 0,
     /// Switch to the Space the window was sent to (the default: opening an
     /// assigned app takes the user along). `follow = false` routes the window
