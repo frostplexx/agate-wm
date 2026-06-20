@@ -852,18 +852,35 @@ fn onMouseUp(mgr: *Manager, drop: c.CGPoint) void {
     // A displaced window whose centre now sits on another display is a
     // cross-monitor drag — handle that first (checked for both the resize and
     // move classifications, since a drop onto a smaller display can resize too).
+    // Gated on `draggedFar` so a window whose reported size jittered without
+    // actually moving isn't teleported across monitors by a stray drag.
     const mons = mbuf[0..nmon];
     if (scan.resized) |leaf| {
-        if (moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
+        if (draggedFar(leaf, scan.resized_frame) and moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
         _ = tree.applyManualResize(leaf, scan.resized_frame);
         tree.flushActive(app);
         return;
     }
     if (scan.moved) |leaf| {
-        if (moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
+        if (draggedFar(leaf, scan.moved_frame) and moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
         _ = tree.applyManualMove(leaf, scan.moved_frame);
         tree.flushActive(app);
     }
+}
+
+/// Minimum distance (points) a window's origin must shift to count as a real
+/// drag rather than geometry noise. A cross-monitor drag moves the origin by at
+/// least the gap to the display boundary; a panel reporting jittery bounds (e.g.
+/// DisplayLink) leaves it within a pixel or two, which must not trigger a move.
+const drag_origin_min: f64 = 64;
+
+/// Whether `leaf`'s origin in its real AX `frame` has shifted past
+/// `drag_origin_min` from the tree's last tiled bounds — a real drag, not a
+/// window whose size jittered while it stayed put.
+fn draggedFar(leaf: *data.Con, frame: macos.window_list.Rect) bool {
+    const w = leaf.window orelse return false;
+    return @abs(frame.origin.x - w.bounds.origin.x) > drag_origin_min or
+        @abs(frame.origin.y - w.bounds.origin.y) > drag_origin_min;
 }
 
 /// If the window was dropped (cursor at `drop`, global top-left coords) on a
