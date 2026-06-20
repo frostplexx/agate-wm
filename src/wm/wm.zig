@@ -9,16 +9,17 @@ const AppState = state.AppState;
 
 pub fn init_wm(appState: *AppState) !void {
     appState.tree = try tree.build_tree(appState.arena, appState.skylight_cid);
-
-    // Tile each display's visible Space; non-visible Spaces are deferred until
-    // shown (yabai-style).
-    tree.flushAllVisible(appState);
     print_tree(appState.tree.?, 1);
 
     // Load init.lua; registers keybindings via agate.bind() calls. Must run
     // before the observer (which sets up the keyboard tap that dispatches them).
     const cfg = try lua_config.init(appState.gpa, appState);
     _ = cfg; // config lifetime managed by lua_config module globals
+
+    // Tile each display's visible Space after config is fully applied (so
+    // smart_gaps, gap sizes, and small-screen layout are all in effect on the
+    // very first tile pass, not on a subsequent reconcile).
+    tree.flushAllVisible(appState);
 
     // Observe window create/destroy and keep tiling. Blocks on the run loop.
     try observer.run(appState);

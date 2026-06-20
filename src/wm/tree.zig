@@ -157,24 +157,7 @@ pub fn reconcileSpaces(appState: *state.AppState) bool {
         changed = true;
     }
     if (pruneVanishedWorkspaces(appState, all)) changed = true;
-    return changed;
-}
 
-/// Move every tracked window's leaf to the Workspace matching the Space it is
-/// actually on now, using the window server's per-Space window lists (the
-/// authoritative source). This is how agate follows a window that changed Space
-/// without a create/destroy event — most importantly a window entering or
-/// leaving native fullscreen, which silently relocates it to/from a fullscreen
-/// Space. A window parked on a fullscreen Space's (non-tiled) Workspace is thus
-/// left at full size; when it returns to a user Space its leaf comes back and
-/// tiling resumes. Call after `reconcileSpaces` (so destination Workspaces
-/// exist). Returns true if any leaf moved.
-pub fn reconcileWindowSpaces(appState: *state.AppState) bool {
-    const root = appState.tree orelse return false;
-    const all = macos.spaces.allSpaces(appState.gpa, appState.skylight_cid) catch return false;
-    defer appState.gpa.free(all);
-
-    var changed = false;
     for (all) |sp| {
         const wids = macos.spaces.windowsOnSpace(appState.gpa, appState.skylight_cid, sp.id, true) catch continue;
         defer appState.gpa.free(wids);
@@ -466,22 +449,14 @@ pub fn collectMonitors(appState: *state.AppState, out: []MonitorInfo) usize {
     return count;
 }
 
-/// An existing leaf under `ws` belonging to `pid` whose window occupies the same
-/// frame as `frame`. A new window that matches means it's joining that window's
-/// native macOS tab group: AppKit gives every tab in a group one shared frame,
-/// and the window server has no tab concept, so identical frame + same app is
-/// the reliable cross-process signal (verified: a new tab is created at exactly
-/// the group's frame). Tight epsilon — tab frames are identical, not merely close.
-pub fn findTabSibling(ws: *data.Con, pid: i32, frame: macos.window_list.Rect) ?*data.Con {
-    const eps: f64 = 2;
-    for (ws.children.items) |child| {
-        if (child.window) |w| {
-            if (w.pid == pid and
-                @abs(w.bounds.origin.x - frame.origin.x) < eps and
-                @abs(w.bounds.origin.y - frame.origin.y) < eps and
-                @abs(w.bounds.size.width - frame.size.width) < eps and
-                @abs(w.bounds.size.height - frame.size.height) < eps) return child;
-        }
+/// A leaf anywhere under `con` owned by `pid` whose window occupies (within a tight
+/// epsilon) `frame`. Identical frame + same app is the native-tab signal.
+pub fn findLeafAtFrame(con: *data.Con, pid: i32, frame: macos.window_list.Rect) ?*data.Con {
+    if (con.window) |w| {
+        if (w.pid == pid and data.rectApproxEq(w.bounds, frame, 2)) return con;
+    }
+    for (con.children.items) |child| {
+        if (findLeafAtFrame(child, pid, frame)) |found| return found;
     }
     return null;
 }
@@ -610,6 +585,20 @@ fn pinExtents(parent: *data.Con, horizontal: bool) void {
     }
 }
 
+/// Find the sibling child of `parent` (other than `exclude`) whose window bounds contain the point (x, y).
+pub fn findSiblingContainingPoint(parent: *data.Con, x: f64, y: f64, exclude: *data.Con) ?*data.Con {
+    for (parent.children.items) |child| {
+        if (child == exclude) continue;
+        const b = (child.window orelse continue).bounds;
+        if (x >= b.origin.x and x < b.origin.x + b.size.width and
+            y >= b.origin.y and y < b.origin.y + b.size.height)
+        {
+            return child;
+        }
+    }
+    return null;
+}
+
 /// Absorb a user move of `leaf`: if the moved window's centre now lands over a
 /// sibling's slot, swap the two windows' slots (a positional reorder, like
 /// dragging one tile onto another), then the caller re-flushes so both snap
@@ -620,19 +609,13 @@ pub fn applyManualMove(leaf: *data.Con, frame: macos.window_list.Rect) bool {
     const cx = frame.origin.x + frame.size.width / 2;
     const cy = frame.origin.y + frame.size.height / 2;
 
-    for (parent.children.items) |child| {
-        if (child == leaf) continue;
-        const b = (child.window orelse continue).bounds;
-        if (cx >= b.origin.x and cx < b.origin.x + b.size.width and
-            cy >= b.origin.y and cy < b.origin.y + b.size.height)
-        {
-            const tmp = leaf.window;
-            leaf.window = child.window;
-            child.window = tmp;
-            leaf.id = leaf.window.?.id;
-            child.id = child.window.?.id;
-            return true;
-        }
+    if (findSiblingContainingPoint(parent, cx, cy, leaf)) |child| {
+        const tmp = leaf.window;
+        leaf.window = child.window;
+        child.window = tmp;
+        leaf.id = leaf.window.?.id;
+        child.id = child.window.?.id;
+        return true;
     }
     return false;
 }
@@ -961,7 +944,7 @@ test "moveLeafToWorkspace reparents the leaf and collapses the source" {
     try testing.expect(!moveLeafToWorkspace(alloc, a, ws2)); // already there
 }
 
-test "findTabSibling matches same-pid windows at an identical frame" {
+test "findLeafAtFrame matches same-pid windows at an identical frame" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -969,8 +952,8 @@ test "findTabSibling matches same-pid windows at an identical frame" {
     const ws = try makeCon(alloc, .Workspace, null, 0, 1);
     const a = try addLeaf(alloc, ws, testWindow(1, 10, testRect(50, 50, 800, 600)));
 
-    try testing.expectEqual(a, findTabSibling(ws, 10, testRect(50, 50, 800, 600)).?);
-    try testing.expectEqual(a, findTabSibling(ws, 10, testRect(51, 50, 800, 600)).?); // within eps
-    try testing.expect(findTabSibling(ws, 11, testRect(50, 50, 800, 600)) == null); // other app
-    try testing.expect(findTabSibling(ws, 10, testRect(60, 50, 800, 600)) == null); // frame differs
+    try testing.expectEqual(a, findLeafAtFrame(ws, 10, testRect(50, 50, 800, 600)).?);
+    try testing.expectEqual(a, findLeafAtFrame(ws, 10, testRect(51, 50, 800, 600)).?); // within eps
+    try testing.expect(findLeafAtFrame(ws, 11, testRect(50, 50, 800, 600)) == null); // other app
+    try testing.expect(findLeafAtFrame(ws, 10, testRect(60, 50, 800, 600)) == null); // frame differs
 }

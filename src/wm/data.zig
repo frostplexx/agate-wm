@@ -32,6 +32,14 @@ pub const Gaps = struct {
 /// Represents a rectangle, used for window bounds and screen dimensions.
 pub const Rect = macos.window_list.Rect;
 
+/// Check if two Rects are approximately equal within a given epsilon.
+pub fn rectApproxEq(a: Rect, b: Rect, eps: f64) bool {
+    return @abs(a.origin.x - b.origin.x) < eps and
+           @abs(a.origin.y - b.origin.y) < eps and
+           @abs(a.size.width - b.size.width) < eps and
+           @abs(a.size.height - b.size.height) < eps;
+}
+
 /// Represents a window managed by the window manager. Contains information about
 pub const Window = struct {
     id: u32,

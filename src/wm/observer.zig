@@ -440,7 +440,7 @@ fn onFrontWindowChanged(mgr: *Manager, observer: ax.AXObserverRef, element: ax.A
     const frame = macos.window_list.Rect{ .origin = pos, .size = sz };
     if (frame.size.width == 0 and frame.size.height == 0) return;
 
-    const leaf = findLeafAtFrame(root, pid, frame) orelse return; // not a tab of a tracked group
+    const leaf = tree.findLeafAtFrame(root, pid, frame) orelse return; // not a tab of a tracked group
     // Re-point the tab-group leaf at the front tab. Reuse the arena-owned owner
     // string (outlives the swap), release the stale element, re-arm destroy.
     const owner = (leaf.window orelse return).owner;
@@ -451,23 +451,6 @@ fn onFrontWindowChanged(mgr: *Manager, observer: ax.AXObserverRef, element: ax.A
     leaf.window.?.is_tabbed = true;
     if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, win.id);
     std.debug.print("[observer] ~tab #{d} {s} now front\n", .{ win.id, owner });
-}
-
-/// A leaf under `con` owned by `pid` whose window occupies (within a tight
-/// epsilon) `frame`. Identical frame + same app is the native-tab signal.
-fn findLeafAtFrame(con: *data.Con, pid: i32, frame: macos.window_list.Rect) ?*data.Con {
-    if (con.window) |w| {
-        const eps: f64 = 2;
-        if (w.pid == pid and
-            @abs(w.bounds.origin.x - frame.origin.x) < eps and
-            @abs(w.bounds.origin.y - frame.origin.y) < eps and
-            @abs(w.bounds.size.width - frame.size.width) < eps and
-            @abs(w.bounds.size.height - frame.size.height) < eps) return con;
-    }
-    for (con.children.items) |child| {
-        if (findLeafAtFrame(child, pid, frame)) |found| return found;
-    }
-    return null;
 }
 
 /// Heap context (gpa) carrying a matched key chord from the tap callback to the
@@ -579,15 +562,9 @@ fn onSpaceChanged(
     userdata: ?*anyopaque,
 ) callconv(.c) void {
     const mgr: *Manager = @ptrCast(@alignCast(userdata orelse return));
-    // Pick up Spaces created since startup (a new desktop, or the Space macOS
-    // opens for a native-fullscreen window) before tiling — otherwise switching
-    // to one finds no workspace and the flush/focus below would bail.
+    // Pick up Spaces and follow windows that changed Space without a
+    // create/destroy event (chiefly entering/leaving native fullscreen).
     _ = tree.reconcileSpaces(mgr.appState);
-    // Follow windows that changed Space without a create/destroy event — chiefly
-    // a window entering/leaving native fullscreen, which relocates it to/from a
-    // fullscreen Space. Re-homes the leaf so we stop tiling a now-fullscreen
-    // window (and resume when it returns).
-    _ = tree.reconcileWindowSpaces(mgr.appState);
     // Finish a move that was waiting on a window leaving native fullscreen (the
     // leaf is now back on a user Space, re-homed just above).
     lua_config.runPendingMove(mgr.appState);
@@ -988,15 +965,9 @@ fn updateDragPreview(mgr: *Manager) void {
     };
     const cx = frame.origin.x + frame.size.width / 2;
     const cy = frame.origin.y + frame.size.height / 2;
-    for (parent.children.items) |child| {
-        if (child == dragged) continue;
-        const b = (child.window orelse continue).bounds;
-        if (cx >= b.origin.x and cx < b.origin.x + b.size.width and
-            cy >= b.origin.y and cy < b.origin.y + b.size.height)
-        {
-            macos.overlay.show(b);
-            return;
-        }
+    if (tree.findSiblingContainingPoint(parent, cx, cy, dragged)) |child| {
+        macos.overlay.show(child.window.?.bounds);
+        return;
     }
     macos.overlay.hide();
 }
@@ -1381,7 +1352,7 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
     // simply gets its own (harmlessly overlapping) leaf.
     const frame_identity_is_tab = ws.layout == .H_SPLIT or ws.layout == .V_SPLIT;
     const frame_sibling: ?*data.Con = if (frame_identity_is_tab)
-        tree.findTabSibling(ws, win.pid, win.bounds)
+        tree.findLeafAtFrame(ws, win.pid, win.bounds)
     else
         null;
     if (frame_sibling) |leaf| {

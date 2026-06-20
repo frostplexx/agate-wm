@@ -53,19 +53,21 @@ pub fn exitActiveMode(cfg: *Config) void {
 // Key dispatch
 // ---------------------------------------------------------------------------
 
+fn findBinding(cfg: *const Config, keycode: u16, mods: u64) ?types.Binding {
+    const set = if (cfg.active_mode) |mi| cfg.modes.items[mi].bindings.items else cfg.bindings.items;
+    for (set) |b| {
+        if (b.keycode == keycode and b.modifiers == mods) return b;
+    }
+    return null;
+}
+
 /// Cheap test: does any registered binding match this chord? Called from inside
 /// the keyboard event tap to decide whether to swallow the keystroke, without
 /// running the (slow) action — the action runs deferred via `handleKey`.
 pub fn matchBinding(keycode: u16, raw_flags: u64) bool {
     const cfg = ctx.config orelse return false;
     const mods = raw_flags & MOD_MASK;
-    // In a mode the global keymap is suppressed: only the mode's own chords are
-    // swallowed; anything else falls through to the focused app (Hyprland submap).
-    const set = if (cfg.active_mode) |mi| cfg.modes.items[mi].bindings.items else cfg.bindings.items;
-    for (set) |b| {
-        if (b.keycode == keycode and b.modifiers == mods) return true;
-    }
-    return false;
+    return findBinding(cfg, keycode, mods) != null;
 }
 
 /// Run a binding's action: call its Lua function or execute its string command.
@@ -88,9 +90,7 @@ pub fn runAction(cfg: *Config, action: BindingAction) void {
 pub fn handleKey(keycode: u16, raw_flags: u64) bool {
     const cfg = ctx.config orelse return false;
     const mods = raw_flags & MOD_MASK;
-    const set = if (cfg.active_mode) |mi| cfg.modes.items[mi].bindings.items else cfg.bindings.items;
-    for (set) |b| {
-        if (b.keycode != keycode or b.modifiers != mods) continue;
+    if (findBinding(cfg, keycode, mods)) |b| {
         runAction(cfg, b.action);
         return true;
     }

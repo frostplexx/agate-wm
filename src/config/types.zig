@@ -20,6 +20,13 @@ pub const MOD_MASK: u64 = MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_CMD;
 pub const BindingAction = union(enum) {
     lua_fn: i32,     // Lua registry reference; call with protectedCall
     cmd: []const u8, // pre-parsed string command, owned by Config.alloc
+
+    pub fn deinit(self: BindingAction, alloc: std.mem.Allocator, lua: *Lua) void {
+        switch (self) {
+            .lua_fn => |r| lua.unref(zlua.registry_index, r),
+            .cmd => |s| alloc.free(s),
+        }
+    }
 };
 
 pub const Binding = struct {

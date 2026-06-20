@@ -105,8 +105,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
 
     const config_path = paths.findConfigPath(gpa) orelse {
         std.debug.print("[config] no init.lua found; using defaults\n", .{});
-        // Small Screen Mode is on by default, so it applies config or not.
-        if (small_screen.applySmallScreenMode(app)) tree.flushAllVisible(app);
+        _ = small_screen.applySmallScreenMode(app);
         return cfg;
     };
     defer gpa.free(config_path);
@@ -120,35 +119,20 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         cfg.lua.pop(1);
     };
 
-    // With the config settled, put workspaces into (or out of) Small Screen
-    // Mode for the current display and re-tile so it shows immediately.
-    if (small_screen.applySmallScreenMode(app)) tree.flushAllVisible(app);
+    // Apply Small Screen Mode now that the config is settled; wm.zig flushes
+    // after we return, so no flush needed here.
+    _ = small_screen.applySmallScreenMode(app);
 
     return cfg;
 }
 
 pub fn deinit(cfg: *Config) void {
-    for (cfg.bindings.items) |b| {
-        switch (b.action) {
-            .lua_fn => |r| cfg.lua.unref(zlua.registry_index, r),
-            .cmd => |s| cfg.alloc.free(s),
-        }
-    }
+    for (cfg.bindings.items) |b| b.action.deinit(cfg.alloc, cfg.lua);
     cfg.bindings.deinit(cfg.alloc);
-    for (cfg.gesture_bindings.items) |b| {
-        switch (b.action) {
-            .lua_fn => |r| cfg.lua.unref(zlua.registry_index, r),
-            .cmd => |s| cfg.alloc.free(s),
-        }
-    }
+    for (cfg.gesture_bindings.items) |b| b.action.deinit(cfg.alloc, cfg.lua);
     cfg.gesture_bindings.deinit(cfg.alloc);
     for (cfg.modes.items) |*m| {
-        for (m.bindings.items) |b| {
-            switch (b.action) {
-                .lua_fn => |r| cfg.lua.unref(zlua.registry_index, r),
-                .cmd => |s| cfg.alloc.free(s),
-            }
-        }
+        for (m.bindings.items) |b| b.action.deinit(cfg.alloc, cfg.lua);
         m.bindings.deinit(cfg.alloc);
         cfg.alloc.free(m.name);
     }
