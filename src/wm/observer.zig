@@ -849,11 +849,11 @@ fn onMouseUp(mgr: *Manager, drop: c.CGPoint) void {
         }
     }
 
-    // A displaced window whose centre now sits on another display is a
+    // A displaced window dropped (cursor at mouse-up) on another display is a
     // cross-monitor drag — handle that first (checked for both the resize and
     // move classifications, since a drop onto a smaller display can resize too).
-    // Gated on `draggedFar` so a window whose reported size jittered without
-    // actually moving isn't teleported across monitors by a stray drag.
+    // Gated on `draggedFar` so bounds jitter without real movement doesn't
+    // teleport the window across monitors.
     const mons = mbuf[0..nmon];
     if (scan.resized) |leaf| {
         if (draggedFar(leaf, scan.resized_frame) and moveDraggedAcrossMonitors(app, mons, leaf, drop)) return;
