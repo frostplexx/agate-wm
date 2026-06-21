@@ -204,6 +204,8 @@ pub fn moveFocusedToMonitor(app: *state.AppState, dir: focus.MonitorDir) void {
     const root = app.tree orelse return;
     const dst_ws = tree.findWorkspace(root, target_sid) orelse return;
     if (dst_ws == leaf.parent) return;
+    // Don't move into a display whose visible Space is native-fullscreen/system (other, non-fullscreen displays stay reachable).
+    if (dst_ws.space_type != 0) return;
     // Native fullscreen: exit it first, then finish the move (see runPendingMove).
     if (deferIfFullscreen(app, leaf, win.id, target_sid)) return;
     if (!macos.spaces.moveWindowToSpace(win.id, target_sid)) return;
