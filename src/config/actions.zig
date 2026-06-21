@@ -63,6 +63,19 @@ pub fn toggleZoomFullscreen(app: *state.AppState) void {
     if (win.fake_full_screen) _ = focus.focusLeaf(leaf);
 }
 
+/// Toggle native macOS fullscreen for the focused window (the green-button
+/// fullscreen: a separate Space with the standard transition). Flips the
+/// window's `AXFullScreen` attribute; macOS handles the Space and animation, and
+/// agate's observers pick up the resulting create/destroy events. Unlike
+/// `toggleZoomFullscreen`, this is real fullscreen, not the in-tile overlay.
+pub fn toggleNativeFullscreen(app: *state.AppState) void {
+    const leaf = focus.currentFocusedLeaf(app) orelse return;
+    const win = if (leaf.window) |*w| w else return;
+    const el = window.resolveElement(win) orelse return;
+    const on = el.getBool("AXFullScreen") orelse false;
+    _ = el.setBool("AXFullScreen", !on);
+}
+
 /// Toggle "floating" for the focused window (yabai's `window --toggle float`):
 /// flip its `floating` flag and re-tile. Layout skips a floating leaf, so the
 /// remaining tiles reflow to fill the space while the window keeps its current

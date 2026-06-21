@@ -109,6 +109,7 @@ pub fn handleKey(keycode: u16, raw_flags: u64) bool {
 // @doc C|move_to_monitor <dir>|Same as `agate.move_to_monitor(dir)`.
 // @doc C|exec <cmd>|Run a shell command in the background through `$SHELL -c`. Same as `agate.exec(cmd)`.
 // @doc C|zoom_fullscreen|Same as `agate.zoom_fullscreen()`.
+// @doc C|native_fullscreen|Same as `agate.native_fullscreen()`.
 // @doc C|toggle_float|Same as `agate.toggle_float()`.
 // @doc C|mode <name>|Same as `agate.enter_mode(name)`.
 // @doc C|exit_mode|Same as `agate.exit_mode()`.
@@ -171,6 +172,8 @@ pub fn executeCommand(cmd: []const u8) void {
         if (ctx.config) |cfg| exitActiveMode(cfg);
     } else if (std.mem.eql(u8, cmd, "zoom_fullscreen")) {
         actions.toggleZoomFullscreen(app);
+    } else if (std.mem.eql(u8, cmd, "native_fullscreen")) {
+        actions.toggleNativeFullscreen(app);
     } else if (std.mem.eql(u8, cmd, "toggle_float")) {
         actions.toggleFloat(app);
     } else if (std.mem.startsWith(u8, cmd, "exec ")) {

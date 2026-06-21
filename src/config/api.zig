@@ -429,6 +429,13 @@ fn agateZoomFullscreen(lua: *Lua) i32 {
     return 0;
 }
 
+// @doc F|native_fullscreen|Toggle native macOS fullscreen for the focused window — the green-button fullscreen that moves it to its own Space with the standard transition (toggle again to leave). Unlike `zoom_fullscreen`, this is real fullscreen, so you can drop Raycast/other tools' fullscreen keybind.
+fn agateNativeFullscreen(lua: *Lua) i32 {
+    _ = lua;
+    actions.toggleNativeFullscreen(ctx.appstate orelse return 0);
+    return 0;
+}
+
 // @doc F|toggle_float|Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
 fn agateToggleFloat(lua: *Lua) i32 {
     _ = lua;
@@ -756,6 +763,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "focus_app",   .func = zlua.wrap(agateFocusApp) },
     .{ .name = "join",        .func = zlua.wrap(agateJoin) },
     .{ .name = "zoom_fullscreen", .func = zlua.wrap(agateZoomFullscreen) },
+    .{ .name = "native_fullscreen", .func = zlua.wrap(agateNativeFullscreen) },
     .{ .name = "toggle_float", .func = zlua.wrap(agateToggleFloat) },
     .{ .name = "exec",        .func = zlua.wrap(agateExec) },
     .{ .name = "rule",        .func = zlua.wrap(agateRule) },
