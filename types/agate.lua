@@ -50,7 +50,7 @@
 ---@class agate.Rule
 ---@field app? string POSIX extended regex matched against the owning application's name, e.g. `"^Music$"`.
 ---@field title? string POSIX extended regex matched against the window title.
----@field space? integer 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
+---@field space? integer 1-based Space position (Mission Control order, fullscreen included) matched windows are sent to — or a string name registered with `agate.name_space` (which also supplies the monitor). Required unless `monitor` is given (then it defaults to that monitor's first Space).
 ---@field monitor? integer 1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the `space` position counts on; pins the app to that display. Omit for the focused display.
 ---@field follow? boolean Switch to that space along with the window (default `true`). Set `false` to route the window in the background — usually what you want when pinning to a monitor.
 ---@field floating? boolean Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
@@ -109,7 +109,7 @@ function agate.join(dir, mode) end
 ---Toggle "zoom fullscreen" for the focused window (yabai's `window --toggle zoom-fullscreen`): the window fills the whole space, overlapping the other tiles; toggle again to drop it back into the tiling. Not native macOS fullscreen — it stays on the same Space with no transition.
 function agate.zoom_fullscreen() end
 
----Toggle native macOS fullscreen for the focused window — the green-button fullscreen that moves it to its own Space with the standard transition (toggle again to leave). Unlike `zoom_fullscreen`, this is real fullscreen, so you can drop Raycast (or other tools') fullscreen keybind.
+---Toggle native macOS fullscreen for the focused window — the green-button fullscreen that moves it to its own Space with the standard transition (toggle again to leave). Unlike `zoom_fullscreen`, this is real fullscreen, so you can drop Raycast/other tools' fullscreen keybind.
 function agate.native_fullscreen() end
 
 ---Toggle floating for the focused window (yabai's `window --toggle float`): lift it out of the tiling so it keeps its own free position and size on top while the other tiles reflow without it; toggle again to drop it back into the layout. The window stays on the same Space and is still tracked, focusable, and closes normally.
@@ -119,9 +119,10 @@ function agate.toggle_float() end
 ---@param cmd string The shell command line to run.
 function agate.exec(cmd) end
 
----Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
----@param n integer 1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
-function agate.space(n) end
+---Switch to a Space, given either a 1-based position or a name registered with `agate.name_space`. A number counts every Space the swipe passes through on the focused display, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N). A name jumps to that named slot, switching the monitor it lives on (and focusing it). Pass a `monitor` to address a position on a specific display instead of the focused one.
+---@param target integer|string 1-based Space position (Mission Control order, fullscreen included), or a name registered with `agate.name_space`.
+---@param monitor? integer 1-based monitor (arrangement order, like `agate.monitors()` `id`) the position counts on, switching and focusing that display. Omit for the focused display. Ignored when `target` is a name (the name carries its own monitor).
+function agate.space(target, monitor) end
 
 ---Switch to the next Space on the focused display (one step in Mission Control order, fullscreen Spaces included).
 function agate.space_next() end
@@ -138,10 +139,16 @@ function agate.resize(target, amount) end
 ---@param dir agate.Direction Direction to move the window.
 function agate.move(dir) end
 
----Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
----@param n integer 1-based Space position (Mission Control order, fullscreen included) to send the window to.
----@param monitor? integer 1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
-function agate.move_to_space(n, monitor) end
+---Send the focused window to a user space (does not follow focus), given either a 1-based position or a name registered with `agate.name_space`. A name carries its own monitor; with a number, pass a `monitor` argument to target a Space on another display.
+---@param target integer|string 1-based Space position (Mission Control order, fullscreen included), or a name registered with `agate.name_space`.
+---@param monitor? integer 1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor. Ignored when `target` is a name (the name carries its own monitor).
+function agate.move_to_space(target, monitor) end
+
+---Give a (monitor, space) slot a name, so binds and rules can refer to it by name instead of by number. The name then works anywhere a Space number does — `agate.space`, `agate.move_to_space`, and `agate.rule`'s `space` field all accept it. Re-registering a name overwrites it, so a `monitors_changed` handler can remap names as displays come and go (e.g. a "music" space that lives on the built-in panel when docked and on the laptop's own Space otherwise).
+---@param name string The name to register, e.g. `"music"`.
+---@param target integer|table A 1-based Space position, or a table `{ space = N, monitor = M }` pinning it to monitor `M` (1-based arrangement, like `agate.rule`). With a bare number the monitor defaults to the focused display unless given as a third argument.
+---@param monitor? integer 1-based monitor the space lives on, when `target` is a number. Omit (or `0`) for the focused display.
+function agate.name_space(name, target, monitor) end
 
 ---Move keyboard focus to another display, raising its most-recently-used window (or warping the cursor to an empty display). No-op with a single display.
 ---@param dir agate.MonitorDir Which display to focus.

@@ -65,8 +65,13 @@ pub const Rule = struct {
     // @doc SR|title|string|true|POSIX extended regex matched against the window title.
     title: ?regexp.Regex = null,
     /// 1-based user-space index to send matched windows to (0 = unset/invalid).
-    // @doc SR|space|integer|true|1-based Space position (Mission Control order, fullscreen included) matched windows are sent to. Required unless `monitor` is given (then it defaults to that monitor's first Space).
+    // @doc SR|space|integer|true|1-based Space position (Mission Control order, fullscreen included) matched windows are sent to — or a string name registered with `agate.name_space` (which also supplies the monitor). Required unless `monitor` is given (then it defaults to that monitor's first Space).
     space: usize = 0,
+    /// When set, the name of a space registered with `agate.name_space`, resolved
+    /// to `space`/`monitor` at match time rather than at registration — so a
+    /// statically-registered rule keeps following a name that's remapped on
+    /// docking. Owned by `Config.alloc`; null = use the numeric `space`/`monitor`.
+    space_name: ?[]const u8 = null,
     /// 1-based monitor (spatial arrangement, left→right) the `space` index counts
     /// on. 0 = the focused display (the original behaviour). Set it to pin an app
     /// to a specific display; combined with `space` to pick which Space on it
@@ -85,6 +90,21 @@ pub const Rule = struct {
     /// or alongside a Space assignment to float it there.
     // @doc SR|floating|boolean|true|Float matched windows when they appear (like `agate.toggle_float()` applied automatically) — tracked but lifted out of the tiling. Can be the rule's only effect (no `space` needed), or combined with a Space/monitor assignment.
     floating: bool = false,
+};
+
+/// A named (monitor, space) slot registered with `agate.name_space`. Lets
+/// `agate.space`, `agate.move_to_space`, and `agate.rule` address a Space by name
+/// instead of by number: the name resolves to this 1-based `space` index on this
+/// 1-based `monitor` (arrangement order). `monitor == 0` means the focused
+/// display (the plain `agate.space(n)` behaviour).
+pub const NamedSpace = struct {
+    /// The registered name, owned by `Config.alloc`.
+    name: []const u8,
+    /// 1-based Mission Control position (fullscreen Spaces counted), like `agate.space`.
+    space: usize,
+    /// 1-based monitor arrangement (left→right, same as `agate.monitors()` `id`);
+    /// 0 = the focused display.
+    monitor: usize = 0,
 };
 
 pub const Config = struct {
@@ -146,6 +166,11 @@ pub const Config = struct {
     /// Window assignment rules in registration order. All matching rules
     /// combine; the last match wins (yabai's `rule_combine_effects` order).
     rules: std.ArrayList(Rule),
+    /// Named (monitor, space) slots registered with `agate.name_space`, resolved
+    /// by name in `agate.space`, `agate.move_to_space`, and `agate.rule`'s
+    /// `space` field. Re-registering a name overwrites it (so a
+    /// `monitors_changed` handler can remap names on dock/undock).
+    named_spaces: std.ArrayList(NamedSpace),
     /// Event callbacks registered with `agate.on`, in registration order; all
     /// handlers for a fired event run (see `events.emit`).
     event_handlers: std.ArrayList(events.Handler),

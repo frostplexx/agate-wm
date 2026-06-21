@@ -97,6 +97,7 @@ pub fn init(gpa: std.mem.Allocator, app: *state.AppState) !*Config {
         .gesture_bindings = .empty,
         .modes = .empty,
         .rules = .empty,
+        .named_spaces = .empty,
         .event_handlers = .empty,
         .lua = try Lua.init(gpa),
     };
@@ -139,8 +140,10 @@ pub fn deinit(cfg: *Config) void {
         cfg.alloc.free(m.name);
     }
     cfg.modes.deinit(cfg.alloc);
-    for (cfg.rules.items) |r| rules.freeRule(r);
+    for (cfg.rules.items) |r| rules.freeRule(cfg.alloc, r);
     cfg.rules.deinit(cfg.alloc);
+    for (cfg.named_spaces.items) |ns| cfg.alloc.free(ns.name);
+    cfg.named_spaces.deinit(cfg.alloc);
     for (cfg.event_handlers.items) |h| cfg.lua.unref(zlua.registry_index, h.lua_fn);
     cfg.event_handlers.deinit(cfg.alloc);
     cfg.lua.deinit();

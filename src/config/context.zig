@@ -31,6 +31,17 @@ pub fn hyperEnabled() bool {
     return cfg.hyper_enabled;
 }
 
+/// Resolve a space name registered with `agate.name_space` to its (monitor,
+/// space) slot, or null if no named space carries that name. Shared by the
+/// `agate.*` marshalling (`api.zig`) and rule matching (`rules.zig`).
+pub fn lookupNamedSpace(name: []const u8) ?types.NamedSpace {
+    const cfg = config orelse return null;
+    for (cfg.named_spaces.items) |ns| {
+        if (std.mem.eql(u8, ns.name, name)) return ns;
+    }
+    return null;
+}
+
 /// Whether the menu-bar space indicator is enabled (config `space_indicator`).
 pub fn spaceIndicatorEnabled() bool {
     const cfg = config orelse return true;

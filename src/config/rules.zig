@@ -13,9 +13,10 @@ const regexp = @import("../lib/regexp.zig");
 const types = @import("types.zig");
 const ctx = @import("context.zig");
 
-pub fn freeRule(rule: types.Rule) void {
+pub fn freeRule(alloc: std.mem.Allocator, rule: types.Rule) void {
     if (rule.app) |re| re.deinit();
     if (rule.title) |re| re.deinit();
+    if (rule.space_name) |n| alloc.free(n);
 }
 
 /// Match `re` against a non-sentinel slice by copying it into a stack buffer
@@ -44,8 +45,20 @@ fn matchRules(app_name: []const u8, title: []const u8) ?struct { space: usize, m
         if (r.title) |re| {
             if (!regexMatches(re, title)) continue;
         }
-        space = r.space;
-        monitor = r.monitor;
+        // A named space resolves here, at match time, so the rule tracks a name
+        // remapped on docking; an unknown name voids only this rule's Space effect.
+        if (r.space_name) |name| {
+            if (ctx.lookupNamedSpace(name)) |ns| {
+                space = ns.space;
+                monitor = ns.monitor;
+            } else {
+                space = 0;
+                monitor = 0;
+            }
+        } else {
+            space = r.space;
+            monitor = r.monitor;
+        }
         follow = r.follow;
         floating = r.floating;
     }

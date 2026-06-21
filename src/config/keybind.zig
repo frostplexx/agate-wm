@@ -159,7 +159,7 @@ pub fn executeCommand(cmd: []const u8) void {
         macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
     } else if (std.mem.startsWith(u8, cmd, "move_to_space ")) {
         const n = std.fmt.parseInt(usize, cmd[14..], 10) catch return;
-        actions.moveFocusedToSpace(app, n);
+        actions.moveFocusedToSpace(app, 0, n);
     } else if (std.mem.startsWith(u8, cmd, "focus_monitor ")) {
         const dir = parse.parseMonitorDir(cmd[14..]) orelse return;
         _ = focus.focusMonitor(app, dir);

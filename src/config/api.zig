@@ -452,13 +452,31 @@ fn agateExec(lua: *Lua) i32 {
     return 0;
 }
 
-// @doc F|space|Switch to the Nth Space on the focused display. Counts every Space the swipe passes through, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N).
-// @doc FP|space|n|integer|false|1-based Space position on the focused display, in Mission Control order (fullscreen Spaces included).
+// @doc F|space|Switch to a Space, given either a 1-based position or a name registered with `agate.name_space`. A number counts every Space the swipe passes through on the focused display, in Mission Control order — including native-fullscreen Spaces (so a fullscreened app at strip position N is reached by N). A name jumps to that named slot, switching the monitor it lives on (and focusing it). Pass a `monitor` to address a position on a specific display instead of the focused one.
+// @doc FP|space|target|integer|string|false|1-based Space position (Mission Control order, fullscreen included), or a name registered with `agate.name_space`.
+// @doc FP|space|monitor|integer|true|1-based monitor (arrangement order, like `agate.monitors()` `id`) the position counts on, switching and focusing that display. Omit for the focused display. Ignored when `target` is a name (the name carries its own monitor).
 fn agateSpace(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
+    // A string argument is a named space (agate.name_space); it carries its own
+    // monitor. `actions.focusSpace` handles monitor 0 (the focused display) too,
+    // so every form funnels through the one call.
+    if (lua.typeOf(1) == .string) {
+        const name = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+        const ns = ctx.lookupNamedSpace(name) orelse {
+            std.debug.print("[config] agate.space: unknown space name '{s}'\n", .{name});
+            return 0;
+        };
+        actions.focusSpace(app, ns.monitor, ns.space);
+        return 0;
+    }
     const n = lua.toInteger(1) catch return 0;
     if (n < 1) return 0;
-    macos.spaces.switchToIndex(app.gpa, app.skylight_cid, @intCast(n)) catch {};
+    // Optional monitor argument (0 = focused display).
+    const mon: usize = if (lua.isNumber(2)) blk: {
+        const m = lua.toInteger(2) catch 0;
+        break :blk if (m >= 1) @as(usize, @intCast(m)) else 0;
+    } else 0;
+    actions.focusSpace(app, mon, @intCast(n));
     return 0;
 }
 
@@ -513,21 +531,86 @@ fn agateMove(lua: *Lua) i32 {
 /// `n`. With a second argument it targets space `n` on monitor `monitor`
 /// (1-based, in display order) — so a window can be assigned to a Space on
 /// another display; without it, the focused display.
-// @doc F|move_to_space|Send the focused window to user space N (does not follow focus). With a monitor argument, the space on that display.
-// @doc FP|move_to_space|n|integer|false|1-based Space position (Mission Control order, fullscreen included) to send the window to.
-// @doc FP|move_to_space|monitor|integer|true|1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor.
+// @doc F|move_to_space|Send the focused window to a user space (does not follow focus), given either a 1-based position or a name registered with `agate.name_space`. A name carries its own monitor; with a number, pass a `monitor` argument to target a Space on another display.
+// @doc FP|move_to_space|target|integer|string|false|1-based Space position (Mission Control order, fullscreen included), or a name registered with `agate.name_space`.
+// @doc FP|move_to_space|monitor|integer|true|1-based monitor (spatial arrangement, left→right — same as `agate.monitors()` `id`) the position counts on. Omit for the focused display — pass it to assign the window to a Space on another monitor. Ignored when `target` is a name (the name carries its own monitor).
 fn agateMoveToSpace(lua: *Lua) i32 {
     const app = ctx.appstate orelse return 0;
+    // A string argument is a named space (agate.name_space), which carries its own
+    // monitor; a number takes an optional monitor (0 = focused display).
+    if (lua.typeOf(1) == .string) {
+        const name = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+        const ns = ctx.lookupNamedSpace(name) orelse {
+            std.debug.print("[config] agate.move_to_space: unknown space name '{s}'\n", .{name});
+            return 0;
+        };
+        actions.moveFocusedToSpace(app, ns.monitor, ns.space);
+        return 0;
+    }
     const n = lua.toInteger(1) catch return 0;
     if (n < 1) return 0;
+    const mon: usize = if (lua.isNumber(2)) blk: {
+        const m = lua.toInteger(2) catch 0;
+        break :blk if (m >= 1) @as(usize, @intCast(m)) else 0;
+    } else 0;
+    actions.moveFocusedToSpace(app, mon, @intCast(n));
+    return 0;
+}
+
+/// `agate.name_space(name, target [, monitor])` — give a (monitor, space) slot a
+/// name. `target` is a 1-based space index, or a table `{ space = N, monitor = M }`.
+/// Registered names work anywhere a Space number does: `agate.space`,
+/// `agate.move_to_space`, and `agate.rule`'s `space` field. Re-registering a name
+/// overwrites it, so a `monitors_changed` handler can remap names on dock/undock.
+// @doc F|name_space|Give a (monitor, space) slot a name, so binds and rules can refer to it by name instead of by number. The name then works anywhere a Space number does — `agate.space`, `agate.move_to_space`, and `agate.rule`'s `space` field all accept it. Re-registering a name overwrites it, so a `monitors_changed` handler can remap names as displays come and go (e.g. a "music" space that lives on the built-in panel when docked and on the laptop's own Space otherwise).
+// @doc FP|name_space|name|string|false|The name to register, e.g. `"music"`.
+// @doc FP|name_space|target|integer|table|false|A 1-based Space position, or a table `{ space = N, monitor = M }` pinning it to monitor `M` (1-based arrangement, like `agate.rule`). With a bare number the monitor defaults to the focused display unless given as a third argument.
+// @doc FP|name_space|monitor|integer|true|1-based monitor the space lives on, when `target` is a number. Omit (or `0`) for the focused display.
+fn agateNameSpace(lua: *Lua) i32 {
+    const cfg = ctx.config orelse return 0;
+    const name = std.mem.sliceTo(lua.toString(1) catch return 0, 0);
+    if (name.len == 0) return 0;
+
+    var space_n: usize = 0;
+    var monitor: usize = 0;
     if (lua.isNumber(2)) {
-        const mon = lua.toInteger(2) catch 0;
-        if (mon >= 1) {
-            actions.moveFocusedToSpaceOnMonitor(app, @intCast(mon), @intCast(n));
+        const s = lua.toInteger(2) catch 0;
+        if (s >= 1) space_n = @intCast(s);
+        if (lua.isNumber(3)) {
+            const m = lua.toInteger(3) catch 0;
+            if (m >= 1) monitor = @intCast(m);
+        }
+    } else if (lua.isTable(2)) {
+        _ = lua.getField(2, "space");
+        if (lua.isNumber(-1)) {
+            const s = lua.toInteger(-1) catch 0;
+            if (s >= 1) space_n = @intCast(s);
+        }
+        lua.pop(1);
+        _ = lua.getField(2, "monitor");
+        if (lua.isNumber(-1)) {
+            const m = lua.toInteger(-1) catch 0;
+            if (m >= 1) monitor = @intCast(m);
+        }
+        lua.pop(1);
+    }
+    if (space_n == 0) {
+        std.debug.print("[config] agate.name_space('{s}'): needs a space index >= 1\n", .{name});
+        return 0;
+    }
+    // Overwrite an existing entry with the same name so a monitors_changed
+    // handler can remap names on dock/undock without piling up duplicates.
+    for (cfg.named_spaces.items) |*ns| {
+        if (std.mem.eql(u8, ns.name, name)) {
+            ns.space = space_n;
+            ns.monitor = monitor;
             return 0;
         }
     }
-    actions.moveFocusedToSpace(app, @intCast(n));
+    const owned = cfg.alloc.dupe(u8, name) catch return 0;
+    cfg.named_spaces.append(cfg.alloc, .{ .name = owned, .space = space_n, .monitor = monitor }) catch {
+        cfg.alloc.free(owned);
+    };
     return 0;
 }
 
@@ -667,7 +750,13 @@ fn agateRule(lua: *Lua) i32 {
     var rule = Rule{};
 
     _ = lua.getField(1, "space");
-    if (lua.isNumber(-1)) {
+    if (lua.typeOf(-1) == .string) {
+        // Store the name rather than resolving it now: rules.matchRules looks it
+        // up when a window appears, so the rule follows a name that's remapped on
+        // docking (the name supplies both the space index and its monitor).
+        const name = std.mem.sliceTo(lua.toString(-1) catch "", 0);
+        rule.space_name = cfg.alloc.dupe(u8, name) catch null;
+    } else if (lua.isNumber(-1)) {
         const n = lua.toInteger(-1) catch 0;
         if (n >= 1) rule.space = @intCast(n);
     }
@@ -710,12 +799,12 @@ fn agateRule(lua: *Lua) i32 {
     }
     lua.pop(1);
 
-    if ((rule.app == null and rule.title == null) or (rule.space == 0 and !rule.floating)) {
+    if ((rule.app == null and rule.title == null) or (rule.space == 0 and rule.space_name == null and !rule.floating)) {
         std.debug.print("[config] rule needs an app or title matcher, and a space/monitor or floating=true; ignored\n", .{});
-        rules.freeRule(rule);
+        rules.freeRule(cfg.alloc, rule);
         return 0;
     }
-    cfg.rules.append(cfg.alloc, rule) catch rules.freeRule(rule);
+    cfg.rules.append(cfg.alloc, rule) catch rules.freeRule(cfg.alloc, rule);
     return 0;
 }
 
@@ -727,7 +816,7 @@ fn agateRule(lua: *Lua) i32 {
 fn agateClearRules(lua: *Lua) i32 {
     _ = lua;
     const cfg = ctx.config orelse return 0;
-    for (cfg.rules.items) |r| rules.freeRule(r);
+    for (cfg.rules.items) |r| rules.freeRule(cfg.alloc, r);
     cfg.rules.clearRetainingCapacity();
     return 0;
 }
@@ -755,6 +844,7 @@ const agate_fns = [_]zlua.FnReg{
     .{ .name = "resize",      .func = zlua.wrap(agateResize) },
     .{ .name = "move",        .func = zlua.wrap(agateMove) },
     .{ .name = "move_to_space", .func = zlua.wrap(agateMoveToSpace) },
+    .{ .name = "name_space",  .func = zlua.wrap(agateNameSpace) },
     .{ .name = "focus_monitor", .func = zlua.wrap(agateFocusMonitor) },
     .{ .name = "move_to_monitor", .func = zlua.wrap(agateMoveToMonitor) },
     .{ .name = "monitors",    .func = zlua.wrap(agateMonitors) },

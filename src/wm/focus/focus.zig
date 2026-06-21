@@ -305,10 +305,24 @@ fn focusMonitorInfo(appState: *state.AppState, mi: tree.MonitorInfo) bool {
     return warpToFrame(mi.frame);
 }
 
-fn warpToFrame(frame: macos.window_list.Rect) bool {
-    _ = CGWarpMouseCursorPosition(.{
-        .x = frame.origin.x + frame.size.width / 2,
-        .y = frame.origin.y + frame.size.height / 2,
-    });
+/// Raise the most-recently-used window on Space `sid` — which switches that
+/// window's display to the Space and moves focus there. This window-raise is the
+/// reliable cross-display Space switch: it works on a non-active display, where
+/// the swipe gesture can't reach and the direct SkyLight set is flaky on current
+/// macOS. Returns false when the Space has no tracked window, so the caller can
+/// fall back to the gesture/SkyLight path.
+pub fn raiseOnSpace(appState: *state.AppState, sid: u64) bool {
+    const root = appState.tree orelse return false;
+    const ws = tree.findWorkspace(root, sid) orelse return false;
+    if (ws.children.items.len == 0) return false;
+    return focusMostRecent(ws);
+}
+
+fn warpTo(x: f64, y: f64) bool {
+    _ = CGWarpMouseCursorPosition(.{ .x = x, .y = y });
     return true;
+}
+
+fn warpToFrame(frame: macos.window_list.Rect) bool {
+    return warpTo(frame.origin.x + frame.size.width / 2, frame.origin.y + frame.size.height / 2);
 }

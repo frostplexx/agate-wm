@@ -282,6 +282,51 @@ pub fn userSpaceIdOnDisplay(alloc: Allocator, cid: sl.ConnectionID, display_inde
     return null;
 }
 
+/// The `display_index` of Space `sid` within `all`, or null.
+fn displayOfSpace(all: []const Space, sid: u64) ?usize {
+    for (all) |sp| if (sp.id == sid) return sp.display_index;
+    return null;
+}
+
+/// A resolved Space switch target: the Space id, plus whether the active
+/// (menu-bar) Space is on that same display — i.e. whether the Dock-swipe
+/// gesture, which only drives the active display, can reach it.
+pub const SpaceTarget = struct { sid: u64, active_on_same_display: bool };
+
+/// Resolve the 1-based position `n` on display `display_index` to its Space id
+/// and whether that display is the active one, in a single `allSpaces` pass — so
+/// a caller can pick the gesture (active display) over the direct SkyLight set
+/// (secondary display) without a second query. Null if `n` is past the strip.
+pub fn resolveSpaceTarget(alloc: Allocator, cid: sl.ConnectionID, display_index: usize, n: usize) !?SpaceTarget {
+    if (n == 0) return null;
+    const active = activeSpace(cid);
+    const all = try allSpaces(alloc, cid);
+    defer alloc.free(all);
+    var sid: ?u64 = null;
+    var active_di: ?usize = null;
+    var seen: usize = 0;
+    for (all) |sp| {
+        if (active != null and sp.id == active.?) active_di = sp.display_index;
+        if (sid == null and sp.display_index == display_index) {
+            seen += 1;
+            if (seen == n) sid = sp.id;
+        }
+    }
+    return .{ .sid = sid orelse return null, .active_on_same_display = active_di != null and active_di.? == display_index };
+}
+
+/// Whether Space `sid` shares a display with the active (menu-bar) Space — i.e.
+/// the gesture can reach it. The window-targeted counterpart of `resolveSpaceTarget`.
+pub fn spaceOnActiveDisplay(alloc: Allocator, cid: sl.ConnectionID, sid: u64) bool {
+    const active = activeSpace(cid) orelse return false;
+    if (active == sid) return true;
+    const all = allSpaces(alloc, cid) catch return false;
+    defer alloc.free(all);
+    const a = displayOfSpace(all, active) orelse return false;
+    const s = displayOfSpace(all, sid) orelse return false;
+    return a == s;
+}
+
 /// The 1-based Mission Control position of the currently active Space on the
 /// focused display (every Space counted) — the number `agate.space(n)` reaches
 /// it with, and what the menu-bar indicator shows. Null if it can't be resolved.
