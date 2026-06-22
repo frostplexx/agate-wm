@@ -326,3 +326,19 @@ fn warpTo(x: f64, y: f64) bool {
 fn warpToFrame(frame: macos.window_list.Rect) bool {
     return warpTo(frame.origin.x + frame.size.width / 2, frame.origin.y + frame.size.height / 2);
 }
+
+/// Ensure the mouse cursor sits on the display whose visible frame is `frame`,
+/// warping it to the frame's center only if it's currently elsewhere. The
+/// synthetic Dock-swipe Space gesture acts on the display UNDER THE CURSOR, not
+/// the menu-bar-active display, so a gesture meant for a specific monitor lands
+/// on the wrong screen when the cursor is on another display (e.g. after a prior
+/// window-raise moved the menu bar but not the pointer). Mirrors yabai's
+/// `space_manager_focus_space_using_gesture` cursor warp.
+pub fn ensureCursorOnFrame(frame: macos.window_list.Rect) void {
+    const ev = macos.event_tap.CGEventCreate(null) orelse return;
+    defer macos.c.CFRelease(@ptrCast(ev));
+    const p = macos.event_tap.CGEventGetLocation(ev);
+    if (p.x >= frame.origin.x and p.x < frame.origin.x + frame.size.width and
+        p.y >= frame.origin.y and p.y < frame.origin.y + frame.size.height) return;
+    _ = warpToFrame(frame);
+}

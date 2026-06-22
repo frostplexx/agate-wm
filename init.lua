@@ -134,11 +134,11 @@ local function name_spaces()
     -- comms/music: docked, they live on the built-in panel (spaces 2 and 3); on
     -- the laptop alone they move to its own spaces 4 and 5.
     if internal_id and external_count > 0 then
-        agate.name_space("comms", { monitor = internal_id, space = 2 })
-        agate.name_space("music", { monitor = internal_id, space = 3 })
+        agate.name_space("comms", { monitor = small, space = 2 })
+        agate.name_space("music", { monitor = small, space = 3 })
     else
-        agate.name_space("comms", { space = 4 })
-        agate.name_space("music", { space = 5 })
+        agate.name_space("comms", { monitor = big, space = 4 })
+        agate.name_space("music", { monitor = big, space = 5 })
     end
 end
 

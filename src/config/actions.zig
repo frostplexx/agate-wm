@@ -93,15 +93,21 @@ pub fn toggleFloat(app: *state.AppState) void {
 
 /// Show Space `t.sid` on display `mon` and move focus there — the shared core of
 /// named-space focus. When the Space is on the active display, the swipe gesture
-/// gives the same instant switch as `agate.space(n)` and reliably drives it. A
-/// Space on a secondary display, which the gesture can't reach, is shown by
-/// raising a window on it (the reliable cross-display switch), falling back to a
-/// direct SkyLight set when the Space is empty.
+/// gives the same instant switch as `agate.space(n)` and reliably drives it — but
+/// the synthetic swipe acts on the display under the CURSOR, so the cursor must be
+/// warped onto `mon` first (the menu-bar-active display and the cursor's display
+/// can diverge, e.g. right after a window-raise focused another monitor). A Space
+/// on a secondary display is switched via SkyLight first (making the space visible
+/// on that display), then a window raise moves focus there. The SkyLight call must
+/// come first: AX raise only reliably transfers focus when the window's space is
+/// already the visible space on its display.
 fn revealSpace(app: *state.AppState, mon: macos.monitor.Monitor, t: macos.spaces.SpaceTarget) void {
     if (t.active_on_same_display) {
+        focus.ensureCursorOnFrame(mon.frame);
         macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, t.sid) catch {};
-    } else if (!focus.raiseOnSpace(app, t.sid)) {
+    } else {
         macos.spaces.setDisplaySpace(app.skylight_cid, mon.uuidSlice(), t.sid);
+        _ = focus.raiseOnSpace(app, t.sid);
     }
 }
 
