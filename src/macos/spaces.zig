@@ -116,6 +116,17 @@ pub fn setDisplaySpace(cid: sl.ConnectionID, uuid: []const u8, sid: u64) void {
     sl.SLSManagedDisplaySetCurrentSpace(cid, s.ref(), sid);
 }
 
+/// Hand menu-bar ownership to the display identified by `uuid`. A Dock-swipe
+/// gesture switches the *visible* Space of the display under the cursor but does
+/// NOT update which display owns the menu bar, so after a cross-display switch the
+/// previous display's menu bar lingers and overlaps the new app's — call this with
+/// the now-focused display's UUID to fix it. `uuid` is a "Display Identifier".
+pub fn setActiveMenuBarDisplay(cid: sl.ConnectionID, uuid: []const u8) void {
+    const s = String.createUtf8(uuid) catch return;
+    defer s.release();
+    sl.SLSSetActiveMenuBarDisplayIdentifier(cid, s.ref(), s.ref());
+}
+
 /// The currently active Space id on the focused display (the one owning the
 /// active menu bar). Null if it can't be determined.
 pub fn activeSpace(cid: sl.ConnectionID) ?u64 {

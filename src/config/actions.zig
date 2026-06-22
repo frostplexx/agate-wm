@@ -101,6 +101,11 @@ pub fn toggleFloat(app: *state.AppState) void {
 /// on that display), then a window raise moves focus there. The SkyLight call must
 /// come first: AX raise only reliably transfers focus when the window's space is
 /// already the visible space on its display.
+///
+/// Either way the switch changes which display the user is on but NOT which display
+/// owns the menu bar, so the previous display's menu bar lingers and overlaps the
+/// new app's — hand the menu bar to `mon` afterward (mirrors yabai's
+/// `display_manager_set_active_display_id` after its gesture).
 fn revealSpace(app: *state.AppState, mon: macos.monitor.Monitor, t: macos.spaces.SpaceTarget) void {
     if (t.active_on_same_display) {
         focus.ensureCursorOnFrame(mon.frame);
@@ -109,6 +114,7 @@ fn revealSpace(app: *state.AppState, mon: macos.monitor.Monitor, t: macos.spaces
         macos.spaces.setDisplaySpace(app.skylight_cid, mon.uuidSlice(), t.sid);
         _ = focus.raiseOnSpace(app, t.sid);
     }
+    macos.spaces.setActiveMenuBarDisplay(app.skylight_cid, mon.uuidSlice());
 }
 
 /// Focus the app whose window owner contains `name`, wherever it lives: switch the

@@ -36,6 +36,12 @@ pub extern fn CGSMainConnectionID() ConnectionID;
 /// UUID of the display owning the active menu bar (the focused display). Caller
 /// owns the returned CFString.
 pub extern fn SLSCopyActiveMenuBarDisplayIdentifier(cid: ConnectionID) c.CFStringRef;
+/// Move menu-bar ownership to the display with UUID `uuid` (both args are the same
+/// UUID, mirroring yabai's `display_manager_set_active_display_id`). After a
+/// cross-display Space switch the gesture changes the *visible* Space but not which
+/// display owns the menu bar, so the old display's menu bar lingers and overlaps
+/// the new one — this call hands the menu bar to the now-focused display.
+pub extern fn SLSSetActiveMenuBarDisplayIdentifier(cid: ConnectionID, uuid: c.CFStringRef, uuid2: c.CFStringRef) void;
 /// Current space id for the display with the given UUID.
 pub extern fn SLSManagedDisplayGetCurrentSpace(cid: ConnectionID, uuid: c.CFStringRef) u64;
 /// Switch the active Space on the given display to `space_id`. On its own this
