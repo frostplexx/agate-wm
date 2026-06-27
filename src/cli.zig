@@ -11,50 +11,82 @@ const ipc = @import("ipc.zig");
 
 const Args = std.process.Args.Iterator;
 
+const Cmd = enum {
+    list_windows, list_workspaces, list_monitors,
+    version, help, config, config_show, status, stop,
+};
+
+const cmd_map = std.StaticStringMap(Cmd).initComptime(.{
+    .{ "list-windows",   .list_windows },
+    .{ "list-workspaces", .list_workspaces },
+    .{ "list-monitors",  .list_monitors },
+    .{ "version",        .version },
+    .{ "-v",             .version },
+    .{ "--version",      .version },
+    .{ "help",           .help },
+    .{ "-h",             .help },
+    .{ "--help",         .help },
+    .{ "config",         .config },
+    .{ "config-path",    .config },
+    .{ "config-show",    .config_show },
+    .{ "print-config",   .config_show },
+    .{ "status",         .status },
+    .{ "stop",           .stop },
+});
+
 /// Handle a CLI subcommand and return the process exit code. `args` is the
 /// argument iterator positioned just past the subcommand (for trailing flags).
 pub fn run(init: std.process.Init, sub: []const u8, args: *Args) u8 {
     const alloc = init.gpa;
-    const eql = std.mem.eql;
 
-    if (eql(u8, sub, "list-windows") or
-        eql(u8, sub, "list-workspaces") or eql(u8, sub, "list-monitors"))
-    {
-        return listQuery(init, sub, args);
-    } else if (eql(u8, sub, "version") or eql(u8, sub, "-v") or eql(u8, sub, "--version")) {
-        std.debug.print("agate {s}\n", .{build_options.version});
-        return 0;
-    } else if (eql(u8, sub, "help") or eql(u8, sub, "-h") or eql(u8, sub, "--help")) {
-        printUsage();
-        return 0;
-    } else if (eql(u8, sub, "config") or eql(u8, sub, "config-path")) {
-        const p = paths.findConfigPath(alloc) orelse {
-            std.debug.print("no config file found (searched $WM_CONFIG, $XDG_CONFIG_HOME/agate/init.lua, ~/.config/agate/init.lua, ./init.lua)\n", .{});
-            return 1;
-        };
-        defer alloc.free(p);
-        std.debug.print("{s}\n", .{p});
-        return 0;
-    } else if (eql(u8, sub, "config-show") or eql(u8, sub, "print-config")) {
-        return showConfig(init);
-    } else if (eql(u8, sub, "status")) {
-        if (lock.runningPid(alloc)) |pid| {
-            if (pid > 0) std.debug.print("running (pid {d})\n", .{pid}) else std.debug.print("running\n", .{});
-        } else {
-            std.debug.print("not running\n", .{});
-        }
-        return 0;
-    } else if (eql(u8, sub, "stop")) {
-        if (lock.stop(alloc)) {
-            std.debug.print("stopped\n", .{});
-            return 0;
-        }
-        std.debug.print("agate is not running\n", .{});
-        return 1;
-    } else {
+    const cmd = cmd_map.get(sub) orelse {
         std.debug.print("unknown command: {s}\n\n", .{sub});
         printUsage();
         return 2;
+    };
+
+    switch (cmd) {
+        .list_windows, .list_workspaces, .list_monitors => return listQuery(init, sub, args),
+
+        .version => {
+            std.debug.print("agate {s}\n", .{build_options.version});
+            return 0;
+        },
+
+        .help => {
+            printUsage();
+            return 0;
+        },
+
+        .config => {
+            const p = paths.findConfigPath(alloc) orelse {
+                std.debug.print("no config file found (searched $WM_CONFIG, $XDG_CONFIG_HOME/agate/init.lua, ~/.config/agate/init.lua, ./init.lua)\n", .{});
+                return 1;
+            };
+            defer alloc.free(p);
+            std.debug.print("{s}\n", .{p});
+            return 0;
+        },
+
+        .config_show => return showConfig(init),
+
+        .status => {
+            if (lock.runningPid(alloc)) |pid| {
+                if (pid > 0) std.debug.print("running (pid {d})\n", .{pid}) else std.debug.print("running\n", .{});
+            } else {
+                std.debug.print("not running\n", .{});
+            }
+            return 0;
+        },
+
+        .stop => {
+            if (lock.stop(alloc)) {
+                std.debug.print("stopped\n", .{});
+                return 0;
+            }
+            std.debug.print("agate is not running\n", .{});
+            return 1;
+        },
     }
 }
 
