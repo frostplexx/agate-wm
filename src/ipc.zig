@@ -12,6 +12,7 @@ const state = @import("state.zig");
 const data = @import("wm/data.zig");
 const tree = @import("wm/tree.zig");
 const focus = @import("wm/focus/focus.zig");
+const wm_window = @import("wm/window.zig");
 
 // POSIX socket bits (not surfaced by the Zig 0.16 std the way we need); declared
 // directly like the rest of the codebase does for libc calls.
@@ -222,12 +223,12 @@ fn writeJsonStr(w: *std.Io.Writer, s: []const u8) !void {
     };
 }
 
+// JSON streaming context (text path uses a collect-then-format approach instead).
 const WinCtx = struct {
     w: *std.Io.Writer,
     focused: ?*data.Con,
     mon_no: usize,
     ws_no: usize,
-    json: bool,
     first: *bool,
 };
 
@@ -239,22 +240,161 @@ fn writeWindows(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
     const focused = focus.currentFocusedLeaf(app);
     var mbuf: [focus.max_monitors]tree.MonitorInfo = undefined;
     const mons = mbuf[0..tree.collectMonitors(app, &mbuf)];
-    var first = true;
-    if (json) try w.writeAll("[");
+
+    if (json) {
+        var first = true;
+        try w.writeAll("[");
+        for (root.children.items) |mon| {
+            if (mon.con_type != .Monitor) continue;
+            const mon_no = monitorNumberOf(mons, mon);
+            for (mon.children.items, 1..) |ws, wi| {
+                if (ws.con_type != .Workspace) continue;
+                var ctx = WinCtx{ .w = w, .focused = focused, .mon_no = mon_no, .ws_no = wi, .first = &first };
+                try walkLeaves(&ctx, ws);
+            }
+        }
+        try w.writeAll("]\n");
+        return;
+    }
+
+    // Text path: collect all rows first so we can measure column widths.
+    const TextRow = struct {
+        id: u32,
+        app: []const u8,    // points into tree arena; not owned here
+        title: []const u8,  // gpa-owned; always free
+        ws: usize,
+        mon: usize,
+        layout: data.Layout,
+        focused: bool,
+        fullscreen: bool,
+        floating: bool,
+    };
+
+    var rows: std.ArrayList(TextRow) = .empty;
+    defer {
+        for (rows.items) |r| app.gpa.free(r.title);
+        rows.deinit(app.gpa);
+    }
+
     for (root.children.items) |mon| {
         if (mon.con_type != .Monitor) continue;
         const mon_no = monitorNumberOf(mons, mon);
         for (mon.children.items, 1..) |ws, wi| {
             if (ws.con_type != .Workspace) continue;
-            var ctx = WinCtx{ .w = w, .focused = focused, .mon_no = mon_no, .ws_no = wi, .json = json, .first = &first };
-            try walkLeaves(&ctx, ws);
+            try collectRows(&rows, ws, focused, mon_no, wi, app.gpa);
         }
     }
-    if (json) try w.writeAll("]\n");
+
+    // Measure column widths, seeded from header label lengths.
+    var cw_id: usize = "ID".len;
+    var cw_app: usize = "APP".len;
+    var cw_title: usize = "TITLE".len;
+    var cw_ws: usize = "WS".len;
+    var cw_mon: usize = "MON".len;
+    var cw_layout: usize = "LAYOUT".len;
+    for (rows.items) |r| {
+        cw_id     = @max(cw_id,     @as(usize, @intCast(std.fmt.count("{d}", .{r.id}))));
+        cw_app    = @max(cw_app,    dispWidth(r.app));
+        cw_title  = @max(cw_title,  dispWidth(r.title));
+        cw_ws     = @max(cw_ws,     @as(usize, @intCast(std.fmt.count("{d}", .{r.ws}))));
+        cw_mon    = @max(cw_mon,    @as(usize, @intCast(std.fmt.count("{d}", .{r.mon}))));
+        cw_layout = @max(cw_layout, layoutName(r.layout).len);
+    }
+
+    const sep = "  ";
+
+    // Header row.
+    try padCol(w, "ID",     cw_id);     try w.writeAll(sep);
+    try padCol(w, "APP",    cw_app);    try w.writeAll(sep);
+    try padCol(w, "TITLE",  cw_title);  try w.writeAll(sep);
+    try padCol(w, "WS",     cw_ws);     try w.writeAll(sep);
+    try padCol(w, "MON",    cw_mon);    try w.writeAll(sep);
+    try w.writeAll("LAYOUT\n");
+
+    // Divider.
+    try dashCol(w, cw_id);     try w.writeAll(sep);
+    try dashCol(w, cw_app);    try w.writeAll(sep);
+    try dashCol(w, cw_title);  try w.writeAll(sep);
+    try dashCol(w, cw_ws);     try w.writeAll(sep);
+    try dashCol(w, cw_mon);    try w.writeAll(sep);
+    try dashCol(w, cw_layout); try w.writeByte('\n');
+
+    // Data rows.
+    var id_buf: [16]u8 = undefined;
+    var ws_buf: [8]u8  = undefined;
+    var mon_buf: [8]u8 = undefined;
+    for (rows.items) |r| {
+        const id_s  = std.fmt.bufPrint(&id_buf,  "{d}", .{r.id})  catch "";
+        const ws_s  = std.fmt.bufPrint(&ws_buf,  "{d}", .{r.ws})  catch "";
+        const mon_s = std.fmt.bufPrint(&mon_buf, "{d}", .{r.mon}) catch "";
+        try padCol(w, id_s,             cw_id);     try w.writeAll(sep);
+        try padCol(w, r.app,            cw_app);    try w.writeAll(sep);
+        try padCol(w, r.title,          cw_title);  try w.writeAll(sep);
+        try padCol(w, ws_s,             cw_ws);     try w.writeAll(sep);
+        try padCol(w, mon_s,            cw_mon);    try w.writeAll(sep);
+        try w.writeAll(layoutName(r.layout));
+        if (r.focused)    try w.writeAll("  (focused)");
+        if (r.fullscreen) try w.writeAll("  (fullscreen)");
+        if (r.floating)   try w.writeAll("  (floating)");
+        try w.writeByte('\n');
+    }
 }
 
-/// Emit a row per leaf window under `parent`; `parent.layout` is the layout that
-/// governs those leaves (so a nested container reports its own).
+/// Recursively collect one TextRow per leaf window under `parent`.
+/// `anytype` lets the local TextRow struct defined in writeWindows flow through.
+fn collectRows(rows: anytype, parent: *data.Con, focused: ?*data.Con, mon_no: usize, ws_no: usize, gpa: std.mem.Allocator) !void {
+    for (parent.children.items) |child| {
+        if (child.window) |win| {
+            var tbuf: [512]u8 = undefined;
+            var raw: []const u8 = win.title;
+            if (raw.len == 0) {
+                if (child.window) |*lw| {
+                    if (wm_window.resolveElement(lw)) |el| {
+                        if (el.copyString("AXTitle")) |t| {
+                            defer t.release();
+                            if (t.cstring(&tbuf)) |s| raw = s;
+                        }
+                    }
+                }
+            }
+            try rows.append(gpa, .{
+                .id        = win.id,
+                .app       = win.owner,
+                .title     = try gpa.dupe(u8, raw),
+                .ws        = ws_no,
+                .mon       = mon_no,
+                .layout    = parent.layout,
+                .focused   = focused != null and focused.? == child,
+                .fullscreen = win.fake_full_screen,
+                .floating  = win.floating,
+            });
+        } else {
+            try collectRows(rows, child, focused, mon_no, ws_no, gpa);
+        }
+    }
+}
+
+/// Left-pad `s` to `width` with spaces.
+/// Terminal display width: count Unicode codepoints, not bytes.
+/// Handles multi-byte chars like • (U+2022, 3 bytes) that are 1 column wide.
+fn dispWidth(s: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(s) catch s.len;
+}
+
+fn padCol(w: *std.Io.Writer, s: []const u8, width: usize) !void {
+    try w.writeAll(s);
+    const dw = dispWidth(s);
+    var i = dw;
+    while (i < width) : (i += 1) try w.writeByte(' ');
+}
+
+/// Write `n` dashes.
+fn dashCol(w: *std.Io.Writer, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) try w.writeByte('-');
+}
+
+/// Walk the tree and emit one JSON object per leaf (streaming, no buffering needed).
 fn walkLeaves(ctx: *WinCtx, parent: *data.Con) !void {
     for (parent.children.items) |child| {
         if (child.window) |win| {
@@ -270,22 +410,28 @@ fn writeWindowRow(ctx: *WinCtx, leaf: *data.Con, win: data.Window, layout: data.
     const is_focused = ctx.focused != null and ctx.focused.? == leaf;
     const zoom = win.fake_full_screen;
     const floating = win.floating;
-    if (ctx.json) {
-        if (!ctx.first.*) try w.writeAll(",");
-        ctx.first.* = false;
-        try w.writeAll("{\"window-id\":");
-        try w.print("{d},\"app\":\"", .{win.id});
-        try writeJsonStr(w, win.owner);
-        try w.print("\",\"pid\":{d},\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"focused\":{},\"fullscreen\":{},\"floating\":{}}}", .{
-            win.pid, ctx.ws_no, ctx.mon_no, layoutName(layout), is_focused, zoom, floating,
-        });
-    } else {
-        try w.print("{d}\t{s}\tws {d}\tmon {d}\t{s}", .{ win.id, win.owner, ctx.ws_no, ctx.mon_no, layoutName(layout) });
-        if (is_focused) try w.writeAll("\t(focused)");
-        if (zoom) try w.writeAll("\t(fullscreen)");
-        if (floating) try w.writeAll("\t(floating)");
-        try w.writeByte('\n');
+    var tbuf: [512]u8 = undefined;
+    var title: []const u8 = win.title;
+    if (title.len == 0) {
+        if (leaf.window) |*lw| {
+            if (wm_window.resolveElement(lw)) |el| {
+                if (el.copyString("AXTitle")) |t| {
+                    defer t.release();
+                    if (t.cstring(&tbuf)) |s| title = s;
+                }
+            }
+        }
     }
+    if (!ctx.first.*) try w.writeAll(",");
+    ctx.first.* = false;
+    try w.writeAll("{\"window-id\":");
+    try w.print("{d},\"app\":\"", .{win.id});
+    try writeJsonStr(w, win.owner);
+    try w.writeAll("\",\"title\":\"");
+    try writeJsonStr(w, title);
+    try w.print("\",\"pid\":{d},\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"focused\":{},\"fullscreen\":{},\"floating\":{}}}", .{
+        win.pid, ctx.ws_no, ctx.mon_no, layoutName(layout), is_focused, zoom, floating,
+    });
 }
 
 const AppEntry = struct { pid: i32, name: []const u8, count: usize };

@@ -159,7 +159,12 @@ pub fn applyRulesToTree(app: *state.AppState) void {
             if (window.resolveElement(w)) |el| {
                 if (el.copyString("AXTitle")) |t| {
                     defer t.release();
-                    if (t.cstring(&tbuf)) |s| title = s;
+                    if (t.cstring(&tbuf)) |s| {
+                        title = s;
+                        // Persist the resolved title so IPC can display it
+                        // without a second AX round-trip.
+                        w.title = app.arena.dupe(u8, s) catch "";
+                    }
                 }
             }
         }

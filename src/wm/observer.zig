@@ -65,7 +65,7 @@ fn graceTimerFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void 
     const root = mgr.appState.tree orelse return;
     const leaf = tree.findLeaf(root, ctx.wid) orelse return; // already removed/re-paired
 
-    if (repairTabLeaf(ctx.observer, root, leaf, ctx.pid, ctx.frame, ctx.wid)) {
+    if (repairTabLeaf(mgr.appState.arena, ctx.observer, root, leaf, ctx.pid, ctx.frame, ctx.wid)) {
         tree.flushActive(mgr.appState);
         return;
     }
@@ -444,7 +444,7 @@ fn onFrontWindowChanged(mgr: *Manager, observer: ax.AXObserverRef, element: ax.A
     // Re-point the tab-group leaf at the front tab. Reuse the arena-owned owner
     // string (outlives the swap), release the stale element, re-arm destroy.
     const owner = (leaf.window orelse return).owner;
-    const win = window.fromElement(el, owner) orelse return;
+    const win = window.fromElement(mgr.appState.arena, el, owner) orelse return;
     leaf.window.?.deinit();
     leaf.window = win;
     leaf.id = win.id;
@@ -1153,7 +1153,7 @@ fn addApplicationWindows(mgr: *Manager, pid: i32, observer: ax.AXObserverRef) vo
 
         const ws = workspaceForWindow(mgr, wid) orelse continue;
         const owner = app.arena.dupe(u8, name) catch continue;
-        const win = window.fromElement(el, owner) orelse continue;
+        const win = window.fromElement(app.arena, el, owner) orelse continue;
         if (win.bounds.size.width == 0 and win.bounds.size.height == 0) {
             win.deinit();
             continue;
@@ -1380,7 +1380,7 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
 
     const owner = app.arena.dupe(u8, name) catch return; // must outlive the event
 
-    const win = window.fromElement(el, owner) orelse return;
+    const win = window.fromElement(app.arena, el, owner) orelse return;
     // A zero-size frame means the app hasn't committed the window's geometry yet
     // (or the AX query failed). These are transient overlays — skip them.
     if (win.bounds.size.width == 0 and win.bounds.size.height == 0) {
@@ -1449,6 +1449,7 @@ fn onWindowCreated(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIEl
 /// every window at near-identical frames; "tabs" at *identical* ones). Pairing
 /// onto it would put the same window id on two leaves and corrupt the tree.
 fn repairTabLeaf(
+    alloc: std.mem.Allocator,
     observer: ax.AXObserverRef,
     root: *data.Con,
     leaf: *data.Con,
@@ -1470,7 +1471,7 @@ fn repairTabLeaf(
     }
     // Reuse the old window's owner string (arena-allocated, outlives the swap).
     const owner = leaf.window.?.owner;
-    const win = window.fromElement(sib, owner) orelse {
+    const win = window.fromElement(alloc, sib, owner) orelse {
         sib.release();
         return false;
     };
@@ -1502,7 +1503,7 @@ fn onWindowDestroyed(mgr: *Manager, observer: ax.AXObserverRef, wid: u32) void {
 
     // Fast path: the promoted sibling tab is already sitting at the closed tab's
     // frame — keep the tile by swapping the leaf onto it.
-    if (repairTabLeaf(observer, root, leaf, pid, frame, wid)) {
+    if (repairTabLeaf(app.arena, observer, root, leaf, pid, frame, wid)) {
         tree.flushActive(app);
         return;
     }

@@ -46,6 +46,10 @@ pub const Window = struct {
     pid: i32,
     /// Borrowed from the arena used to query the window list.
     owner: []const u8,
+    /// Window title (e.g. document name), arena-allocated. Empty string when
+    /// not yet resolved (startup windows loaded from CGWindowList have no AX
+    /// title until their Space is first visited).
+    title: []const u8 = "",
     bounds: macos.window_list.Rect,
     /// Retained AX element, resolved lazily (see `window.resolveElement`).
     /// Null until first needed: macOS won't expose a window's AX element while

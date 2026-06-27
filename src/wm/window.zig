@@ -1,3 +1,4 @@
+const std = @import("std");
 const macos = @import("macos");
 const data = @import("data.zig");
 
@@ -27,24 +28,31 @@ pub fn init(info: macos.window_list.WindowInfo) data.Window {
     };
 }
 
-/// Build a Window straight from its AX element, reading id/pid/frame from
+/// Build a Window straight from its AX element, reading id/pid/frame/title from
 /// Accessibility instead of CoreGraphics. Used on the window-created event:
 /// CoreGraphics and SkyLight have not registered the brand-new window yet, so a
 /// CGWindowList/SLS lookup races and returns nothing. This mirrors yabai's
 /// `window_create` (src/window.c), which builds the window entirely from the
 /// AXUIElementRef (frame via `window_ax_frame`, id via `ax_window_id`) with no
-/// CoreGraphics dependency. Retains the element; `owner` must outlive the
-/// Window (allocate it from the tree's arena).
-pub fn fromElement(element: *macos.Element, owner: []const u8) ?data.Window {
+/// CoreGraphics dependency. Retains the element; `owner` and `title` are duped
+/// into `alloc` (use the tree's arena so they outlive the Window).
+pub fn fromElement(alloc: std.mem.Allocator, element: *macos.Element, owner: []const u8) ?data.Window {
     const wid = element.windowId() orelse return null;
     const pid = element.pid() orelse return null;
     const pos = element.position() orelse macos.accessibility.Point{ .x = 0, .y = 0 };
     const sz = element.size() orelse macos.accessibility.Size{ .width = 0, .height = 0 };
+    var title: []const u8 = "";
+    if (element.copyString("AXTitle")) |t| {
+        defer t.release();
+        var tbuf: [512]u8 = undefined;
+        if (t.cstring(&tbuf)) |s| title = alloc.dupe(u8, s) catch "";
+    }
     element.retain();
     return .{
         .id = wid,
         .pid = pid,
         .owner = owner,
+        .title = title,
         .bounds = .{ .origin = pos, .size = sz },
         .ax_element = element,
     };
