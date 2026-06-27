@@ -17,7 +17,7 @@ pub fn run(init: std.process.Init, sub: []const u8, args: *Args) u8 {
     const alloc = init.gpa;
     const eql = std.mem.eql;
 
-    if (eql(u8, sub, "list-windows") or eql(u8, sub, "list-apps") or
+    if (eql(u8, sub, "list-windows") or
         eql(u8, sub, "list-workspaces") or eql(u8, sub, "list-monitors"))
     {
         return listQuery(init, sub, args);
@@ -110,8 +110,7 @@ fn printUsage() void {
         \\  agate help             Show this help.
         \\
         \\Query the running daemon (add --json for machine-readable output):
-        \\  agate list-windows     Managed windows: id, app, workspace, monitor, layout.
-        \\  agate list-apps        Apps with managed windows: pid, bundle id, name, count.
+        \\  agate list-windows     Managed windows: id, pid, app, bundle-id, title, workspace, monitor, layout.
         \\  agate list-workspaces  Workspaces: number, monitor, layout, type, visibility.
         \\  agate list-monitors    Monitors: number, size, origin, current workspace.
         \\

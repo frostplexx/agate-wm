@@ -177,8 +177,6 @@ fn dispatch(app: *state.AppState, w: *std.Io.Writer, req: []const u8) !void {
     }
     if (std.mem.eql(u8, cmd, "list-windows")) {
         try writeWindows(w, app, json);
-    } else if (std.mem.eql(u8, cmd, "list-apps")) {
-        try writeApps(w, app, json);
     } else if (std.mem.eql(u8, cmd, "list-workspaces")) {
         try writeWorkspaces(w, app, json);
     } else if (std.mem.eql(u8, cmd, "list-monitors")) {
@@ -260,8 +258,10 @@ fn writeWindows(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
     // Text path: collect all rows first so we can measure column widths.
     const TextRow = struct {
         id: u32,
-        app: []const u8,    // points into tree arena; not owned here
-        title: []const u8,  // gpa-owned; always free
+        pid: i32,
+        app: []const u8,        // points into tree arena; not owned here
+        bundle_id: []const u8,  // gpa-owned; always free
+        title: []const u8,      // gpa-owned; always free
         ws: usize,
         mon: usize,
         layout: data.Layout,
@@ -272,7 +272,10 @@ fn writeWindows(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
 
     var rows: std.ArrayList(TextRow) = .empty;
     defer {
-        for (rows.items) |r| app.gpa.free(r.title);
+        for (rows.items) |r| {
+            app.gpa.free(r.bundle_id);
+            app.gpa.free(r.title);
+        }
         rows.deinit(app.gpa);
     }
 
@@ -286,15 +289,19 @@ fn writeWindows(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
     }
 
     // Measure column widths, seeded from header label lengths.
-    var cw_id: usize = "ID".len;
-    var cw_app: usize = "APP".len;
-    var cw_title: usize = "TITLE".len;
-    var cw_ws: usize = "WS".len;
-    var cw_mon: usize = "MON".len;
+    var cw_id: usize     = "ID".len;
+    var cw_pid: usize    = "PID".len;
+    var cw_app: usize    = "APP".len;
+    var cw_bid: usize    = "BUNDLE-ID".len;
+    var cw_title: usize  = "TITLE".len;
+    var cw_ws: usize     = "WS".len;
+    var cw_mon: usize    = "MON".len;
     var cw_layout: usize = "LAYOUT".len;
     for (rows.items) |r| {
         cw_id     = @max(cw_id,     @as(usize, @intCast(std.fmt.count("{d}", .{r.id}))));
+        cw_pid    = @max(cw_pid,    @as(usize, @intCast(std.fmt.count("{d}", .{r.pid}))));
         cw_app    = @max(cw_app,    dispWidth(r.app));
+        cw_bid    = @max(cw_bid,    r.bundle_id.len);
         cw_title  = @max(cw_title,  dispWidth(r.title));
         cw_ws     = @max(cw_ws,     @as(usize, @intCast(std.fmt.count("{d}", .{r.ws}))));
         cw_mon    = @max(cw_mon,    @as(usize, @intCast(std.fmt.count("{d}", .{r.mon}))));
@@ -304,34 +311,42 @@ fn writeWindows(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
     const sep = "  ";
 
     // Header row.
-    try padCol(w, "ID",     cw_id);     try w.writeAll(sep);
-    try padCol(w, "APP",    cw_app);    try w.writeAll(sep);
-    try padCol(w, "TITLE",  cw_title);  try w.writeAll(sep);
-    try padCol(w, "WS",     cw_ws);     try w.writeAll(sep);
-    try padCol(w, "MON",    cw_mon);    try w.writeAll(sep);
+    try padCol(w, "ID",        cw_id);     try w.writeAll(sep);
+    try padCol(w, "PID",       cw_pid);    try w.writeAll(sep);
+    try padCol(w, "APP",       cw_app);    try w.writeAll(sep);
+    try padCol(w, "BUNDLE-ID", cw_bid);    try w.writeAll(sep);
+    try padCol(w, "TITLE",     cw_title);  try w.writeAll(sep);
+    try padCol(w, "WS",        cw_ws);     try w.writeAll(sep);
+    try padCol(w, "MON",       cw_mon);    try w.writeAll(sep);
     try w.writeAll("LAYOUT\n");
 
     // Divider.
     try dashCol(w, cw_id);     try w.writeAll(sep);
+    try dashCol(w, cw_pid);    try w.writeAll(sep);
     try dashCol(w, cw_app);    try w.writeAll(sep);
+    try dashCol(w, cw_bid);    try w.writeAll(sep);
     try dashCol(w, cw_title);  try w.writeAll(sep);
     try dashCol(w, cw_ws);     try w.writeAll(sep);
     try dashCol(w, cw_mon);    try w.writeAll(sep);
     try dashCol(w, cw_layout); try w.writeByte('\n');
 
     // Data rows.
-    var id_buf: [16]u8 = undefined;
-    var ws_buf: [8]u8  = undefined;
-    var mon_buf: [8]u8 = undefined;
+    var id_buf:  [16]u8 = undefined;
+    var pid_buf: [16]u8 = undefined;
+    var ws_buf:  [8]u8  = undefined;
+    var mon_buf: [8]u8  = undefined;
     for (rows.items) |r| {
         const id_s  = std.fmt.bufPrint(&id_buf,  "{d}", .{r.id})  catch "";
+        const pid_s = std.fmt.bufPrint(&pid_buf, "{d}", .{r.pid}) catch "";
         const ws_s  = std.fmt.bufPrint(&ws_buf,  "{d}", .{r.ws})  catch "";
         const mon_s = std.fmt.bufPrint(&mon_buf, "{d}", .{r.mon}) catch "";
-        try padCol(w, id_s,             cw_id);     try w.writeAll(sep);
-        try padCol(w, r.app,            cw_app);    try w.writeAll(sep);
-        try padCol(w, r.title,          cw_title);  try w.writeAll(sep);
-        try padCol(w, ws_s,             cw_ws);     try w.writeAll(sep);
-        try padCol(w, mon_s,            cw_mon);    try w.writeAll(sep);
+        try padCol(w, id_s,          cw_id);     try w.writeAll(sep);
+        try padCol(w, pid_s,         cw_pid);    try w.writeAll(sep);
+        try padCol(w, r.app,         cw_app);    try w.writeAll(sep);
+        try padCol(w, r.bundle_id,   cw_bid);    try w.writeAll(sep);
+        try padCol(w, r.title,       cw_title);  try w.writeAll(sep);
+        try padCol(w, ws_s,          cw_ws);     try w.writeAll(sep);
+        try padCol(w, mon_s,         cw_mon);    try w.writeAll(sep);
         try w.writeAll(layoutName(r.layout));
         if (r.focused)    try w.writeAll("  (focused)");
         if (r.fullscreen) try w.writeAll("  (fullscreen)");
@@ -357,9 +372,13 @@ fn collectRows(rows: anytype, parent: *data.Con, focused: ?*data.Con, mon_no: us
                     }
                 }
             }
+            var bidbuf: [256]u8 = undefined;
+            const raw_bid = macos.workspace.bundleId(win.pid, &bidbuf) orelse "";
             try rows.append(gpa, .{
                 .id        = win.id,
+                .pid       = win.pid,
                 .app       = win.owner,
+                .bundle_id = try gpa.dupe(u8, raw_bid),
                 .title     = try gpa.dupe(u8, raw),
                 .ws        = ws_no,
                 .mon       = mon_no,
@@ -429,54 +448,13 @@ fn writeWindowRow(ctx: *WinCtx, leaf: *data.Con, win: data.Window, layout: data.
     try writeJsonStr(w, win.owner);
     try w.writeAll("\",\"title\":\"");
     try writeJsonStr(w, title);
+    var bidbuf: [256]u8 = undefined;
+    const bid = macos.workspace.bundleId(win.pid, &bidbuf) orelse "";
+    try w.writeAll("\",\"bundle-id\":\"");
+    try writeJsonStr(w, bid);
     try w.print("\",\"pid\":{d},\"workspace\":{d},\"monitor\":{d},\"layout\":\"{s}\",\"focused\":{},\"fullscreen\":{},\"floating\":{}}}", .{
         win.pid, ctx.ws_no, ctx.mon_no, layoutName(layout), is_focused, zoom, floating,
     });
-}
-
-const AppEntry = struct { pid: i32, name: []const u8, count: usize };
-
-fn collectApps(con: *data.Con, list: *std.ArrayList(AppEntry), alloc: std.mem.Allocator) void {
-    if (con.window) |win| {
-        for (list.items) |*e| if (e.pid == win.pid) {
-            e.count += 1;
-            return;
-        };
-        list.append(alloc, .{ .pid = win.pid, .name = win.owner, .count = 1 }) catch {};
-        return;
-    }
-    for (con.children.items) |child| collectApps(child, list, alloc);
-}
-
-fn writeApps(w: *std.Io.Writer, app: *state.AppState, json: bool) !void {
-    const root = app.tree orelse {
-        if (json) try w.writeAll("[]\n");
-        return;
-    };
-    var list: std.ArrayList(AppEntry) = .empty;
-    defer list.deinit(app.gpa);
-    collectApps(root, &list, app.gpa);
-
-    if (json) try w.writeAll("[");
-    for (list.items, 0..) |e, i| {
-        // Resolve the bundle id from the live process (it isn't in the tree).
-        var bidbuf: [256]u8 = undefined;
-        const bid = macos.workspace.bundleId(e.pid, &bidbuf) orelse "";
-        if (json) {
-            if (i != 0) try w.writeAll(",");
-            try w.writeAll("{\"pid\":");
-            try w.print("{d},\"bundle-id\":\"", .{e.pid});
-            try writeJsonStr(w, bid);
-            try w.writeAll("\",\"app\":\"");
-            try writeJsonStr(w, e.name);
-            try w.print("\",\"windows\":{d}}}", .{e.count});
-        } else {
-            try w.print("{d}\t{s}\t{s}\t{d} window{s}\n", .{
-                e.pid, if (bid.len == 0) "-" else bid, e.name, e.count, if (e.count == 1) "" else "s",
-            });
-        }
-    }
-    if (json) try w.writeAll("]\n");
 }
 
 fn currentSpaceOf(mons: []const tree.MonitorInfo, mon: *data.Con) u64 {
@@ -608,40 +586,8 @@ fn testLeaf(a: std.mem.Allocator, parent: *data.Con, id: u32, pid: i32, owner: [
     return con;
 }
 
-test "writeApps groups windows by app (text and json)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const root = try a.create(data.Con);
-    root.* = .{ .id = 0, .con_type = .Root };
-    const mon = try a.create(data.Con);
-    mon.* = .{ .id = 0, .con_type = .Monitor, .parent = root };
-    try root.children.append(a, mon);
-    const ws = try a.create(data.Con);
-    ws.* = .{ .id = 100, .con_type = .Workspace, .parent = mon };
-    try mon.children.append(a, ws);
-    _ = try testLeaf(a, ws, 1, 501, "Safari");
-    _ = try testLeaf(a, ws, 2, 501, "Safari");
-    _ = try testLeaf(a, ws, 3, 777, "Notes");
-
-    var app: state.AppState = .{ .skylight_cid = 0, .arena = a, .gpa = testing.allocator, .tree = root };
-
-    // The bundle-id column is resolved from the live process, so assert only on
-    // the deterministic parts (grouping, counts, names, row shape).
-    var text = std.Io.Writer.Allocating.init(testing.allocator);
-    defer text.deinit();
-    try writeApps(&text.writer, &app, false);
-    try testing.expect(std.mem.startsWith(u8, text.written(), "501\t"));
-    try testing.expect(std.mem.indexOf(u8, text.written(), "\tSafari\t2 windows\n") != null);
-    try testing.expect(std.mem.indexOf(u8, text.written(), "\tNotes\t1 window\n") != null);
-
-    var json = std.Io.Writer.Allocating.init(testing.allocator);
-    defer json.deinit();
-    try writeApps(&json.writer, &app, true);
-    try testing.expect(std.mem.indexOf(u8, json.written(), "\"pid\":501,\"bundle-id\":\"") != null);
-    try testing.expect(std.mem.indexOf(u8, json.written(), "\"app\":\"Safari\",\"windows\":2}") != null);
-}
+// writeWindows calls tree.collectMonitors → SkyLight CGSConnectionByID, which
+// requires a real macOS app context. Integration-tested via `agate list-windows`.
 
 test "writePath builds the socket path and falls back when too long" {
     var buf: [108]u8 = undefined;
