@@ -107,11 +107,16 @@ pub fn toggleFloat(app: *state.AppState) void {
 /// new app's — hand the menu bar to `mon` afterward (mirrors yabai's
 /// `display_manager_set_active_display_id` after its gesture).
 fn revealSpace(app: *state.AppState, mon: macos.monitor.Monitor, t: macos.spaces.SpaceTarget) void {
+    // Both paths drive the *real* Dock-swipe gesture, which is the only switch Dock
+    // observes — so it repaints the menu bar coherently (no doubled app menus). The
+    // synthetic swipe acts on the display under the cursor, so warp onto `mon` first.
+    // The silent SkyLight `setDisplaySpace` path skipped this and left the menu bar
+    // doubled on cross-display switches (yabai falls back to exactly this gesture).
+    focus.ensureCursorOnFrame(mon.frame);
     if (t.active_on_same_display) {
-        focus.ensureCursorOnFrame(mon.frame);
         macos.spaces.switchToSpaceId(app.gpa, app.skylight_cid, t.sid) catch {};
     } else {
-        macos.spaces.setDisplaySpace(app.skylight_cid, mon.uuidSlice(), t.sid);
+        macos.spaces.switchToSpaceIdOnDisplay(app.gpa, app.skylight_cid, mon.key, mon.current_space, t.sid) catch {};
         _ = focus.raiseOnSpace(app, t.sid);
     }
     macos.spaces.setActiveMenuBarDisplay(app.skylight_cid, mon.uuidSlice());
@@ -241,6 +246,10 @@ pub fn moveFocusedToMonitor(app: *state.AppState, dir: focus.MonitorDir) void {
     tree.flushActive(app); // re-tile the source we shrank
     tree.flushWorkspace(app, dst_ws); // tile the destination
     _ = focus.focusLeaf(leaf); // the window is visible there now — follow it
+    // Follow the menu bar to the destination display too, else the source
+    // display's menu bar lingers and overlaps it (same handoff as revealSpace).
+    if (macos.monitor.byKey(app.skylight_cid, mons[ti].con.id)) |m|
+        macos.spaces.setActiveMenuBarDisplay(app.skylight_cid, m.uuidSlice());
 }
 
 /// If `leaf`'s window is on a native-fullscreen Space, leave fullscreen and

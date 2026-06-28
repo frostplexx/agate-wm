@@ -104,16 +104,90 @@ pub fn managedDisplays(buf: []ManagedDisplay, cid: sl.ConnectionID) []ManagedDis
     return buf[0..n];
 }
 
+/// A single-element CFArray<CFNumber(SInt64)> holding `sid` — the shape SkyLight's
+/// space-set calls (`SLSShowSpaces`/`SLSHideSpaces`) expect. Caller releases it.
+fn spaceArray(sid: u64) ?c.CFArrayRef {
+    var id64: i64 = @intCast(sid);
+    const num = c.CFNumberCreate(null, c.kCFNumberSInt64Type, &id64) orelse return null;
+    defer foundation.CFRelease(num);
+    var values = [_]?*const anyopaque{@ptrCast(num)};
+    return c.CFArrayCreate(null, @ptrCast(&values), 1, &c.kCFTypeArrayCallBacks);
+}
+
 /// Switch the display identified by `uuid` to the Space `sid` directly, via
 /// SkyLight (no gesture). Unlike `switchToSpaceId` this can target a display that
 /// ISN'T the focused one — the gesture path only ever drives the active display.
-/// On the *focused* display this is known to leave the menu bar stale, so prefer
-/// `switchToSpaceId` there; for a secondary display (whose menu bar isn't shown)
-/// it's the right tool. `uuid` is the display's "Display Identifier".
+///
+/// A bare `SLSManagedDisplaySetCurrentSpace` leaves the *outgoing* Space's menu-bar
+/// overlay standing, so after a cross-display switch the old bar doubles over the
+/// new one. Mirror yabai's `do_space_focus`: show the destination Space, **hide the
+/// source Space** (this tears down its menu bar), then set the current space.
+/// `uuid` is the display's "Display Identifier".
+///
+/// NOTE: this silent SkyLight path does not make Dock re-render the menu bar's
+/// *app menus* (Dock never observes an event), so it can still leave them doubled
+/// on a cross-display switch — prefer the gesture path (`switchToSpaceIdOnDisplay`)
+/// when you can warp the cursor onto the target display.
 pub fn setDisplaySpace(cid: sl.ConnectionID, uuid: []const u8, sid: u64) void {
     const s = String.createUtf8(uuid) catch return;
     defer s.release();
+
+    const source = sl.SLSManagedDisplayGetCurrentSpace(cid, s.ref());
+    if (source == sid) return; // already showing it — nothing to switch or tear down
+
+    if (spaceArray(sid)) |dest_arr| {
+        defer foundation.CFRelease(dest_arr);
+        sl.SLSShowSpaces(cid, dest_arr);
+    }
+    if (spaceArray(source)) |src_arr| {
+        defer foundation.CFRelease(src_arr);
+        sl.SLSHideSpaces(cid, src_arr);
+    }
     sl.SLSManagedDisplaySetCurrentSpace(cid, s.ref(), sid);
+}
+
+/// Switch the display whose stable key is `monitor_key` (currently showing
+/// `current_sid`) to Space `sid` using the Dock-swipe gesture. Unlike
+/// `switchToSpaceId`, which only ever drives the menu-bar display, this computes
+/// the swipe count from the *target* display's own Space order — so it works on a
+/// secondary monitor once the caller has warped the cursor onto it (the synthetic
+/// swipe acts on the display under the cursor). Mirrors yabai's
+/// `space_manager_focus_space_using_gesture`: a real gesture is the one path that
+/// keeps the menu bar coherent (no doubled app menus), where the silent SkyLight
+/// `setDisplaySpace` does not. No-op if `sid` isn't on that display or is shown.
+pub fn switchToSpaceIdOnDisplay(alloc: Allocator, cid: sl.ConnectionID, monitor_key: u64, current_sid: u64, sid: u64) !void {
+    if (current_sid == sid) return;
+    const order = (try displayOrder(alloc, cid, monitor_key, current_sid)) orelse return;
+    defer alloc.free(order.spaces);
+    for (order.spaces, 0..) |sp, i| {
+        if (sp.id == sid) {
+            swipeToPos(order, i);
+            return;
+        }
+    }
+}
+
+/// The Spaces on the display with stable key `monitor_key`, in Mission Control
+/// order, with `active_pos` at the Space `current_sid` (that display's visible
+/// one). The display-specific counterpart of `focusedDisplayOrder`. Null if the
+/// display has no Spaces. Caller owns `.spaces`.
+fn displayOrder(alloc: Allocator, cid: sl.ConnectionID, monitor_key: u64, current_sid: u64) !?Order {
+    const all = try allSpaces(alloc, cid);
+    defer alloc.free(all);
+
+    var list: std.ArrayList(Space) = .empty;
+    errdefer list.deinit(alloc);
+    var active_pos: usize = 0;
+    for (all) |sp| {
+        if (sp.monitor_key != monitor_key) continue;
+        if (sp.id == current_sid) active_pos = list.items.len;
+        try list.append(alloc, sp);
+    }
+    if (list.items.len == 0) {
+        list.deinit(alloc);
+        return null;
+    }
+    return .{ .spaces = try list.toOwnedSlice(alloc), .active_pos = active_pos };
 }
 
 /// Hand menu-bar ownership to the display identified by `uuid`. A Dock-swipe

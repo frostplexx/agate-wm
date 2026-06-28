@@ -105,6 +105,7 @@ pub extern fn CFMachPortCreateRunLoopSource(
     order: c.CFIndex,
 ) c.CFRunLoopSourceRef;
 
+
 // ---------------------------------------------------------------------------
 // Synthetic Dock-swipe gesture (Space switching, macOS 27 / Golden Gate)
 // ---------------------------------------------------------------------------

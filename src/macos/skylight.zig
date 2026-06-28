@@ -60,6 +60,11 @@ pub extern fn SLSManagedDisplaySetCurrentSpace(cid: ConnectionID, uuid: c.CFStri
 pub extern fn SLSWillSwitchSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
 /// Make the given Spaces (CFArray<CFNumber> of ids) the shown/visible ones.
 pub extern fn SLSShowSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
+/// Hide the given Spaces (CFArray<CFNumber> of ids) — the counterpart to
+/// `SLSShowSpaces`. Tearing down the *outgoing* Space here is what removes its
+/// lingering menu-bar overlay; yabai's `do_space_focus` pairs Show(dest) with
+/// Hide(source) for exactly this. Omitting it leaves the old menu bar doubled.
+pub extern fn SLSHideSpaces(cid: ConnectionID, spaces: c.CFArrayRef) void;
 /// Rebuild the menu bar for `space`. This is the step missing from a bare
 /// `SLSManagedDisplaySetCurrentSpace` that leaves the menu bar stale.
 pub extern fn SLSSpaceResetMenuBar(cid: ConnectionID, space: u64) void;

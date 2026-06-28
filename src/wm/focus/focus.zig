@@ -293,6 +293,15 @@ fn spatialTarget(mons: []const tree.MonitorInfo, ci: usize, dir: MonitorDir) ?us
 /// Focus the most-recently-used window on `mi`'s visible Space, or warp the
 /// cursor to the display's centre when it has no window to focus.
 fn focusMonitorInfo(appState: *state.AppState, mi: tree.MonitorInfo) bool {
+    // Hand the menu bar to the now-focused display. A plain monitor switch (unlike
+    // a Space switch, which `revealSpace` already handles) changes which display
+    // is active but not which one owns the menu bar, so the previous display's
+    // menu bar lingers and overlaps this one. Do it up front: every path below
+    // makes `mi` the active display (focus a window there, or warp the cursor),
+    // so the handoff applies regardless. No-op if the UUID can't be resolved.
+    if (macos.monitor.byKey(appState.skylight_cid, mi.con.id)) |m|
+        macos.spaces.setActiveMenuBarDisplay(appState.skylight_cid, m.uuidSlice());
+
     const root = appState.tree orelse return warpToFrame(mi.frame);
     const ws = tree.findWorkspace(root, mi.current_space) orelse return warpToFrame(mi.frame);
     if (ws.children.items.len == 0) return warpToFrame(mi.frame);
