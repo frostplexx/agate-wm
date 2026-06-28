@@ -19,9 +19,12 @@ extern "c" fn pwrite(fd: c_int, buf: [*]const u8, nbyte: usize, offset: i64) isi
 extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 
 // Darwin fcntl.h / sys/file.h constants.
-const O_RDONLY: c_int = 0x0000;
-const O_RDWR: c_int = 0x0002;
-const O_CREAT: c_int = 0x0200;
+const O_RDONLY: c_int  = 0x0000;
+const O_RDWR: c_int    = 0x0002;
+const O_CREAT: c_int   = 0x0200;
+/// Close-on-exec: kernel drops the flock when the process image is replaced
+/// via execv, so a self-restart doesn't find its own lock blocking re-acquisition.
+const O_CLOEXEC: c_int = 0x0100_0000;
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 const LOCK_UN: c_int = 8;
@@ -63,7 +66,7 @@ pub fn acquire(alloc: std.mem.Allocator) !Acquire {
     const path = try lockPath(alloc);
     defer alloc.free(path);
 
-    const fd = open(path.ptr, O_RDWR | O_CREAT, @as(c_uint, 0o600));
+    const fd = open(path.ptr, O_RDWR | O_CREAT | O_CLOEXEC, @as(c_uint, 0o600));
     if (fd < 0) return error.LockOpenFailed;
 
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {

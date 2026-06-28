@@ -42,11 +42,12 @@ publish-docs: docs
     trap 'rm -rf "$wiki_dir"' EXIT
     git clone https://github.com/frostplexx/agate-wm.wiki.git "$wiki_dir"
     cp zig-out/Configuration.md "$wiki_dir/Configuration.md"
+    cp zig-out/Debugging.md "$wiki_dir/Debugging.md"
     cd "$wiki_dir"
-    git add Configuration.md
+    git add Configuration.md Debugging.md
     if git diff --cached --quiet; then
         echo "Wiki already up to date."
     else
-        git commit -m "Update configuration reference"
+        git commit -m "Update wiki"
         git push
     fi

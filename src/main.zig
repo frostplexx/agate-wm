@@ -18,12 +18,30 @@ pub fn main(init: std.process.Init) !void {
 
     // No subcommand → run as the daemon. Enforce a single instance: the lock is
     // held for the whole process lifetime and released by the kernel on exit.
-    switch (try lock.acquire(init.gpa)) {
-        .busy => |pid| {
-            std.debug.print("agate is already running (pid {d}).\nRun `agate help` for the CLI.\n", .{pid});
-            return;
-        },
-        .acquired => |held| _ = held, // keep the lock for the process lifetime
+    //
+    // A menu-bar "Restart agate" spawns us with AGATE_RESTART=1 while the outgoing
+    // process is still exiting; its lock drops a moment later. Wait that brief
+    // window out instead of bailing as "already running". (launchd restarts don't
+    // set this — launchd only respawns after the old process is fully dead.)
+    const restarting = std.c.getenv("AGATE_RESTART") != null;
+    var attempt: u32 = 0;
+    while (true) {
+        switch (try lock.acquire(init.gpa)) {
+            .acquired => |held| {
+                _ = held; // keep the lock for the process lifetime
+                break;
+            },
+            .busy => |pid| {
+                if (restarting and attempt < 100) { // ~2s total
+                    attempt += 1;
+                    const ts = std.c.timespec{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
+                    _ = std.c.nanosleep(&ts, null);
+                    continue;
+                }
+                std.debug.print("agate is already running (pid {d}).\nRun `agate help` for the CLI.\n", .{pid});
+                return;
+            },
+        }
     }
 
     // Managing windows requires accessibility permission. Show the system dialog
