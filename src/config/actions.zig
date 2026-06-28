@@ -165,16 +165,29 @@ pub fn moveFocusedToSpace(app: *state.AppState, monitor: usize, n: usize) void {
 }
 
 /// Switch to the Nth user Space on monitor `monitor` (1-based arrangement) and
-/// move focus there. `monitor == 0` is the focused display — the plain
-/// `agate.space(n)` Dock-swipe in Mission Control order; a specific monitor is
-/// resolved and shown by `revealSpace`.
+/// move focus there. `monitor == 0` is the plain `agate.space(n)`: it switches the
+/// monitor UNDER THE CURSOR (the synthetic Dock-swipe lands there), computing the
+/// step count for that display — not the menu-bar display, which can differ when
+/// hovering another monitor without clicking. A specific monitor is resolved and
+/// shown by `revealSpace`.
 pub fn focusSpace(app: *state.AppState, monitor: usize, n: usize) void {
     if (n < 1) return;
+    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
     if (monitor < 1) {
+        if (focus.cursorLocation()) |p| {
+            for (macos.monitor.enumerate(&buf, app.skylight_cid)) |mon| {
+                if (p.x >= mon.frame.origin.x and p.x < mon.frame.origin.x + mon.frame.size.width and
+                    p.y >= mon.frame.origin.y and p.y < mon.frame.origin.y + mon.frame.size.height)
+                {
+                    macos.spaces.switchToIndexOnDisplay(app.gpa, app.skylight_cid, mon.key, mon.current_space, n) catch {};
+                    return;
+                }
+            }
+        }
+        // Cursor unreadable or over no known display → the menu-bar display.
         macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
         return;
     }
-    var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
     for (macos.monitor.enumerate(&buf, app.skylight_cid)) |mon| if (mon.arrangement == monitor) {
         const t = (macos.spaces.resolveSpaceTarget(app.gpa, app.skylight_cid, mon.display_index, n) catch return) orelse return;
         return revealSpace(app, mon, t);

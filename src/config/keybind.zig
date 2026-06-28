@@ -156,7 +156,7 @@ pub fn executeCommand(cmd: []const u8) void {
         actions.setActiveLayout(app, cmd[7..]);
     } else if (std.mem.startsWith(u8, cmd, "space ")) {
         const n = std.fmt.parseInt(usize, cmd[6..], 10) catch return;
-        macos.spaces.switchToIndex(app.gpa, app.skylight_cid, n) catch {};
+        actions.focusSpace(app, 0, n);
     } else if (std.mem.startsWith(u8, cmd, "move_to_space ")) {
         const n = std.fmt.parseInt(usize, cmd[14..], 10) catch return;
         actions.moveFocusedToSpace(app, 0, n);

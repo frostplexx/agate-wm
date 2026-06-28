@@ -336,6 +336,14 @@ fn warpToFrame(frame: macos.window_list.Rect) bool {
     return warpTo(frame.origin.x + frame.size.width / 2, frame.origin.y + frame.size.height / 2);
 }
 
+/// The cursor's current global location (top-left origin), or null if it can't be
+/// read. Sampled from a throwaway CGEvent, like `ensureCursorOnFrame`.
+pub fn cursorLocation() ?macos.c.CGPoint {
+    const ev = macos.event_tap.CGEventCreate(null) orelse return null;
+    defer macos.c.CFRelease(@ptrCast(ev));
+    return macos.event_tap.CGEventGetLocation(ev);
+}
+
 /// Ensure the mouse cursor sits on the display whose visible frame is `frame`,
 /// warping it to the frame's center only if it's currently elsewhere. The
 /// synthetic Dock-swipe Space gesture acts on the display UNDER THE CURSOR, not
@@ -344,9 +352,7 @@ fn warpToFrame(frame: macos.window_list.Rect) bool {
 /// window-raise moved the menu bar but not the pointer). Mirrors yabai's
 /// `space_manager_focus_space_using_gesture` cursor warp.
 pub fn ensureCursorOnFrame(frame: macos.window_list.Rect) void {
-    const ev = macos.event_tap.CGEventCreate(null) orelse return;
-    defer macos.c.CFRelease(@ptrCast(ev));
-    const p = macos.event_tap.CGEventGetLocation(ev);
+    const p = cursorLocation() orelse return;
     if (p.x >= frame.origin.x and p.x < frame.origin.x + frame.size.width and
         p.y >= frame.origin.y and p.y < frame.origin.y + frame.size.height) return;
     _ = warpToFrame(frame);

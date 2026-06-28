@@ -303,6 +303,19 @@ pub fn switchToIndex(alloc: Allocator, cid: sl.ConnectionID, n: usize) !void {
     if (n - 1 < order.spaces.len) swipeToPos(order, n - 1);
 }
 
+/// Like `switchToIndex` but for the display with stable key `monitor_key` (shown
+/// `current_sid`), not the menu-bar display. The synthetic swipe lands on the
+/// display under the cursor, so when the caller drives the cursor's monitor the
+/// step count must be computed for THAT display — else a swipe meant for the
+/// hovered monitor uses the active monitor's order and lands wrong. No-op if `n`
+/// is past that display's strip.
+pub fn switchToIndexOnDisplay(alloc: Allocator, cid: sl.ConnectionID, monitor_key: u64, current_sid: u64, n: usize) !void {
+    if (n == 0) return;
+    const order = (try displayOrder(alloc, cid, monitor_key, current_sid)) orelse return;
+    defer alloc.free(order.spaces);
+    if (n - 1 < order.spaces.len) swipeToPos(order, n - 1);
+}
+
 /// Switch to the next Space on the focused display (any type — one swipe step,
 /// no wrap).
 pub fn switchNext(alloc: Allocator, cid: sl.ConnectionID) !void {
