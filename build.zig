@@ -93,6 +93,13 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     const run_gen_docs = b.addRunArtifact(gen_docs_exe);
+    // Force a re-run every time: the only input is the `src/config` directory, and
+    // a directory arg is not content-hashed per file, so the Run step's cache key
+    // doesn't change when an `@doc` annotation inside it does. With a warm
+    // `.zig-cache` (e.g. CI's `mlugg/setup-zig` cache) that served a stale
+    // `agate.lua`, failing the `git diff --exit-code` check. Always running keeps
+    // the generated stub in lock-step with the source.
+    run_gen_docs.has_side_effects = true;
     run_gen_docs.addDirectoryArg(b.path("src/config")); // argv[1]
     const md_out = run_gen_docs.addOutputFileArg("configuration.md"); // argv[2]
     const lua_out = run_gen_docs.addOutputFileArg("agate.lua");       // argv[3]
