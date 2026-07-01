@@ -25,7 +25,7 @@ jobs:
     name: build & publish (aarch64-darwin)
     runs-on: macos-15 # Apple Silicon runner → native arm64 build
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # need main's history to commit the pinned hash back
 
