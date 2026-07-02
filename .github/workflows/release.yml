@@ -23,7 +23,7 @@ concurrency:
 jobs:
   release:
     name: build & publish (aarch64-darwin)
-    runs-on: macos-15 # Apple Silicon runner → native arm64 build
+    runs-on: macos-26 # Apple Silicon runner → native arm64 build
     steps:
       - uses: actions/checkout@v5
         with:
