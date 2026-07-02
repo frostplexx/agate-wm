@@ -48,7 +48,7 @@ jobs:
           shasum -a 256 dist/agate-aarch64-apple-darwin.tar.gz
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/agate-aarch64-apple-darwin.tar.gz
           generate_release_notes: true
