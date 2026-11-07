@@ -367,6 +367,11 @@ fn observeApp(mgr: *Manager, pid: i32) ?Entry {
     // over the one the user switched to. Best-effort (not all apps emit these).
     _ = addAppNotification(observer, app, "AXFocusedWindowChanged");
     _ = addAppNotification(observer, app, "AXMainWindowChanged");
+    // Minimize (Cmd-M / yellow button) and restore. Registered on the app
+    // element, so they fire for every window of the app; the callback element is
+    // the window. Without these a minimized window keeps its (now empty) tile.
+    _ = addAppNotification(observer, app, "AXWindowMiniaturized");
+    _ = addAppNotification(observer, app, "AXWindowDeminiaturized");
     c.CFRunLoopAddSource(c.CFRunLoopGetCurrent(), ax.AXObserverGetRunLoopSource(observer), c.kCFRunLoopDefaultMode);
 
     const entry = Entry{ .observer = observer, .app = app };
@@ -416,7 +421,57 @@ fn axCallback(
         std.mem.eql(u8, name, "AXMainWindowChanged"))
     {
         onFrontWindowChanged(mgr, observer, element);
+    } else if (std.mem.eql(u8, name, "AXWindowMiniaturized")) {
+        onWindowMiniaturized(mgr, element);
+    } else if (std.mem.eql(u8, name, "AXWindowDeminiaturized")) {
+        onWindowDeminiaturized(mgr, observer, element);
     }
+}
+
+/// A window was minimized: drop its leaf so the remaining tiles reflow into the
+/// space it vacated (the same treatment `build_tree` gives windows that are
+/// already minimized at startup — they aren't ordered in, so they're skipped).
+fn onWindowMiniaturized(mgr: *Manager, element: ax.AXUIElementRef) void {
+    const app = mgr.appState;
+    const root = app.tree orelse return;
+    const el = macos.Element.fromRef(element) orelse return;
+    const wid = el.windowId() orelse return;
+    const leaf = tree.findLeaf(root, wid) orelse return;
+    const ws = tree.workspaceOf(leaf) orelse return; // captured before removal
+    if (tree.removeWindow(root, wid)) {
+        std.debug.print("[observer] -window #{d} (minimized)\n", .{wid});
+        tree.flushWorkspace(app, ws);
+    }
+}
+
+/// A minimized window was restored: tile it again on the Space it reappeared
+/// on. Unlike a fresh window, assignment rules are *not* re-run — the user
+/// restored it where they wanted it.
+fn onWindowDeminiaturized(mgr: *Manager, observer: ax.AXObserverRef, element: ax.AXUIElementRef) void {
+    const app = mgr.appState;
+    const root = app.tree orelse return;
+    const el = macos.Element.fromRef(element) orelse return;
+    const wid = el.windowId() orelse return;
+    if (tree.hasWindow(root, wid)) return;
+
+    const pid = el.pid() orelse return;
+    var namebuf: [256]u8 = undefined;
+    const name = macos.workspace.appName(pid, &namebuf) orelse "";
+    if (!shouldTile(el, name)) return;
+
+    const ws = workspaceForWindow(mgr, wid) orelse blk: {
+        const sid = macos.spaces.activeSpace(app.skylight_cid) orelse return;
+        break :blk tree.findWorkspace(root, sid) orelse return;
+    };
+    const owner = app.arena.dupe(u8, name) catch return;
+    const win = window.fromElement(app.arena, el, owner) orelse return;
+    const leaf = tree.addLeaf(app.arena, ws, win) catch {
+        win.deinit();
+        return;
+    };
+    if (window.resolveElement(&leaf.window.?)) |wel| addDestroyNotification(observer, wel, wid);
+    std.debug.print("[observer] +window #{d} {s} (restored)\n", .{ wid, owner });
+    tree.flushWorkspace(app, ws);
 }
 
 /// The app's front window changed. If it's a window we already track, this is an
@@ -643,27 +698,34 @@ fn displayReflushFired(_: c.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) v
     _ = lua_config.applySmallScreenMode(mgr.appState);
     // A display change can add/remove Spaces too — reconcile before tiling.
     _ = tree.reconcileSpaces(mgr.appState);
+
+    // When the *set* of connected displays actually changed (a monitor
+    // plugged/unplugged — not a mere resolution/arrangement nudge), notify
+    // init.lua first so it can re-map named Spaces, then re-apply the assignment
+    // rules. Displays vanishing (undock, or a dock asleep while the Mac sleeps)
+    // pile every window onto the remaining screen, and rules otherwise only fire
+    // on window creation — so a redock would leave e.g. a chat app stuck on the
+    // main display until agate restarted. Follow is suppressed inside.
+    if (notifyMonitorsChanged(mgr.appState)) lua_config.applyRulesToTree(mgr.appState);
+
     // Geometry changed for potentially every display — re-tile them all.
     tree.flushAllVisible(mgr.appState);
     std.debug.print("[observer] display reconfigured → retiled\n", .{});
-
-    // Notify init.lua when the *set* of connected displays actually changed (a
-    // monitor plugged/unplugged), so conditional configs can react — distinct
-    // from a mere resolution/arrangement nudge, which leaves the set hash equal.
-    notifyMonitorsChanged(mgr.appState);
 }
 
 /// Fire `monitors_changed` if the connected-display set differs from the last
-/// settled reconfiguration. The set is summarized by XOR-ing the displays'
-/// stable keys (order-independent, and any add/remove flips it).
-fn notifyMonitorsChanged(app: *state.AppState) void {
+/// settled reconfiguration, returning whether it did. The set is summarized by
+/// XOR-ing the displays' stable keys (order-independent, and any add/remove
+/// flips it).
+fn notifyMonitorsChanged(app: *state.AppState) bool {
     var buf: [macos.monitor.max_monitors]macos.monitor.Monitor = undefined;
     const mons = macos.monitor.enumerate(&buf, app.skylight_cid);
     var hash: u64 = 0;
     for (mons) |m| hash ^= m.key;
-    if (hash == app.monitor_set_hash) return; // same displays — geometry-only change
+    if (hash == app.monitor_set_hash) return false; // same displays — geometry-only change
     app.monitor_set_hash = hash;
     lua_config.emitMonitorsChanged(mons.len);
+    return true;
 }
 
 /// Make an app on the currently active space frontmost (see `onSpaceChanged`).
@@ -1246,7 +1308,18 @@ fn onAppEvent(event: macos.app_watch.AppEvent, pid: i32, context: ?*anyopaque) c
     switch (event) {
         .launched => observeAndAddWindows(mgr, pid, 0),
         .terminated => removeApp(mgr, pid),
-        .activated => onAppActivated(mgr, pid),
+        .activated => {
+            // An app already running as a background/menu-bar (non-regular)
+            // process when we started — e.g. 1Password — was never observed,
+            // and opening its GUI posts no launch notification. Its activation
+            // is the first signal we get, so start observing it here (with the
+            // same retry, since the window can land a beat after activation).
+            // Check the activation-follow time gate *first*: enumerating a slow
+            // app's windows could otherwise eat the gate's window. The follow
+            // itself is deferred, so it still sees the windows added below.
+            onAppActivated(mgr, pid);
+            if (pid != std.c.getpid() and !mgr.entries.contains(pid)) observeAndAddWindows(mgr, pid, 0);
+        },
     }
 }
 

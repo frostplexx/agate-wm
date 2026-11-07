@@ -15,7 +15,18 @@
 //! `CGGeometry.h` (CGRect/CGPoint/CGSize + dictionary conversion). The
 //! window-server query lives in `CGWindow.h`, which transitively drags in
 //! those broken headers, so it is hand-declared in `cg.zig`.
+//!
+//! macOS 26+ SDKs lock down Mach message struct sizes with
+//! `xnu_static_assert_struct_size` (`<mach/port.h>`), applied to bitfield
+//! structs in `<mach/message.h>`. translate-c demotes bitfield structs to
+//! opaque types, so the translated `@sizeOf` asserts fail to compile. Include
+//! `<mach/port.h>` first and redefine the macro as a no-op (its two variants
+//! expand to it) before CoreFoundation pulls in `<mach/message.h>`. Older SDKs
+//! don't define the macro, so this is a harmless no-op there.
 pub const c = @cImport({
+    @cInclude("mach/port.h");
+    @cUndef("xnu_static_assert_struct_size");
+    @cDefine("xnu_static_assert_struct_size(name, expected_size)", "");
     @cInclude("CoreFoundation/CoreFoundation.h");
     @cInclude("CoreGraphics/CGGeometry.h");
 });
