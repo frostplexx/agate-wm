@@ -16,11 +16,11 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "agate";
-  version = "0.1.0-alpha.4";
+  version = "0.1.0-alpha.5";
 
   src = fetchurl {
     url = "https://github.com/frostplexx/agate-wm/releases/download/v${finalAttrs.version}/agate-aarch64-apple-darwin.tar.gz";
-    hash = "sha256-4nKpw0TM9V7TCNT8A6sqZNHjGcoNGJq35fwjT4oVwRY=";
+    hash = "sha256-YHN7s1CHHvwolFu+lE5ZRjsWmalqE+50aGTWGOCfb2o=";
   };
 
   # The tarball is just the binary — nothing to configure or compile.
